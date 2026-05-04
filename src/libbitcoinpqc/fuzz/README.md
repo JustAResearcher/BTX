@@ -7,7 +7,8 @@ This directory contains fuzz testing for the libbitcoinpqc library using
 
 You need a nightly Rust toolchain (cargo-fuzz uses unstable compiler
 flags for libFuzzer integration) and the `cargo-fuzz` subcommand. The
-repository pins specific versions of both so local results match CI:
+repository pins specific versions of both so local results match the
+versioned workflow recipe:
 
 ```
 rustup toolchain install nightly-2026-05-01
@@ -50,37 +51,39 @@ independently.
 To run a specific fuzz target:
 
 ```bash
-cargo +nightly fuzz run keypair_generation
-cargo +nightly fuzz run key_parsing
-cargo +nightly fuzz run signature_parsing
-cargo +nightly fuzz run sign_verify
-cargo +nightly fuzz run cross_algorithm
-cargo +nightly fuzz run determinism
-cargo +nightly fuzz run verify_robustness
-cargo +nightly fuzz run sig_substitution
-cargo +nightly fuzz run structured_parsing
+cargo +nightly-2026-05-01 fuzz run keypair_generation
+cargo +nightly-2026-05-01 fuzz run key_parsing
+cargo +nightly-2026-05-01 fuzz run signature_parsing
+cargo +nightly-2026-05-01 fuzz run sign_verify
+cargo +nightly-2026-05-01 fuzz run cross_algorithm
+cargo +nightly-2026-05-01 fuzz run determinism
+cargo +nightly-2026-05-01 fuzz run verify_robustness
+cargo +nightly-2026-05-01 fuzz run sig_substitution
+cargo +nightly-2026-05-01 fuzz run structured_parsing
 ```
 
-Or run all of them in parallel (one job per CPU core) with `run_all_fuzzers.sh`. The script requires GNU `parallel` and invokes `cargo +nightly fuzz run` for each target.
+Or run all of them in parallel (one job per CPU core) with
+`run_all_fuzzers.sh`. The script requires GNU `parallel` and invokes
+`cargo +nightly-2026-05-01 fuzz run` for each target.
 
 To stop a fuzz run early use `-max_total_time=N` (seconds):
 
 ```bash
-cargo +nightly fuzz run determinism -- -max_total_time=60
+cargo +nightly-2026-05-01 fuzz run determinism -- -max_total_time=60
 ```
 
 Crashes are persisted under `artifacts/<target>/`. To reproduce a saved
 crash:
 
 ```bash
-cargo +nightly fuzz run <target> artifacts/<target>/<crash-file>
+cargo +nightly-2026-05-01 fuzz run <target> artifacts/<target>/<crash-file>
 ```
 
 ## Pre-merge smoke check (`make fuzz-smoke`)
 
 The `Makefile` in this directory wraps the same recipe as
-`.github/workflows/libbitcoinpqc-fuzz.yml`, so the workflow's checks
-can be run locally with one command:
+`.github/workflows/libbitcoinpqc-fuzz.yml`, so the workflow recipe can
+be run locally with one command:
 
 ```
 cd src/libbitcoinpqc/fuzz
@@ -91,24 +94,22 @@ This runs:
 
 1. `cargo +nightly-2026-05-01 fuzz build`
 2. Generates the deterministic `verify_robustness/secp_smoke` seed
-3. `cargo +nightly fuzz run verify_robustness corpus/verify_robustness/secp_smoke`
-4. `cargo +nightly fuzz run <target> -- -max_total_time=1` for each of the
-   eight other targets in turn
+3. `cargo +nightly-2026-05-01 fuzz run verify_robustness corpus/verify_robustness/secp_smoke`
+4. `cargo +nightly-2026-05-01 fuzz run <target> -- -max_total_time=1` for each
+   of the eight other targets in turn
 
-It's the same byte-for-byte recipe the workflow encodes — pinned
+It's the same byte-for-byte recipe the workflow encodes: pinned
 nightly, pinned `cargo-fuzz`, same target order, same seed, same smoke
-time — so a green local run is equivalent to a green CI run.
+time.
 
-**For PRs touching `src/libbitcoinpqc/**`** — please include a pasted
-`make fuzz-smoke` log in the PR description. The workflow YAML is the
-versioned recipe; the local invocation is the enforcement.
+For PRs touching `src/libbitcoinpqc/**`, mention that `make fuzz-smoke`
+passed in the PR description or in a follow-up comment. The workflow
+YAML is the versioned recipe; in this repository the local invocation is
+the normal enforcement path.
 
 ## CI
 
-`.github/workflows/libbitcoinpqc-fuzz.yml` defines a workflow that runs
-the same `make fuzz-smoke` recipe on Linux runners. It is path-filtered
-to trigger on PRs and pushes touching `.github/workflows/libbitcoinpqc-fuzz.yml`
-or `src/libbitcoinpqc/**`. Whether or not GitHub-hosted runners are
-active on this repository at any given time, the workflow YAML stays
-in-tree as a versioned, executable recipe — `make fuzz-smoke` is the
-local equivalent.
+`.github/workflows/libbitcoinpqc-fuzz.yml` captures the same recipe in a
+versioned workflow file. Even when GitHub-hosted runners are disabled,
+the workflow YAML stays in-tree as executable documentation and
+`make fuzz-smoke` remains the local equivalent.

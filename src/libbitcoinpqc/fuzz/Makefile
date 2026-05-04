@@ -2,9 +2,8 @@
 #
 # Mirrors the recipe in .github/workflows/libbitcoinpqc-fuzz.yml so the
 # same checks can be run locally before merging. Targets pin the same
-# Rust nightly and cargo-fuzz version the workflow pins, so a green
-# `make fuzz-smoke` locally is byte-for-byte equivalent to a green CI
-# run.
+# Rust nightly and cargo-fuzz version the workflow pins, so
+# `make fuzz-smoke` locally mirrors the versioned workflow recipe.
 #
 # Usage from this directory:
 #
@@ -49,7 +48,7 @@ help:
 	@echo "  make fuzz-corpus-seed   Generate deterministic verify_robustness seed"
 	@echo "  make fuzz-toolchain     Install pinned nightly + cargo-fuzz"
 	@echo "  make fuzz-deps-linux    Install Linux system deps (apt)"
-	@echo "  make fuzz-clean         Clean fuzz build artifacts and seeded corpus"
+	@echo "  make fuzz-clean         Clean fuzz build artifacts and generated seed"
 	@echo ""
 	@echo "Pinned versions (override via 'make TARGET RUST_NIGHTLY=...' etc.):"
 	@echo "  RUST_NIGHTLY        = $(RUST_NIGHTLY)"
@@ -100,4 +99,5 @@ fuzz-smoke: fuzz-build fuzz-corpus-seed
 
 fuzz-clean:
 	rm -rf target
-	rm -rf $(CORPUS_SEED_DIR)
+	rm -f $(CORPUS_SEED_FILE)
+	rmdir $(CORPUS_SEED_DIR) 2>/dev/null || true
