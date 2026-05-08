@@ -1005,17 +1005,17 @@ BOOST_AUTO_TEST_CASE(metal_env_parse_pool_slots_malformed_inputs_fall_back_to_de
     BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("04", kMax, kDefault).value(), 4U);
 }
 
-BOOST_AUTO_TEST_CASE(metal_env_parse_pool_slots_overflow_falls_back_to_default)
+BOOST_AUTO_TEST_CASE(metal_env_parse_pool_slots_overflow_clamps_to_max)
 {
     using btx::metal::detail::ParsePoolSlotsEnv;
     constexpr uint32_t kMax = 16;
     constexpr uint32_t kDefault = 5;
 
-    // Beyond LONG_MAX — strtol sets errno=ERANGE, parser must reject.
-    // 30 nines is wildly past 64-bit long range on every supported platform.
+    // Beyond LONG_MAX, std::strtol saturates at LONG_MAX. The original inline
+    // parser then clamped that oversized positive value down to max_slots.
     BOOST_CHECK_EQUAL(
         ParsePoolSlotsEnv("999999999999999999999999999999", kMax, kDefault).value(),
-        kDefault);
+        kMax);
 }
 
 BOOST_AUTO_TEST_CASE(metal_env_parse_pool_slots_clamps_default_fallback_into_range)

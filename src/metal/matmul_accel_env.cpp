@@ -74,7 +74,7 @@ std::optional<uint32_t> ParsePoolSlotsEnv(const char* env_value,
     char* end{nullptr};
     errno = 0;
     const long parsed = std::strtol(env_value, &end, 10);
-    const bool parse_failed = (end == env_value) || (*end != '\0') || (errno == ERANGE);
+    const bool parse_failed = (end == env_value) || (*end != '\0');
     if (parse_failed || parsed <= 0) {
         return clamped_default;
     }

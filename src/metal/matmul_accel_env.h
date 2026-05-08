@@ -71,8 +71,9 @@ bool ParseTruthyEnv(const char* env_value, bool default_value);
 //
 // "Strict" means: leading whitespace is permitted (matches std::strtol), but
 // any trailing non-digit character (including whitespace) causes the parse to
-// be rejected. Values that overflow long are also rejected. This matches the
-// behaviour of the original inline parser in matmul_accel.mm.
+// be rejected. Values that overflow long are left to std::strtol's saturated
+// positive result and then clamped to max_slots, matching the original inline
+// parser in matmul_accel.mm.
 std::optional<uint32_t> ParsePoolSlotsEnv(const char* env_value,
                                           uint32_t max_slots,
                                           uint32_t default_fallback);
