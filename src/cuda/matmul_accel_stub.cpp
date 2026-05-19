@@ -7,6 +7,20 @@
 
 namespace btx::cuda {
 
+void ResolveSelectedCudaDevices(CudaTopologyProbe& topology, const std::string&)
+{
+    topology.available = false;
+    topology.reason = "disabled_by_build";
+    topology.selected_devices.clear();
+}
+
+CudaTopologyProbe ProbeCudaTopology()
+{
+    CudaTopologyProbe probe;
+    probe.reason = "disabled_by_build";
+    return probe;
+}
+
 CudaRuntimeProbe ProbeCudaRuntime()
 {
     CudaRuntimeProbe probe;
@@ -73,7 +87,43 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatch(const MatMul
     return result;
 }
 
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatchOnDevice(const MatMulLowRankCompressedWordsBatchRequest&,
+                                                                            MatMulCompressedWordsMode,
+                                                                            int)
+{
+    MatMulCompressedWordsBatchResult result;
+    result.error = "disabled_by_build";
+    return result;
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatchMultiDevice(const MatMulLowRankCompressedWordsBatchRequest&,
+                                                                               MatMulCompressedWordsMode)
+{
+    MatMulCompressedWordsBatchResult result;
+    result.error = "disabled_by_build";
+    return result;
+}
+
 MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatch(
+    const MatMulLowRankCompressedWordsDeviceBatchRequest&,
+    MatMulCompressedWordsMode)
+{
+    MatMulCompressedWordsBatchResult result;
+    result.error = "disabled_by_build";
+    return result;
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchOnDevice(
+    const MatMulLowRankCompressedWordsDeviceBatchRequest&,
+    MatMulCompressedWordsMode,
+    int)
+{
+    MatMulCompressedWordsBatchResult result;
+    result.error = "disabled_by_build";
+    return result;
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchMultiDevice(
     const MatMulLowRankCompressedWordsDeviceBatchRequest&,
     MatMulCompressedWordsMode)
 {

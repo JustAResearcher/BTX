@@ -1012,7 +1012,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_shielded_state_when_commitmen
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_version4_snapshot_settlement_anchor_state, PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    const auto settlement_anchor_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture();
+    const auto settlement_anchor_fixture = BuildChainstateSettlementAnchorReceiptFixture(chainman);
     const fs::path shielded_section_path = m_args.GetDataDirNet() / "shielded_section_v4.dat";
     auto simulate_node_restart = [&]() -> ChainstateManager& {
         ChainstateManager& current_chainman = *Assert(m_node.chainman);
@@ -1052,6 +1052,9 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_version4_snapshot_settlement_a
     };
 
     {
+        const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+        CreateAndProcessBlock({settlement_anchor_fixture.tx}, script_pub_key);
+
         AutoFile outfile{fsbridge::fopen(shielded_section_path, "wb")};
         BOOST_REQUIRE(!outfile.IsNull());
         outfile << settlement_anchor_fixture.settlement_anchor_digest;
@@ -1098,7 +1101,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_chain_equivalent_snapshot_acco
                         PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    const fs::path shielded_section_path = m_args.GetDataDirNet() / "shielded_section_v5_registry.dat";
+    const fs::path shielded_section_path = m_args.GetDataDirNet() / "shielded_section_v6_registry.dat";
     auto simulate_node_restart = [&]() -> ChainstateManager& {
         ChainstateManager& current_chainman = *Assert(m_node.chainman);
 
@@ -1167,7 +1170,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_chain_equivalent_snapshot_acco
     }
 
     node::ShieldedSnapshotSectionHeader header;
-    header.m_snapshot_version = node::SnapshotMetadata::CURRENT_VERSION;
+    header.m_snapshot_version = node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION;
     header.m_account_registry_entry_count = snapshot.entries.size();
 
     {
@@ -1277,7 +1280,7 @@ BOOST_FIXTURE_TEST_CASE(
     }
 
     node::ShieldedSnapshotSectionHeader header;
-    header.m_snapshot_version = node::SnapshotMetadata::CURRENT_VERSION;
+    header.m_snapshot_version = node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION;
     header.m_account_registry_entry_count = snapshot.entries.size();
 
     {
@@ -1549,6 +1552,76 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_persisted_account_registry_sta
         BOOST_REQUIRE(state_commitment.has_value());
         BOOST_CHECK_EQUAL(shielded::registry::ComputeShieldedStateCommitmentHash(*state_commitment),
                           expected_state_commitment_hash);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_persisted_shielded_state_after_failed_snapshot_section_load,
+                        PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
+
+    const fs::path invalid_section_path = m_args.GetDataDirNet() / "invalid_shielded_section.dat";
+    {
+        AutoFile outfile{fsbridge::fopen(invalid_section_path, "wb")};
+        BOOST_REQUIRE(!outfile.IsNull());
+        BOOST_REQUIRE_EQUAL(outfile.fclose(), 0);
+    }
+
+    uint256 expected_tip_hash;
+    int32_t expected_tip_height{-1};
+    size_t expected_tree_size{0};
+    uint256 expected_tree_root;
+    uint64_t expected_nullifier_count{0};
+    CAmount expected_pool_balance{0};
+    uint256 expected_registry_root;
+    size_t expected_registry_size{0};
+    uint256 expected_state_commitment_hash;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        const CBlockIndex* const tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE(chainman.PersistShieldedState(tip));
+
+        expected_tip_hash = tip->GetBlockHash();
+        expected_tip_height = tip->nHeight;
+        expected_tree_size = chainman.GetShieldedMerkleTree().Size();
+        expected_tree_root = chainman.GetShieldedMerkleTree().Root();
+        expected_nullifier_count = chainman.GetShieldedNullifierCount();
+        expected_pool_balance = chainman.GetShieldedPoolBalance();
+        expected_registry_root = chainman.GetShieldedAccountRegistryRoot();
+        expected_registry_size = chainman.GetShieldedAccountRegistryEntryCount();
+        const auto state_commitment = chainman.GetShieldedStateCommitment();
+        BOOST_REQUIRE(state_commitment.has_value());
+        expected_state_commitment_hash =
+            shielded::registry::ComputeShieldedStateCommitmentHash(*state_commitment);
+
+        node::ShieldedSnapshotSectionHeader header;
+        header.m_snapshot_version = node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION;
+        header.m_account_registry_entry_count = 1;
+        AutoFile infile{fsbridge::fopen(invalid_section_path, "rb")};
+        BOOST_REQUIRE(!infile.IsNull());
+        BOOST_CHECK(!chainman.LoadShieldedSnapshotSection(infile, header, tip));
+        BOOST_CHECK(!chainman.HasShieldedState());
+
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_CHECK(chainman.ActiveTip()->GetBlockHash() == expected_tip_hash);
+        BOOST_CHECK_EQUAL(chainman.ActiveTip()->nHeight, expected_tip_height);
+        BOOST_CHECK_EQUAL(chainman.GetShieldedMerkleTree().Size(), expected_tree_size);
+        BOOST_CHECK_EQUAL(chainman.GetShieldedMerkleTree().Root(), expected_tree_root);
+        BOOST_CHECK_EQUAL(chainman.GetShieldedNullifierCount(), expected_nullifier_count);
+        BOOST_CHECK_EQUAL(chainman.GetShieldedPoolBalance(), expected_pool_balance);
+        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryRoot(), expected_registry_root);
+        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryEntryCount(), expected_registry_size);
+        const auto restored_state_commitment = chainman.GetShieldedStateCommitment();
+        BOOST_REQUIRE(restored_state_commitment.has_value());
+        BOOST_CHECK_EQUAL(shielded::registry::ComputeShieldedStateCommitmentHash(*restored_state_commitment),
+                          expected_state_commitment_hash);
+        BOOST_CHECK(!chainman.ReadShieldedMutationMarker().has_value());
     }
 }
 
@@ -3182,6 +3255,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_from_chain_when_persisted_bri
         BOOST_CHECK(!chainman.ReadShieldedMutationMarker().has_value());
         BOOST_REQUIRE(chainman.InsertShieldedSettlementAnchorsForTest({bogus_settlement_anchor}));
         BOOST_REQUIRE(chainman.InsertShieldedNettingManifestsForTest({bogus_manifest_state}));
+        BOOST_REQUIRE(chainman.WriteSnapshotBridgeMetadataHintForTest(true));
         BOOST_CHECK(chainman.IsShieldedSettlementAnchorValid(bogus_settlement_anchor));
         BOOST_CHECK(chainman.IsShieldedNettingManifestValid(bogus_manifest_state.manifest_id));
     }

@@ -27,8 +27,8 @@ Example:
 ```bash
 python3 scripts/release/cut_release.py \
   --repo btxchain/btx \
-  --tag v0.29.7 \
-  --release-name "BTX 0.29.7" \
+  --tag v0.30.0 \
+  --release-name "BTX 0.30.0" \
   --build-with-guix \
   --generate-snapshot \
   --rollback 60776 \
@@ -56,15 +56,17 @@ Use `scripts/release/collect_release_assets.py` to stage a publishable bundle:
 ```bash
 python3 scripts/release/collect_release_assets.py \
   --output-dir /tmp/btx-release \
-  --source /path/to/guix-build-29.2/output/linux-x86_64 \
-  --source /path/to/guix-build-29.2/output/linux-arm64 \
-  --source /path/to/guix-build-29.2/output/windows-x86_64 \
-  --source /path/to/guix-build-29.2/output/darwin-x86_64 \
-  --source /path/to/guix-build-29.2/output/darwin-arm64 \
+  --source /path/to/guix-build-29.2/output/x86_64-linux-gnu \
+  --source /path/to/guix-build-29.2/output/x86_64-linux-gnu-cuda12 \
+  --source /path/to/guix-build-29.2/output/x86_64-linux-gnu-cuda13 \
+  --source /path/to/guix-build-29.2/output/aarch64-linux-gnu \
+  --source /path/to/guix-build-29.2/output/x86_64-w64-mingw32 \
+  --source /path/to/guix-build-29.2/output/x86_64-apple-darwin \
+  --source /path/to/guix-build-29.2/output/arm64-apple-darwin \
   --snapshot /tmp/snapshot.dat \
   --snapshot-manifest /tmp/snapshot.manifest.json \
-  --release-tag v0.29.7 \
-  --release-name "BTX 0.29.7" \
+  --release-tag v0.30.0 \
+  --release-name "BTX 0.30.0" \
   --sign-with release-signing-key
 ```
 
@@ -74,8 +76,11 @@ requested, emits `btx-release-manifest.json`, and writes `SHA256SUMS` over the
 final bundle. Use `--checksum-signature /path/to/SHA256SUMS.asc` if the
 signature is produced externally instead of by the collector itself. By
 default, the collector now also requires the full primary platform matrix
-(`linux-x86_64`, `linux-arm64`, `windows-x86_64`, `macos-x86_64`,
-`macos-arm64`) before it will stage a publishable bundle.
+(`linux-x86_64`, `linux-x86_64-cuda12`, `linux-x86_64-cuda13`,
+`linux-arm64`, `windows-x86_64`, `macos-x86_64`, `macos-arm64`) before it will
+stage a publishable bundle. See
+[`doc/linux-release-builds.md`](linux-release-builds.md) for the Linux CPU/CUDA
+hardware and driver matrix.
 
 If you also pass `--attestations-dir /path/to/guix.sigs/<version>`, the
 collector now stages matching per-signer Guix attestation files as
@@ -85,11 +90,12 @@ manifest records those assets in `attestation_assets`, so release provenance is
 published alongside the binaries without filename collisions across signers.
 
 The generated release manifest now includes a `platform_assets` map for the
-primary Linux/macOS/Windows archives. `contrib/faststart/btx-agent-setup.py`
-uses that map to choose the right binary archive automatically for a download-
-and-go install. It also includes `attestation_assets` when signer attestations
-are staged, which is useful for operator-facing provenance workflows even
-though the installer itself ignores those assets.
+primary Linux CPU, Linux CUDA, macOS, and Windows archives.
+`contrib/faststart/btx-agent-setup.py` uses that map to choose the right binary
+archive automatically for a download-and-go install. It also includes
+`attestation_assets` when signer attestations are staged, which is useful for
+operator-facing provenance workflows even though the installer itself ignores
+those assets.
 
 ## Publish assets
 
@@ -99,7 +105,7 @@ release:
 ```bash
 python3 scripts/release/publish_github_release.py \
   --repo btxchain/btx \
-  --tag v0.29.7 \
+  --tag v0.30.0 \
   --bundle-dir /tmp/btx-release \
   --token-file /path/to/github.key \
   --publish
@@ -120,7 +126,7 @@ bundle contract:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.7 \
+  --release-tag v0.30.0 \
   --preset service \
   --datadir /tmp/btx-service-smoke \
   --json
@@ -163,8 +169,8 @@ When you want to ship native-built CLI archives without Guix attestations, use
 ```bash
 python3 scripts/release/cut_local_release.py \
   --repo btxchain/btx \
-  --tag v0.29.7 \
-  --release-name "BTX 0.29.7" \
+  --tag v0.30.0 \
+  --release-name "BTX 0.30.0" \
   --bundle-dir /tmp/btx-native-cli-bundle \
   --platform-spec "macos-arm64;/path/to/macos/btxd;/path/to/macos/btx-cli" \
   --platform-spec "linux-arm64;/path/to/linux/btxd;/path/to/linux/btx-cli" \

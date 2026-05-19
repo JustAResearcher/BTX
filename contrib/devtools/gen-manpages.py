@@ -14,7 +14,7 @@ BINARIES = [
 'bin/btx-tx',
 'bin/btx-wallet',
 'bin/btx-util',
-'bin/bitcoin-qt',
+'bin/btx-qt',
 ]
 
 parser = argparse.ArgumentParser(

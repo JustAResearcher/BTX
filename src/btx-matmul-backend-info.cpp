@@ -24,6 +24,35 @@ void PrintUsage(std::ostream& out)
     out << "Usage: btx-matmul-backend-info [--backend <cpu|metal|mlx|cuda>]" << std::endl;
 }
 
+UniValue CudaDeviceInfoToJson(const btx::cuda::CudaDeviceInfo& device)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("device_index", device.device_index);
+    obj.pushKV("supported", device.supported);
+    obj.pushKV("reason", device.reason);
+    obj.pushKV("device_name", device.device_name);
+    obj.pushKV("compute_capability_major", device.compute_capability_major);
+    obj.pushKV("compute_capability_minor", device.compute_capability_minor);
+    obj.pushKV("global_memory_bytes", static_cast<uint64_t>(device.global_memory_bytes));
+    obj.pushKV("multiprocessor_count", device.multiprocessor_count);
+    obj.pushKV("clock_rate_khz", device.clock_rate_khz);
+    obj.pushKV("memory_clock_rate_khz", device.memory_clock_rate_khz);
+    obj.pushKV("memory_bus_width_bits", device.memory_bus_width_bits);
+    obj.pushKV("pci_domain_id", device.pci_domain_id);
+    obj.pushKV("pci_bus_id", device.pci_bus_id);
+    obj.pushKV("pci_device_id", device.pci_device_id);
+    return obj;
+}
+
+UniValue CudaDeviceListToJson(const std::vector<btx::cuda::CudaDeviceInfo>& devices)
+{
+    UniValue array(UniValue::VARR);
+    for (const auto& device : devices) {
+        array.push_back(CudaDeviceInfoToJson(device));
+    }
+    return array;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -160,6 +189,7 @@ int main(int argc, char* argv[])
     metal_runtime.pushKV("oracle_input_generation", std::move(oracle_obj));
     output.pushKV("metal_runtime", std::move(metal_runtime));
 
+    const auto cuda_topology = btx::cuda::ProbeCudaTopology();
     const auto cuda_runtime = btx::cuda::ProbeMatMulDigestAcceleration();
     const auto cuda_pool_stats = btx::cuda::ProbeMatMulBufferPool();
     const auto cuda_dispatch_config = btx::cuda::ProbeMatMulDispatchConfig();
@@ -169,6 +199,7 @@ int main(int argc, char* argv[])
     UniValue cuda_obj(UniValue::VOBJ);
     cuda_obj.pushKV("available", cuda_runtime.available);
     cuda_obj.pushKV("reason", cuda_runtime.reason);
+    cuda_obj.pushKV("device_index", cuda_topology.selected_devices.empty() ? -1 : cuda_topology.selected_devices.front().device_index);
     cuda_obj.pushKV("device_name", cuda_runtime.device_name);
     cuda_obj.pushKV("compute_capability_major", cuda_runtime.compute_capability_major);
     cuda_obj.pushKV("compute_capability_minor", cuda_runtime.compute_capability_minor);
@@ -176,6 +207,10 @@ int main(int argc, char* argv[])
     cuda_obj.pushKV("multiprocessor_count", cuda_runtime.multiprocessor_count);
     cuda_obj.pushKV("driver_api_version", cuda_runtime.driver_api_version);
     cuda_obj.pushKV("runtime_version", cuda_runtime.runtime_version);
+    cuda_obj.pushKV("visible_device_count", static_cast<uint64_t>(cuda_topology.visible_devices.size()));
+    cuda_obj.pushKV("selected_device_count", static_cast<uint64_t>(cuda_topology.selected_devices.size()));
+    cuda_obj.pushKV("visible_devices", CudaDeviceListToJson(cuda_topology.visible_devices));
+    cuda_obj.pushKV("selected_devices", CudaDeviceListToJson(cuda_topology.selected_devices));
 
     UniValue cuda_pool_obj(UniValue::VOBJ);
     cuda_pool_obj.pushKV("available", cuda_pool_stats.available);

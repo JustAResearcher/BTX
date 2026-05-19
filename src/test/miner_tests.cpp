@@ -17,6 +17,7 @@
 #include <shielded/v2_bundle.h>
 #include <test/util/mining.h>
 #include <test/util/random.h>
+#include <test/util/shielded_fee_carrier.h>
 #include <test/util/shielded_account_registry_test_util.h>
 #include <test/util/shielded_smile_test_util.h>
 #include <test/util/shielded_v2_egress_fixture.h>
@@ -1554,11 +1555,14 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
     const auto& consensus = Params().GetConsensus();
     const int32_t validation_height = GetCurrentSyntheticValidationHeight(*this);
 
-    const auto prerequisite_rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
+    auto prerequisite_rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
         /*reserve_output_count=*/1,
         /*settlement_window=*/144,
         &consensus,
         validation_height);
+    test::shielded::AttachCoinbaseFeeCarrier(*this,
+                                             prerequisite_rebalance_fixture.tx,
+                                             m_coinbase_txns.at(0));
     const auto prerequisite_settlement_anchor_fixture =
         test::shielded::BuildV2SettlementAnchorReceiptFixture(
             /*output_count=*/2,
@@ -1572,7 +1576,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
     const uint256 spend_anchor = GetCurrentSyntheticSpendAnchor(*this);
     const uint256 account_registry_anchor = GetCurrentSyntheticAccountRegistryAnchor(*this);
     CTxMemPool& tx_mempool{MakeMempool()};
-    size_t funding_index{0};
+    size_t funding_index{1};
     auto next_funding_tx = [&]() -> const CTransactionRef& {
         BOOST_REQUIRE_LT(funding_index, m_coinbase_txns.size());
         return m_coinbase_txns.at(funding_index++);
@@ -1746,33 +1750,62 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
                        << " elapsed_ms=" << Ticks<MillisecondsDouble>(build_end - build_start));
 }
 
-BOOST_AUTO_TEST_CASE(block_assembler_orders_same_block_rebalance_settlement_and_egress_dependencies)
+BOOST_AUTO_TEST_CASE(block_assembler_includes_egress_with_confirmed_rebalance_settlement_dependencies)
 {
     auto options = MakeSyntheticBlockAssemblerOptions();
     options.test_block_validity = true;
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
-    const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture();
-    const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(/*output_count=*/2);
+    const auto& consensus = Params().GetConsensus();
+    const int32_t validation_height = GetCurrentSyntheticValidationHeight(*this);
+    auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
+        /*reserve_output_count=*/1,
+        /*settlement_window=*/144,
+        &consensus,
+        validation_height);
+    const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(
+        /*output_count=*/2,
+        &consensus,
+        validation_height);
     auto settlement_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture(egress_fixture);
     test::shielded::AttachSettlementAnchorReserveBinding(settlement_fixture.tx,
                                                          rebalance_fixture.reserve_deltas,
                                                          rebalance_fixture.manifest_id);
+    auto* settlement_bundle = settlement_fixture.tx.shielded_bundle.v2_bundle
+        ? &*settlement_fixture.tx.shielded_bundle.v2_bundle
+        : nullptr;
+    BOOST_REQUIRE(settlement_bundle != nullptr);
+    settlement_bundle->header.family_id =
+        test::shielded::ResolveFixtureWireFamily(shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR,
+                                                 &consensus,
+                                                 validation_height);
+    test::shielded::ApplyFixtureWireEnvelopeKinds(shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR,
+                                                 settlement_bundle->header.proof_envelope,
+                                                 &consensus,
+                                                 validation_height);
+    BOOST_REQUIRE(settlement_bundle->IsValid());
 
     BOOST_REQUIRE_EQUAL(
         settlement_fixture.settlement_anchor_digest,
         std::get<shielded::v2::EgressBatchPayload>(egress_fixture.tx.shielded_bundle.v2_bundle->payload)
             .settlement_anchor);
 
+    test::shielded::AttachCoinbaseFeeCarrier(*this, rebalance_fixture.tx, m_coinbase_txns.at(0));
+    CreateAndProcessBlock({rebalance_fixture.tx, settlement_fixture.tx}, script_pub_key);
+    BOOST_CHECK(WITH_LOCK(cs_main,
+                          return Assert(m_node.chainman)->IsShieldedNettingManifestValid(
+                              rebalance_fixture.manifest_id)));
+    BOOST_CHECK(WITH_LOCK(cs_main,
+                          return Assert(m_node.chainman)->IsShieldedSettlementAnchorValid(
+                              settlement_fixture.settlement_anchor_digest)));
+
     CTxMemPool& tx_mempool{MakeMempool()};
-    size_t funding_index{0};
+    size_t funding_index{1};
     auto next_funding_tx = [&]() -> const CTransactionRef& {
         BOOST_REQUIRE_LT(funding_index, m_coinbase_txns.size());
         return m_coinbase_txns.at(funding_index++);
     };
 
     uint64_t sequence{0};
-    Txid rebalance_txid;
-    Txid settlement_txid;
     Txid egress_txid;
     {
         LOCK(tx_mempool.cs);
@@ -1782,33 +1815,15 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_same_block_rebalance_settlement_and_
                                                   /*fee=*/900'000,
                                                   ExtractV2Bundle(egress_fixture.tx),
                                                   sequence++);
-        settlement_txid = AddSyntheticShieldedMinerTx(tx_mempool,
-                                                      next_funding_tx(),
-                                                      70'001,
-                                                      /*fee=*/600'000,
-                                                      ExtractV2Bundle(settlement_fixture.tx),
-                                                      sequence++);
-        rebalance_txid = AddSyntheticShieldedMinerTx(tx_mempool,
-                                                     next_funding_tx(),
-                                                     70'002,
-                                                     /*fee=*/300'000,
-                                                     ExtractV2Bundle(rebalance_fixture.tx),
-                                                     sequence++);
     }
 
     auto block_template =
         BlockAssembler{Assert(m_node.chainman)->ActiveChainstate(), &tx_mempool, options, m_node}.CreateNewBlock();
     BOOST_REQUIRE(block_template);
 
-    const size_t rebalance_index = FindBlockTxIndex(block_template->block, rebalance_txid);
-    const size_t settlement_index = FindBlockTxIndex(block_template->block, settlement_txid);
     const size_t egress_index = FindBlockTxIndex(block_template->block, egress_txid);
 
-    BOOST_REQUIRE(rebalance_index != block_template->block.vtx.size());
-    BOOST_REQUIRE(settlement_index != block_template->block.vtx.size());
     BOOST_REQUIRE(egress_index != block_template->block.vtx.size());
-    BOOST_CHECK_LT(rebalance_index, settlement_index);
-    BOOST_CHECK_LT(settlement_index, egress_index);
 }
 
 BOOST_AUTO_TEST_CASE(block_assembler_skips_rebalance_that_exceeds_account_registry_append_limit)

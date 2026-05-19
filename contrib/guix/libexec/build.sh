@@ -30,6 +30,7 @@ Required environment variables as seen inside the container:
     DIST_ARCHIVE_BASE: ${DIST_ARCHIVE_BASE:?not set}
     DISTNAME: ${DISTNAME:?not set}
     HOST: ${HOST:?not set}
+    GUIX_LINUX_FLAVOR: ${GUIX_LINUX_FLAVOR:=cpu}
     SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:?not set}
     JOBS: ${JOBS:?not set}
     DISTSRC: ${DISTSRC:?not set}
@@ -140,6 +141,36 @@ export GUIX_LD_WRAPPER_DISABLE_RPATH=yes
 [ -e /usr/bin/file ] || ln -s --no-dereference "$(command -v file)" /usr/bin/file
 [ -e /usr/bin/env ]  || ln -s --no-dereference "$(command -v env)"  /usr/bin/env
 
+ensure_cuda_tool_runtime_environment() {
+    case "$HOST:$GUIX_LINUX_FLAVOR" in
+        x86_64-linux-gnu:cuda12|x86_64-linux-gnu:cuda13) ;;
+        *) return 0 ;;
+    esac
+
+    local native_loader fhs_loader
+    native_loader="${NATIVE_GCC}/lib/ld-linux-x86-64.so.2"
+    fhs_loader="/lib64/ld-linux-x86-64.so.2"
+
+    if [ ! -x "$native_loader" ]; then
+        echo "CUDA Guix build requires a native x86_64 dynamic loader at ${native_loader}" >&2
+        exit 1
+    fi
+
+    [ -e /lib64 ] || mkdir -p /lib64
+    if [ -L "$fhs_loader" ] && [ ! -e "$fhs_loader" ]; then
+        rm "$fhs_loader"
+    fi
+    if [ ! -e "$fhs_loader" ]; then
+        ln -s --no-dereference "$native_loader" "$fhs_loader"
+    fi
+    if [ ! -x "$fhs_loader" ]; then
+        echo "CUDA Guix build could not create usable dynamic loader path: ${fhs_loader}" >&2
+        exit 1
+    fi
+}
+
+ensure_cuda_tool_runtime_environment
+
 # Determine the correct value for -Wl,--dynamic-linker for the current $HOST
 case "$HOST" in
     *linux*)
@@ -192,12 +223,24 @@ esac
 ###########################
 
 GIT_ARCHIVE="${DIST_ARCHIVE_BASE}/${DISTNAME}.tar.gz"
+GIT_ARCHIVE_HEAD="${DIST_ARCHIVE_BASE}/${DISTNAME}.githead"
+CURRENT_HEAD="$(git rev-parse HEAD)"
 
-# Create the source tarball if not already there
-if [ ! -e "$GIT_ARCHIVE" ]; then
+# Create the source tarball if needed. This uses `git archive HEAD`, so
+# source-tree changes must be committed before a Guix rebuild can pick them up.
+# When rerunning a build under the same VERSION label from a different commit,
+# invalidate the cached archive automatically so the extracted distsrc matches
+# the current HEAD.
+cached_archive_head=""
+if [ -e "$GIT_ARCHIVE_HEAD" ]; then
+    cached_archive_head="$(cat "$GIT_ARCHIVE_HEAD")"
+fi
+if [ ! -e "$GIT_ARCHIVE" ] || [ ! -e "$GIT_ARCHIVE_HEAD" ] || [ "$cached_archive_head" != "$CURRENT_HEAD" ]; then
     mkdir -p "$(dirname "$GIT_ARCHIVE")"
+    rm -f "$GIT_ARCHIVE" "$GIT_ARCHIVE_HEAD"
     REFERENCE_DATETIME="@${SOURCE_DATE_EPOCH}" \
     contrib/guix/libexec/make_release_tarball.sh "${GIT_ARCHIVE}" "${DISTNAME}"
+    printf '%s\n' "$CURRENT_HEAD" > "$GIT_ARCHIVE_HEAD"
 fi
 
 mkdir -p "$OUTDIR"
@@ -207,8 +250,206 @@ mkdir -p "$OUTDIR"
 ###########################
 
 # CONFIGFLAGS
-CONFIGFLAGS="-DREDUCE_EXPORTS=ON -DBUILD_BENCH=OFF -DBUILD_GUI_TESTS=OFF -DBUILD_FUZZ_BINARY=OFF"
-CONFIGFLAGS="$CONFIGFLAGS -DCMAKE_SKIP_BUILD_RPATH=TRUE"  # check-symbols is fussy about rpath and we don't need it
+BASE_CONFIGFLAGS="-DREDUCE_EXPORTS=ON -DBUILD_BENCH=OFF -DBUILD_GUI_TESTS=OFF -DBUILD_FUZZ_BINARY=OFF"
+BASE_CONFIGFLAGS="$BASE_CONFIGFLAGS -DCMAKE_SKIP_BUILD_RPATH=TRUE"  # check-symbols is fussy about rpath and we don't need it
+
+make_cuda_host_compiler_wrapper() {
+    local host_compiler wrapper_dir wrapper
+
+    host_compiler="$1"
+    wrapper_dir="${DISTSRC}/.guix-cuda-host-tools"
+    wrapper="${wrapper_dir}/${HOST}-g++"
+    mkdir -p "$wrapper_dir"
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -e'
+        printf 'export CROSS_C_INCLUDE_PATH=%q\n' "$CROSS_C_INCLUDE_PATH"
+        printf 'export CROSS_CPLUS_INCLUDE_PATH=%q\n' "$CROSS_CPLUS_INCLUDE_PATH"
+        printf 'export CROSS_LIBRARY_PATH=%q\n' "$CROSS_LIBRARY_PATH"
+        printf 'export GUIX_LD_WRAPPER_DISABLE_RPATH=%q\n' "$GUIX_LD_WRAPPER_DISABLE_RPATH"
+        printf 'exec %q "$@"\n' "$host_compiler"
+    } > "$wrapper"
+    chmod +x "$wrapper"
+    echo "$wrapper"
+}
+
+set_cuda_config_for_flavor() {
+    local cuda_root cuda_host_compiler
+
+    CUDA_COMPILER_FOR_CMAKE=""
+    CUDA_HOST_COMPILER_FOR_CMAKE=""
+    CUDA_TOOLKIT_ROOT_FOR_CMAKE=""
+    CUDA_TOOL_LIBRARY_PATH=""
+    CUDA_LIBRARY_CONFIGFLAGS=""
+    CUDA_SMOKE_TEST_ARCH=""
+    CUDA_CONFIGFLAGS=""
+    CUDA_CMAKE_ENV=()
+    CUDA_SYMBOL_CHECK_ENV=()
+
+    case "$HOST:$GUIX_LINUX_FLAVOR" in
+        *:default|*:cpu)
+            CUDA_CONFIGFLAGS="-DBTX_ENABLE_CUDA_EXPERIMENTAL=OFF"
+            ;;
+        x86_64-linux-gnu:cuda12)
+            cuda_root="$(store_path cuda-toolkit-12.9-btx)"
+            cuda_host_compiler="$(command -v x86_64-linux-gnu-g++ || true)"
+            if [ -z "$cuda_root" ] || [ ! -x "$cuda_root/bin/nvcc" ]; then
+                echo "CUDA 12 Guix toolkit input is missing nvcc" >&2
+                exit 1
+            fi
+            if [ -z "$cuda_host_compiler" ]; then
+                echo "CUDA 12 Guix build requires x86_64-linux-gnu-g++ in PATH" >&2
+                exit 1
+            fi
+            cuda_host_compiler="$(make_cuda_host_compiler_wrapper "$cuda_host_compiler")"
+            CUDA_COMPILER_FOR_CMAKE="$cuda_root/bin/nvcc"
+            CUDA_HOST_COMPILER_FOR_CMAKE="$cuda_host_compiler"
+            CUDA_TOOLKIT_ROOT_FOR_CMAKE="$cuda_root"
+            CUDA_TOOL_LIBRARY_PATH="$CUDA_TOOLKIT_ROOT_FOR_CMAKE/lib64:$CUDA_TOOLKIT_ROOT_FOR_CMAKE/lib:$CUDA_TOOLKIT_ROOT_FOR_CMAKE/nvvm/lib64:$NATIVE_GCC/lib"
+            CUDA_LIBRARY_CONFIGFLAGS="-DCUDA_CUDART=$cuda_root/lib64/libcudart.so -DCUDA_cudart_static_LIBRARY=$cuda_root/lib64/libcudart_static.a -DCUDAToolkit_rt_LIBRARY=$CROSS_GLIBC/lib/librt.so"
+            CUDA_SMOKE_TEST_ARCH="80"
+            CUDA_CMAKE_ENV=(
+                "CUDACXX=$CUDA_COMPILER_FOR_CMAKE"
+                "CUDAHOSTCXX=$CUDA_HOST_COMPILER_FOR_CMAKE"
+                "CUDA_PATH=$CUDA_TOOLKIT_ROOT_FOR_CMAKE"
+                "CUDAToolkit_ROOT=$CUDA_TOOLKIT_ROOT_FOR_CMAKE"
+                "LD_LIBRARY_PATH=$CUDA_TOOL_LIBRARY_PATH"
+            )
+            CUDA_SYMBOL_CHECK_ENV=("BTX_SYMBOL_CHECK_ALLOW_LIBRT=1")
+            export LD_LIBRARY_PATH="$CUDA_TOOL_LIBRARY_PATH"
+            CUDA_CONFIGFLAGS="-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=80-real;86-real;89-real;90-real;100-real;101-real;103-real;120-real;121-real;80-virtual;100-virtual;120-virtual -DCMAKE_CUDA_ARCHITECTURES=80-real;86-real;89-real;90-real;100-real;101-real;103-real;120-real;121-real;80-virtual;100-virtual;120-virtual -DCUDAToolkit_ROOT=$cuda_root -DCMAKE_CUDA_COMPILER=$CUDA_COMPILER_FOR_CMAKE -DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_COMPILER_FOR_CMAKE $CUDA_LIBRARY_CONFIGFLAGS -DCMAKE_CUDA_RUNTIME_LIBRARY=Static -DBTX_CUDA_RUNTIME_LIBRARY=Static"
+            ;;
+        x86_64-linux-gnu:cuda13)
+            cuda_root="$(store_path cuda-toolkit-13-btx)"
+            cuda_host_compiler="$(command -v x86_64-linux-gnu-g++ || true)"
+            if [ -z "$cuda_root" ] || [ ! -x "$cuda_root/bin/nvcc" ]; then
+                echo "CUDA 13 Guix toolkit input is missing nvcc" >&2
+                exit 1
+            fi
+            if [ -z "$cuda_host_compiler" ]; then
+                echo "CUDA 13 Guix build requires x86_64-linux-gnu-g++ in PATH" >&2
+                exit 1
+            fi
+            cuda_host_compiler="$(make_cuda_host_compiler_wrapper "$cuda_host_compiler")"
+            CUDA_COMPILER_FOR_CMAKE="$cuda_root/bin/nvcc"
+            CUDA_HOST_COMPILER_FOR_CMAKE="$cuda_host_compiler"
+            CUDA_TOOLKIT_ROOT_FOR_CMAKE="$cuda_root"
+            CUDA_TOOL_LIBRARY_PATH="$CUDA_TOOLKIT_ROOT_FOR_CMAKE/lib64:$CUDA_TOOLKIT_ROOT_FOR_CMAKE/lib:$CUDA_TOOLKIT_ROOT_FOR_CMAKE/nvvm/lib64:$NATIVE_GCC/lib"
+            CUDA_LIBRARY_CONFIGFLAGS="-DCUDA_CUDART=$cuda_root/lib64/libcudart.so -DCUDA_cudart_static_LIBRARY=$cuda_root/lib64/libcudart_static.a -DCUDAToolkit_rt_LIBRARY=$CROSS_GLIBC/lib/librt.so"
+            CUDA_SMOKE_TEST_ARCH="100"
+            CUDA_CMAKE_ENV=(
+                "CUDACXX=$CUDA_COMPILER_FOR_CMAKE"
+                "CUDAHOSTCXX=$CUDA_HOST_COMPILER_FOR_CMAKE"
+                "CUDA_PATH=$CUDA_TOOLKIT_ROOT_FOR_CMAKE"
+                "CUDAToolkit_ROOT=$CUDA_TOOLKIT_ROOT_FOR_CMAKE"
+                "LD_LIBRARY_PATH=$CUDA_TOOL_LIBRARY_PATH"
+            )
+            CUDA_SYMBOL_CHECK_ENV=("BTX_SYMBOL_CHECK_ALLOW_LIBRT=1")
+            export LD_LIBRARY_PATH="$CUDA_TOOL_LIBRARY_PATH"
+            CUDA_CONFIGFLAGS="-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=100-real;103-real;110-real;120-real;121-real;100-virtual;120-virtual -DCMAKE_CUDA_ARCHITECTURES=100-real;103-real;110-real;120-real;121-real;100-virtual;120-virtual -DCUDAToolkit_ROOT=$cuda_root -DCMAKE_CUDA_COMPILER=$CUDA_COMPILER_FOR_CMAKE -DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_COMPILER_FOR_CMAKE $CUDA_LIBRARY_CONFIGFLAGS -DCMAKE_CUDA_RUNTIME_LIBRARY=Static -DBTX_CUDA_RUNTIME_LIBRARY=Static"
+            ;;
+        *)
+            echo "Unsupported HOST/GUIX_LINUX_FLAVOR combination: $HOST/$GUIX_LINUX_FLAVOR" >&2
+            exit 1
+            ;;
+    esac
+}
+
+run_cuda_compiler_smoke_test() {
+    case "$HOST:$GUIX_LINUX_FLAVOR" in
+        x86_64-linux-gnu:cuda12|x86_64-linux-gnu:cuda13) ;;
+        *) return 0 ;;
+    esac
+
+    local probe_dir probe_src probe_bin
+    probe_dir="${DISTSRC}/.guix-cuda-host-tools/probe"
+    probe_src="${probe_dir}/cuda-link-probe.cu"
+    probe_bin="${probe_dir}/cuda-link-probe"
+    mkdir -p "$probe_dir"
+    cat > "$probe_src" <<'EOF'
+#include <cuda_runtime.h>
+
+__global__ void btx_cuda_link_probe_kernel() {}
+
+int main()
+{
+    btx_cuda_link_probe_kernel<<<1, 1>>>();
+    return 0;
+}
+EOF
+
+    echo "INFO: CUDA compiler: ${CUDA_COMPILER_FOR_CMAKE}"
+    echo "INFO: CUDA host compiler wrapper: ${CUDA_HOST_COMPILER_FOR_CMAKE}"
+    if ! "${CUDA_COMPILER_FOR_CMAKE}" \
+            -ccbin "${CUDA_HOST_COMPILER_FOR_CMAKE}" \
+            -arch="sm_${CUDA_SMOKE_TEST_ARCH}" \
+            -cudart static \
+            "$probe_src" \
+            -o "$probe_bin"; then
+        echo "CUDA nvcc smoke test failed; retrying with verbose compiler output" >&2
+        "${CUDA_COMPILER_FOR_CMAKE}" \
+            -ccbin "${CUDA_HOST_COMPILER_FOR_CMAKE}" \
+            -arch="sm_${CUDA_SMOKE_TEST_ARCH}" \
+            -cudart static \
+            -v \
+            "$probe_src" \
+            -o "$probe_bin" >&2
+        exit 1
+    fi
+}
+
+linux_artifact_suffix_for_flavor() {
+    case "$HOST:$GUIX_LINUX_FLAVOR" in
+        x86_64-linux-gnu:cuda12) echo "-cuda12" ;;
+        x86_64-linux-gnu:cuda13) echo "-cuda13" ;;
+    esac
+}
+
+assert_no_dynamic_cuda_runtime_dependencies() {
+    case "$HOST:$GUIX_LINUX_FLAVOR" in
+        x86_64-linux-gnu:cuda12|x86_64-linux-gnu:cuda13) ;;
+        *) return 0 ;;
+    esac
+
+    local readelf_bin
+    readelf_bin="$(command -v readelf || true)"
+    if [ -z "$readelf_bin" ]; then
+        echo "CUDA release dependency check requires readelf in PATH" >&2
+        exit 1
+    fi
+
+    local failed=0
+    local binary
+    local dynamic_section
+    local needed
+    while IFS= read -r -d '' binary; do
+        if ! "$readelf_bin" -h "$binary" >/dev/null 2>&1; then
+            continue
+        fi
+        dynamic_section="$("$readelf_bin" -d "$binary" 2>/dev/null || true)"
+        needed="$(printf '%s\n' "$dynamic_section" | sed -n 's/.*Shared library: \[\(.*\)\].*/\1/p')"
+        if printf '%s\n' "$needed" | grep --extended-regexp '^lib(cudart|cuda)\.so' >/dev/null; then
+            echo "CUDA release binary has a dynamic NVIDIA runtime dependency: $binary" >&2
+            printf '%s\n' "$needed" | grep --extended-regexp '^lib(cudart|cuda)\.so' >&2
+            failed=1
+        fi
+        if printf '%s\n' "$dynamic_section" | grep --extended-regexp '\((RPATH|RUNPATH)\)' >/dev/null; then
+            echo "CUDA release binary has RPATH/RUNPATH entries: $binary" >&2
+            printf '%s\n' "$dynamic_section" | grep --extended-regexp '\((RPATH|RUNPATH)\)' >&2
+            failed=1
+        fi
+    done < <(find "${DISTNAME}" -type f -perm /111 -print0)
+
+    if [ "$failed" -ne 0 ]; then
+        exit 1
+    fi
+}
+
+CONSENSUS_CONFIGFLAGS="$BASE_CONFIGFLAGS -DBTX_ENABLE_CUDA_EXPERIMENTAL=OFF"
+mkdir -p "$DISTSRC"
+set_cuda_config_for_flavor
+MAIN_CONFIGFLAGS="$BASE_CONFIGFLAGS $CUDA_CONFIGFLAGS"
+LINUX_ARTIFACT_SUFFIX="$(linux_artifact_suffix_for_flavor)"
 
 # CFLAGS
 HOST_CFLAGS="-O2 -g"
@@ -231,12 +472,12 @@ case "$HOST" in
     *mingw*)  HOST_LDFLAGS="-Wl,--no-insert-timestamp" ;;
 esac
 
-mkdir -p "$DISTSRC"
 (
     cd "$DISTSRC"
 
     # Extract the source tarball
     tar --strip-components=1 -xf "${GIT_ARCHIVE}"
+    run_cuda_compiler_smoke_test
 
     # First build libbitcoinconsensus
     # shellcheck disable=SC2086
@@ -244,7 +485,7 @@ mkdir -p "$DISTSRC"
     cmake -S . -B build_libbitcoinconsensus \
           --toolchain "${BASEPREFIX}/${HOST}/toolchain.cmake" \
           -DWITH_CCACHE=OFF \
-          ${CONFIGFLAGS} \
+          ${CONSENSUS_CONFIGFLAGS} \
           -DBUILD_BENCH=OFF \
           -DBUILD_CLI=OFF \
           -DBUILD_DAEMON=OFF \
@@ -265,19 +506,19 @@ mkdir -p "$DISTSRC"
 
     # Configure this DISTSRC for $HOST
     # shellcheck disable=SC2086
-    env CFLAGS="${HOST_CFLAGS}" CXXFLAGS="${HOST_CXXFLAGS}" LDFLAGS="${HOST_LDFLAGS}" \
+    env CFLAGS="${HOST_CFLAGS}" CXXFLAGS="${HOST_CXXFLAGS}" LDFLAGS="${HOST_LDFLAGS}" "${CUDA_CMAKE_ENV[@]}" \
     cmake -S . -B build \
           --toolchain "${BASEPREFIX}/${HOST}/toolchain.cmake" \
           -DWITH_CCACHE=OFF \
-          ${CONFIGFLAGS}
+          ${MAIN_CONFIGFLAGS}
 
-    # Build Bitcoin Core
+    # Build BTX
     cmake --build build -j "$JOBS" ${V:+--verbose}
 
     # Perform basic security checks on a series of executables.
     cmake --build build -j 1 --target check-security ${V:+--verbose}
     # Check that executables only contain allowed version symbols.
-    cmake --build build -j 1 --target check-symbols ${V:+--verbose}
+    env "${CUDA_SYMBOL_CHECK_ENV[@]}" cmake --build build -j 1 --target check-symbols ${V:+--verbose}
 
     mkdir -p "$OUTDIR"
 
@@ -285,16 +526,16 @@ mkdir -p "$DISTSRC"
     case "$HOST" in
         *mingw*)
             cmake --build build -j "$JOBS" -t deploy ${V:+--verbose}
-            mv build/bitcoin-win64-setup.exe "${OUTDIR}/${DISTNAME}-win64-setup-pgpverifiable.exe"
+            mv build/btx-win64-setup.exe "${OUTDIR}/${DISTNAME}-win64-setup-pgpverifiable.exe"
             ;;
     esac
 
-    # Setup the directory where our Bitcoin Core build for HOST will be
+    # Setup the directory where our BTX build for HOST will be
     # installed. This directory will also later serve as the input for our
     # binary tarballs.
     INSTALLPATH="${PWD}/installed/${DISTNAME}"
     mkdir -p "${INSTALLPATH}"
-    # Install built Bitcoin Core to $INSTALLPATH
+    # Install built BTX to $INSTALLPATH
     case "$HOST" in
         *darwin*)
             # This workaround can be dropped for CMake >= 3.27.
@@ -335,9 +576,9 @@ mkdir -p "$DISTSRC"
                 ;;
         esac
 
-        # copy over the example bitcoin.conf file. if contrib/devtools/gen-bitcoin-conf.sh
+        # Copy over the example btx.conf file. If contrib/devtools/gen-bitcoin-conf.sh
         # has not been run before buildling, this file will be a stub
-        cp "${DISTSRC}/share/examples/bitcoin.conf" "${DISTNAME}/"
+        cp "${DISTSRC}/share/examples/btx.conf" "${DISTNAME}/"
 
         cp -r "${DISTSRC}/share/rpcauth" "${DISTNAME}/share/"
 
@@ -353,6 +594,8 @@ mkdir -p "$DISTSRC"
             mkdir -p "${DISTNAME}/${relative_dir}"
             cp "${DISTSRC}/${relative_path}" "${DISTNAME}/${relative_path}"
         done < "${DISTSRC}/scripts/release/support_files.txt"
+
+        assert_no_dynamic_cuda_runtime_dependencies
 
         # Deterministically produce {non-,}debug binary tarballs ready
         # for release
@@ -375,13 +618,13 @@ mkdir -p "$DISTSRC"
                 find "${DISTNAME}" -not -name "*.dbg" -print0 \
                     | sort --zero-terminated \
                     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
-                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" \
-                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}.tar.gz" && exit 1 )
+                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}${LINUX_ARTIFACT_SUFFIX}.tar.gz" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}${LINUX_ARTIFACT_SUFFIX}.tar.gz" && exit 1 )
                 find "${DISTNAME}" -name "*.dbg" -print0 \
                     | sort --zero-terminated \
                     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
-                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" \
-                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}-debug.tar.gz" && exit 1 )
+                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST}${LINUX_ARTIFACT_SUFFIX}-debug.tar.gz" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST}${LINUX_ARTIFACT_SUFFIX}-debug.tar.gz" && exit 1 )
                 ;;
             *darwin*)
                 find "${DISTNAME}" -print0 \

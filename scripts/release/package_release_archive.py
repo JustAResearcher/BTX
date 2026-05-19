@@ -42,6 +42,16 @@ PLATFORM_CONFIGS = {
         "archive_format": "tar.gz",
         "exe_suffix": "",
     },
+    "linux-x86_64-cuda12": {
+        "triple": "x86_64-linux-gnu-cuda12",
+        "archive_format": "tar.gz",
+        "exe_suffix": "",
+    },
+    "linux-x86_64-cuda13": {
+        "triple": "x86_64-linux-gnu-cuda13",
+        "archive_format": "tar.gz",
+        "exe_suffix": "",
+    },
     "linux-arm64": {
         "triple": "aarch64-linux-gnu",
         "archive_format": "tar.gz",

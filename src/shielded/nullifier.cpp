@@ -16,7 +16,7 @@
 
 namespace {
 constexpr uint32_t SHIELDED_STATE_DISK_MAGIC{0x31534453}; // "SDS1"
-constexpr uint8_t SHIELDED_STATE_DISK_VERSION{2};
+constexpr uint8_t SHIELDED_STATE_DISK_VERSION{3};
 constexpr uint8_t SHIELDED_STATE_HAS_COMMITMENT_INDEX_DIGEST{1U << 0};
 constexpr uint8_t SHIELDED_STATE_HAS_ACCOUNT_REGISTRY_SNAPSHOT{1U << 1};
 
@@ -53,6 +53,7 @@ struct ShieldedStateDisk
 {
     shielded::ShieldedMerkleTree tree;
     std::vector<uint256> anchor_roots;
+    std::vector<uint256> account_registry_roots;
     uint256 tip_hash;
     int32_t tip_height{-1};
     CAmount pool_balance{0};
@@ -72,6 +73,7 @@ struct ShieldedStateDisk
         ::Serialize(s, flags);
         ::Serialize(s, tree);
         ::Serialize(s, anchor_roots);
+        ::Serialize(s, account_registry_roots);
         ::Serialize(s, tip_hash);
         ::Serialize(s, tip_height);
         ::Serialize(s, pool_balance);
@@ -107,7 +109,7 @@ private:
         uint8_t flags{0};
         ::Unserialize(s, version);
         ::Unserialize(s, flags);
-        if ((version != 1 && version != SHIELDED_STATE_DISK_VERSION) ||
+        if ((version < 1 || version > SHIELDED_STATE_DISK_VERSION) ||
             (flags & ~(SHIELDED_STATE_HAS_COMMITMENT_INDEX_DIGEST |
                        SHIELDED_STATE_HAS_ACCOUNT_REGISTRY_SNAPSHOT)) != 0) {
             throw std::ios_base::failure("ShieldedStateDisk invalid persisted-state header");
@@ -115,6 +117,11 @@ private:
 
         ::Unserialize(s, tree);
         ::Unserialize(s, anchor_roots);
+        if (version >= 3) {
+            ::Unserialize(s, account_registry_roots);
+        } else {
+            account_registry_roots.clear();
+        }
         ::Unserialize(s, tip_hash);
         ::Unserialize(s, tip_height);
         ::Unserialize(s, pool_balance);
@@ -155,6 +162,7 @@ private:
     {
         commitment_index_digest.reset();
         account_registry_snapshot.reset();
+        account_registry_roots.clear();
 
         ::Unserialize(s, tree);
         ::Unserialize(s, anchor_roots);
@@ -953,7 +961,8 @@ bool NullifierSet::ReadPersistedState(shielded::ShieldedMerkleTree& tree,
                                       std::optional<uint256>& commitment_index_digest,
                                       std::optional<
                                           shielded::registry::ShieldedAccountRegistryPersistedSnapshot>&
-                                          account_registry_snapshot) const
+                                          account_registry_snapshot,
+                                      std::vector<uint256>* account_registry_roots) const
 {
     std::shared_lock lock(m_rwlock);
     ShieldedStateDisk state;
@@ -971,6 +980,9 @@ bool NullifierSet::ReadPersistedState(shielded::ShieldedMerkleTree& tree,
     balance = state.pool_balance;
     commitment_index_digest = state.commitment_index_digest;
     account_registry_snapshot = state.account_registry_snapshot;
+    if (account_registry_roots != nullptr) {
+        *account_registry_roots = std::move(state.account_registry_roots);
+    }
     return true;
 }
 
@@ -982,7 +994,8 @@ bool NullifierSet::WritePersistedState(const shielded::ShieldedMerkleTree& tree,
                                        std::optional<uint256> commitment_index_digest,
                                        std::optional<
                                            shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
-                                           account_registry_snapshot)
+                                           account_registry_snapshot,
+                                       std::vector<uint256> account_registry_roots)
 {
     if (!MoneyRange(balance) || balance < 0) {
         LogPrintf("NullifierSet::WritePersistedState rejected out-of-range balance\n");
@@ -997,6 +1010,7 @@ bool NullifierSet::WritePersistedState(const shielded::ShieldedMerkleTree& tree,
     state.pool_balance = balance;
     state.commitment_index_digest = std::move(commitment_index_digest);
     state.account_registry_snapshot = std::move(account_registry_snapshot);
+    state.account_registry_roots = std::move(account_registry_roots);
 
     std::unique_lock lock(m_rwlock);
     return m_db->Write(std::make_pair(DB_PERSISTED_STATE, uint8_t{0}), state, /*fSync=*/true);

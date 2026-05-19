@@ -5,6 +5,7 @@
 #include <cuda/matmul_accel.h>
 
 #include <cuda/cuda_context.h>
+#include <cuda/cuda_scheduler.h>
 #include <cuda/oracle_accel.h>
 
 #include <cuda_runtime.h>
@@ -15,13 +16,17 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <future>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace btx::cuda {
@@ -265,27 +270,126 @@ struct DigestProfilingContext {
     std::string reason{"no_samples"};
 };
 
-uint32_t ResolveCudaPoolSlotCount()
+CudaRuntimeProbe RuntimeProbeFromDeviceInfo(const CudaTopologyProbe& topology, const CudaDeviceInfo& device)
+{
+    CudaRuntimeProbe probe;
+    probe.compiled = topology.compiled;
+    probe.available = topology.available && device.supported;
+    probe.reason = probe.available ? "ready" : device.reason;
+    probe.device_index = device.device_index;
+    probe.device_name = device.device_name;
+    probe.compute_capability_major = device.compute_capability_major;
+    probe.compute_capability_minor = device.compute_capability_minor;
+    probe.global_memory_bytes = device.global_memory_bytes;
+    probe.multiprocessor_count = device.multiprocessor_count;
+    probe.driver_api_version = topology.driver_api_version;
+    probe.runtime_version = topology.runtime_version;
+    return probe;
+}
+
+std::optional<CudaRuntimeProbe> ResolveCudaRuntimeForSelectedDevice(int device_index, std::string& error)
+{
+    const auto topology = ProbeCudaTopology();
+    if (!topology.available) {
+        error = topology.reason;
+        return std::nullopt;
+    }
+
+    for (const auto& device : topology.selected_devices) {
+        if (device.device_index == device_index) {
+            return RuntimeProbeFromDeviceInfo(topology, device);
+        }
+    }
+
+    error = "selected_cuda_device_not_enabled:" + std::to_string(device_index);
+    return std::nullopt;
+}
+
+bool ParsePoolSlotCount(const std::string& value, uint32_t& slots)
+{
+    constexpr uint32_t MAX_SLOTS{32};
+    try {
+        size_t consumed{0};
+        const unsigned long parsed = std::stoul(value, &consumed, 10);
+        if (consumed != value.size() || parsed == 0) {
+            return false;
+        }
+        slots = std::min<uint32_t>(static_cast<uint32_t>(parsed), MAX_SLOTS);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+std::optional<uint32_t> ResolveCudaPoolSlotOverride(int device_index)
+{
+    const char* env = std::getenv("BTX_MATMUL_CUDA_POOL_SLOTS");
+    if (env == nullptr || *env == '\0') {
+        return std::nullopt;
+    }
+
+    const std::string value{env};
+    if (value.find(':') == std::string::npos) {
+        uint32_t slots{0};
+        return ParsePoolSlotCount(value, slots) ? std::optional<uint32_t>{slots} : std::nullopt;
+    }
+
+    size_t begin{0};
+    while (begin <= value.size()) {
+        const size_t comma = value.find(',', begin);
+        const std::string token = value.substr(begin, comma == std::string::npos ? std::string::npos : comma - begin);
+        const size_t colon = token.find(':');
+        if (colon == std::string::npos) {
+            return std::nullopt;
+        }
+
+        int parsed_device{-1};
+        uint32_t parsed_slots{0};
+        try {
+            size_t consumed{0};
+            parsed_device = std::stoi(token.substr(0, colon), &consumed, 10);
+            if (consumed != token.substr(0, colon).size() || parsed_device < 0) {
+                return std::nullopt;
+            }
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+        if (!ParsePoolSlotCount(token.substr(colon + 1), parsed_slots)) {
+            return std::nullopt;
+        }
+        if (parsed_device == device_index) {
+            return parsed_slots;
+        }
+
+        if (comma == std::string::npos) {
+            break;
+        }
+        begin = comma + 1;
+    }
+
+    return std::nullopt;
+}
+
+uint32_t ResolveCudaPoolSlotCount(int device_index)
 {
     constexpr uint32_t DEFAULT_SLOTS{1};
     constexpr uint32_t MAX_SLOTS{32};
 
-    const char* env = std::getenv("BTX_MATMUL_CUDA_POOL_SLOTS");
-    if (env != nullptr && *env != '\0') {
-        try {
-            size_t consumed{0};
-            const unsigned long parsed = std::stoul(env, &consumed, 10);
-            if (consumed != std::strlen(env) || parsed == 0) {
-                return DEFAULT_SLOTS;
-            }
-            return std::min<uint32_t>(static_cast<uint32_t>(parsed), MAX_SLOTS);
-        } catch (const std::exception&) {
-            return DEFAULT_SLOTS;
-        }
+    if (const auto override_slots = ResolveCudaPoolSlotOverride(device_index)) {
+        return *override_slots;
     }
 
-    const auto runtime = ProbeCudaRuntime();
-    if (!runtime.available) {
+    const auto topology = ProbeCudaTopology();
+    uint32_t multiprocessor_count{0};
+    if (topology.available) {
+        for (const auto& device : topology.selected_devices) {
+            if (device.device_index == device_index) {
+                multiprocessor_count = device.multiprocessor_count;
+                break;
+            }
+        }
+    }
+    if (multiprocessor_count == 0) {
         return DEFAULT_SLOTS;
     }
 
@@ -297,26 +401,30 @@ uint32_t ResolveCudaPoolSlotCount()
         hw >= 8 ? 3U :
         hw >= 4 ? 2U : 1U;
     const uint32_t gpu_limit =
-        runtime.multiprocessor_count >= 128 ? 8U :
-        runtime.multiprocessor_count >= 96 ? 7U :
-        runtime.multiprocessor_count >= 64 ? 6U :
-        runtime.multiprocessor_count >= 48 ? 5U :
-        runtime.multiprocessor_count >= 24 ? 4U :
-        runtime.multiprocessor_count >= 12 ? 2U : 1U;
+        multiprocessor_count >= 128 ? 8U :
+        multiprocessor_count >= 96 ? 7U :
+        multiprocessor_count >= 64 ? 6U :
+        multiprocessor_count >= 48 ? 5U :
+        multiprocessor_count >= 24 ? 4U :
+        multiprocessor_count >= 12 ? 2U : 1U;
     return std::clamp<uint32_t>(std::min(cpu_limit, gpu_limit), 1U, MAX_SLOTS);
 }
 
-DigestPoolContext& GetPoolContext()
+DigestPoolContext& GetPoolContext(int device_index)
 {
-    static DigestPoolContext context;
-    static std::once_flag init_once;
-    std::call_once(init_once, [] {
-        context.slots.resize(ResolveCudaPoolSlotCount());
-        for (auto& slot : context.slots) {
+    static std::mutex contexts_mutex;
+    static std::map<int, std::unique_ptr<DigestPoolContext>> contexts;
+
+    std::lock_guard<std::mutex> lock(contexts_mutex);
+    auto& context = contexts[device_index];
+    if (context == nullptr) {
+        context = std::make_unique<DigestPoolContext>();
+        context->slots.resize(ResolveCudaPoolSlotCount(device_index));
+        for (auto& slot : context->slots) {
             slot = std::make_unique<DigestPoolSlot>();
         }
-    });
-    return context;
+    }
+    return *context;
 }
 
 DigestProfilingContext& GetProfilingContext()
@@ -459,9 +567,9 @@ private:
     DigestPoolSlot* m_slot{nullptr};
 };
 
-std::optional<BufferPoolLease> AcquireBufferPoolSlot(std::string& error)
+std::optional<BufferPoolLease> AcquireBufferPoolSlot(int device_index, std::string& error)
 {
-    auto& context = GetPoolContext();
+    auto& context = GetPoolContext(device_index);
     std::unique_lock<std::mutex> lock(context.mutex);
     if (context.slots.empty()) {
         error = "No CUDA buffer pool slots are configured";
@@ -1269,31 +1377,35 @@ MatMulBufferPoolStats ProbeMatMulBufferPool()
 {
     MatMulBufferPoolStats stats;
 
-    const auto runtime = ProbeCudaRuntime();
-    if (!runtime.available) {
+    const auto topology = ProbeCudaTopology();
+    if (!topology.available) {
         stats.available = false;
         stats.initialized = false;
-        stats.reason = runtime.reason;
+        stats.reason = topology.reason;
         return stats;
     }
 
-    auto& context = GetPoolContext();
-    std::lock_guard<std::mutex> lock(context.mutex);
     stats.available = true;
-    stats.initialized = context.initialized;
-    stats.allocation_events = context.allocation_events;
-    stats.reuse_events = context.reuse_events;
-    stats.wait_events = context.wait_events;
-    stats.completed_submissions = context.completed_submissions;
-    stats.slot_count = static_cast<uint32_t>(context.slots.size());
-    stats.active_slots = context.active_slots;
-    stats.high_water_slots = context.high_water_slots;
-    stats.inflight_submissions = context.inflight_submissions;
-    stats.peak_inflight_submissions = context.peak_inflight_submissions;
-    stats.n = context.last_n;
-    stats.b = context.last_b;
-    stats.r = context.last_r;
-    stats.reason = context.reason;
+    for (const auto& device : topology.selected_devices) {
+        auto& context = GetPoolContext(device.device_index);
+        std::lock_guard<std::mutex> lock(context.mutex);
+        stats.initialized = stats.initialized || context.initialized;
+        stats.allocation_events += context.allocation_events;
+        stats.reuse_events += context.reuse_events;
+        stats.wait_events += context.wait_events;
+        stats.completed_submissions += context.completed_submissions;
+        stats.slot_count += static_cast<uint32_t>(context.slots.size());
+        stats.active_slots += context.active_slots;
+        stats.high_water_slots += context.high_water_slots;
+        stats.inflight_submissions += context.inflight_submissions;
+        stats.peak_inflight_submissions += context.peak_inflight_submissions;
+        if (context.initialized) {
+            stats.n = context.last_n;
+            stats.b = context.last_b;
+            stats.r = context.last_r;
+        }
+    }
+    stats.reason = stats.initialized ? "buffer_pool_slots_ready" : "buffer_pool_uninitialized";
     if (stats.reason.empty()) {
         stats.reason = stats.initialized ? "buffer_pool_slots_ready" : "buffer_pool_uninitialized";
     }
@@ -1345,7 +1457,7 @@ MatMulKernelProfile ProbeMatMulKernelProfile()
     profile.device_prepared_inputs_enabled = device_prepared_env != nullptr &&
         device_prepared_env[0] != '\0' &&
         device_prepared_env[0] != '0';
-    profile.execution_model = "nonblocking_stream_per_pool_slot";
+    profile.execution_model = "nonblocking_stream_per_device_pool_slot";
     profile.staging_strategy = "pinned_host_with_pageable_fallback";
     profile.device_prepared_inputs_policy = "auto_product_digest_shape_plus_env";
     profile.reason = "ready";
@@ -1429,7 +1541,7 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsBatch(const MatMulCompres
         return result;
     }
 
-    auto lease = AcquireBufferPoolSlot(result.error);
+    auto lease = AcquireBufferPoolSlot(runtime.device_index, result.error);
     if (!lease.has_value()) {
         return result;
     }
@@ -1532,24 +1644,25 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsBatch(const MatMulCompres
     return result;
 }
 
-MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatch(
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatchOnDevice(
     const MatMulLowRankCompressedWordsBatchRequest& request,
-    MatMulCompressedWordsMode mode)
+    MatMulCompressedWordsMode mode,
+    int device_index)
 {
     MatMulCompressedWordsBatchResult result;
     DigestProfilingSample sample;
-    const auto runtime = ProbeCudaRuntime();
-    result.available = runtime.available;
-    if (!runtime.available) {
-        result.error = runtime.reason;
+    const auto runtime_probe = ResolveCudaRuntimeForSelectedDevice(device_index, result.error);
+    result.available = runtime_probe.has_value();
+    if (!runtime_probe.has_value()) {
         return result;
     }
+    const auto runtime = *runtime_probe;
 
     if (!ValidateLowRankBatchRequest(request, result.error)) {
         return result;
     }
 
-    auto lease = AcquireBufferPoolSlot(result.error);
+    auto lease = AcquireBufferPoolSlot(runtime.device_index, result.error);
     if (!lease.has_value()) {
         return result;
     }
@@ -1737,24 +1850,140 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatch(
     return result;
 }
 
-MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatch(
-    const MatMulLowRankCompressedWordsDeviceBatchRequest& request,
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatch(
+    const MatMulLowRankCompressedWordsBatchRequest& request,
+    MatMulCompressedWordsMode mode)
+{
+    return ComputeCompressedWordsLowRankBatchMultiDevice(request, mode);
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatchMultiDevice(
+    const MatMulLowRankCompressedWordsBatchRequest& request,
     MatMulCompressedWordsMode mode)
 {
     MatMulCompressedWordsBatchResult result;
-    DigestProfilingSample sample;
-    const auto runtime = ProbeCudaRuntime();
-    result.available = runtime.available;
-    if (!runtime.available) {
-        result.error = runtime.reason;
+
+    const auto topology = ProbeCudaTopology();
+    result.available = topology.available;
+    if (!topology.available) {
+        result.error = topology.reason;
         return result;
     }
+
+    if (!ValidateLowRankBatchRequest(request, result.error)) {
+        return result;
+    }
+
+    const auto shards = PlanCudaBatchShards(topology.selected_devices, request.batch_size);
+    if (shards.empty()) {
+        result.error = "no_cuda_batch_shards_available";
+        return result;
+    }
+    if (shards.size() == 1) {
+        return ComputeCompressedWordsLowRankBatchOnDevice(request, mode, shards.front().device_index);
+    }
+
+    struct ShardResult {
+        CudaBatchShard shard;
+        MatMulCompressedWordsBatchResult result;
+    };
+
+    std::vector<std::future<ShardResult>> futures;
+    futures.reserve(shards.size());
+    for (const auto& shard : shards) {
+        futures.push_back(std::async(std::launch::async, [request, mode, shard]() {
+            const MatMulLowRankCompressedWordsBatchRequest shard_request{
+                .n = request.n,
+                .b = request.b,
+                .r = request.r,
+                .batch_size = static_cast<uint32_t>(shard.count),
+                .matrix_a = request.matrix_a,
+                .matrix_b = request.matrix_b,
+                .matrix_a_cache_key = request.matrix_a_cache_key,
+                .matrix_b_cache_key = request.matrix_b_cache_key,
+                .noise_e_l = request.noise_e_l + shard.start_index,
+                .noise_e_r = request.noise_e_r + shard.start_index,
+                .noise_f_l = request.noise_f_l + shard.start_index,
+                .noise_f_r = request.noise_f_r + shard.start_index,
+                .compress_vec = request.compress_vec + shard.start_index,
+            };
+            return ShardResult{
+                .shard = shard,
+                .result = ComputeCompressedWordsLowRankBatchOnDevice(shard_request, mode, shard.device_index),
+            };
+        }));
+    }
+
+    std::vector<ShardResult> shard_results;
+    shard_results.reserve(futures.size());
+    try {
+        for (auto& future : futures) {
+            shard_results.push_back(future.get());
+        }
+    } catch (const std::exception& e) {
+        result.error = std::string{"cuda_multi_device_batch_exception:"} + e.what();
+        return result;
+    }
+
+    for (const auto& shard_result : shard_results) {
+        if (!shard_result.result.success) {
+            result.available = shard_result.result.available;
+            result.error = "cuda_device_" + std::to_string(shard_result.shard.device_index) + "_batch_failed:" +
+                (shard_result.result.error.empty() ? "unknown_error" : shard_result.result.error);
+            return result;
+        }
+        if (result.words_per_request == 0) {
+            result.words_per_request = shard_result.result.words_per_request;
+        } else if (result.words_per_request != shard_result.result.words_per_request) {
+            result.error = "cuda_multi_device_batch_words_per_request_mismatch";
+            return result;
+        }
+    }
+
+    if (result.words_per_request == 0) {
+        result.error = "cuda_multi_device_batch_empty_result";
+        return result;
+    }
+
+    result.words.assign(static_cast<size_t>(request.batch_size) * result.words_per_request, Element{0});
+    for (const auto& shard_result : shard_results) {
+        const size_t expected_words = shard_result.shard.count * result.words_per_request;
+        if (shard_result.result.words.size() != expected_words) {
+            result.success = false;
+            result.error = "cuda_multi_device_batch_result_size_mismatch";
+            result.words.clear();
+            result.words_per_request = 0;
+            return result;
+        }
+        std::copy(
+            shard_result.result.words.begin(),
+            shard_result.result.words.end(),
+            result.words.begin() + static_cast<size_t>(shard_result.shard.start_index) * result.words_per_request);
+    }
+
+    result.success = true;
+    return result;
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchOnDevice(
+    const MatMulLowRankCompressedWordsDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode,
+    int device_index)
+{
+    MatMulCompressedWordsBatchResult result;
+    DigestProfilingSample sample;
+    const auto runtime_probe = ResolveCudaRuntimeForSelectedDevice(device_index, result.error);
+    result.available = runtime_probe.has_value();
+    if (!runtime_probe.has_value()) {
+        return result;
+    }
+    const auto runtime = *runtime_probe;
 
     if (!ValidateLowRankDeviceBatchRequest(request, result.error)) {
         return result;
     }
 
-    auto lease = AcquireBufferPoolSlot(result.error);
+    auto lease = AcquireBufferPoolSlot(runtime.device_index, result.error);
     if (!lease.has_value()) {
         return result;
     }
@@ -1914,6 +2143,131 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatch(
 
     sample.total_wall_ms = DurationMillis(total_start, SteadyClock::now());
     RecordProfilingSample(sample);
+    return result;
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatch(
+    const MatMulLowRankCompressedWordsDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode)
+{
+    return ComputeCompressedWordsLowRankDeviceBatchMultiDevice(request, mode);
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchMultiDevice(
+    const MatMulLowRankCompressedWordsDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode)
+{
+    MatMulCompressedWordsBatchResult result;
+
+    const auto topology = ProbeCudaTopology();
+    result.available = topology.available;
+    if (!topology.available) {
+        result.error = topology.reason;
+        return result;
+    }
+
+    if (!ValidateLowRankDeviceBatchRequest(request, result.error)) {
+        return result;
+    }
+
+    struct DeviceShard {
+        int device_index{-1};
+        std::vector<size_t> indices;
+        std::vector<const MatMulGeneratedInputsDevice*> inputs;
+    };
+
+    std::map<int, DeviceShard> shard_map;
+    for (uint32_t i = 0; i < request.batch_size; ++i) {
+        const auto* generated = request.generated_inputs[i];
+        auto& shard = shard_map[generated->device_index];
+        shard.device_index = generated->device_index;
+        shard.indices.push_back(i);
+        shard.inputs.push_back(generated);
+    }
+
+    if (shard_map.size() == 1) {
+        return ComputeCompressedWordsLowRankDeviceBatchOnDevice(request, mode, shard_map.begin()->first);
+    }
+
+    struct ShardResult {
+        DeviceShard shard;
+        MatMulCompressedWordsBatchResult result;
+    };
+
+    std::vector<std::future<ShardResult>> futures;
+    futures.reserve(shard_map.size());
+    for (const auto& entry : shard_map) {
+        const auto& shard = entry.second;
+        futures.push_back(std::async(std::launch::async, [request, mode, shard]() {
+            const MatMulLowRankCompressedWordsDeviceBatchRequest shard_request{
+                .n = request.n,
+                .b = request.b,
+                .r = request.r,
+                .batch_size = static_cast<uint32_t>(shard.inputs.size()),
+                .matrix_a = request.matrix_a,
+                .matrix_b = request.matrix_b,
+                .matrix_a_cache_key = request.matrix_a_cache_key,
+                .matrix_b_cache_key = request.matrix_b_cache_key,
+                .generated_inputs = shard.inputs.data(),
+            };
+            return ShardResult{
+                .shard = shard,
+                .result = ComputeCompressedWordsLowRankDeviceBatchOnDevice(shard_request, mode, shard.device_index),
+            };
+        }));
+    }
+
+    std::vector<ShardResult> shard_results;
+    shard_results.reserve(futures.size());
+    try {
+        for (auto& future : futures) {
+            shard_results.push_back(future.get());
+        }
+    } catch (const std::exception& e) {
+        result.error = std::string{"cuda_multi_device_prepared_batch_exception:"} + e.what();
+        return result;
+    }
+
+    for (const auto& shard_result : shard_results) {
+        if (!shard_result.result.success) {
+            result.available = shard_result.result.available;
+            result.error = "cuda_device_" + std::to_string(shard_result.shard.device_index) + "_prepared_batch_failed:" +
+                (shard_result.result.error.empty() ? "unknown_error" : shard_result.result.error);
+            return result;
+        }
+        if (result.words_per_request == 0) {
+            result.words_per_request = shard_result.result.words_per_request;
+        } else if (result.words_per_request != shard_result.result.words_per_request) {
+            result.error = "cuda_multi_device_prepared_batch_words_per_request_mismatch";
+            return result;
+        }
+    }
+
+    if (result.words_per_request == 0) {
+        result.error = "cuda_multi_device_prepared_batch_empty_result";
+        return result;
+    }
+
+    result.words.assign(static_cast<size_t>(request.batch_size) * result.words_per_request, Element{0});
+    for (const auto& shard_result : shard_results) {
+        const size_t expected_words = shard_result.shard.inputs.size() * result.words_per_request;
+        if (shard_result.result.words.size() != expected_words ||
+            shard_result.shard.indices.size() != shard_result.shard.inputs.size()) {
+            result.success = false;
+            result.error = "cuda_multi_device_prepared_batch_result_size_mismatch";
+            result.words.clear();
+            result.words_per_request = 0;
+            return result;
+        }
+        for (size_t i = 0; i < shard_result.shard.indices.size(); ++i) {
+            std::copy(
+                shard_result.result.words.begin() + i * result.words_per_request,
+                shard_result.result.words.begin() + (i + 1) * result.words_per_request,
+                result.words.begin() + shard_result.shard.indices[i] * result.words_per_request);
+        }
+    }
+
+    result.success = true;
     return result;
 }
 

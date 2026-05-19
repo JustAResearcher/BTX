@@ -151,52 +151,16 @@ fresh node reaches the current tip in a few hours.
 
 ### Snapshot loading (`loadtxoutset`)
 
-The release publishes `snapshot.dat` (≈229 MB) alongside each binary release,
-intended as a faster alternative to IBD via the `loadtxoutset` RPC.
+The release publishes `snapshot.dat` alongside each binary release, intended as
+a faster alternative to plain IBD via the `loadtxoutset` RPC. Use the latest
+snapshot published for the release you are installing. Verify the release
+checksum/signature artifacts first, start `btxd`, wait until the manifest's
+base block hash is known in the local header chain, then load the snapshot:
 
-> **Known issue with the v0.29.7 loader:** as of release v0.29.7,
-> `loadtxoutset` fails on a fresh / partially-synced node with:
->
-> ```
-> error code: -32603
-> error message:
-> Unable to load UTXO snapshot: could not load BTX shielded snapshot section.
-> ```
->
-> **Root cause:** the failure appears to be in the v0.29.7 *loader path*, not
-> in the current snapshot file. The same error reproduces with the v0.29.5
-> release `snapshot.dat` (different file, different SHA256, different base
-> height — same error), which rules out simple file corruption. `debug.log`
-> reveals the failing read:
->
-> ```
-> [error] CollectShieldedAccountRegistryHistoryFromState:
->         failed to read block <snapshot base blockhash>
-> ```
->
-> `LoadShieldedSnapshotSection` (`src/validation.cpp`) restores the serialized
-> shielded state from the snapshot file, but it also rebuilds recent shielded
-> account-registry root history from local block data. On a fresh node that has
-> the snapshot base header but not the corresponding block on disk, that
-> history rebuild fails and snapshot activation aborts. This makes the snapshot
-> unloadable in exactly the case it was designed for: bootstrapping a node that
-> *doesn't yet* have the chain.
->
-> **Workaround:** run plain IBD (no special flag — just start `btxd` and let
-> it sync from peers). With 8+ peers, a fresh node reaches the current tip in
-> a few hours.
->
-> **Fix direction (for upstream):** the loader / restart path needs a safe way
-> to preserve or reconstruct the recent shielded account-registry history
-> required by validation, without assuming those blocks are already present
-> locally. A simple "skip the rebuild" shortcut is not sufficient, because
-> valid historical account-registry anchors and restart-time shielded-state
-> reconstruction still depend on that recent history. Reproduced on three
-> independent hosts (one Zen 4 EPYC, two Zen 3 EPYC) on Ubuntu 24.04 with
-> v0.29.7 binaries built from source (CUDA backend enabled).
-
-When the snapshot is fixed, the canonical loader call (per the release manifest)
-is:
+```bash
+SNAPSHOT_BLOCKHASH="$(jq -r .blockhash /path/to/snapshot.manifest.json)"
+btx-cli getblockheader "$SNAPSHOT_BLOCKHASH" false
+```
 
 ```bash
 btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
@@ -204,7 +168,13 @@ btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
 
 The `-rpcclienttimeout=0` flag prevents the CLI from giving up while the daemon
 deserializes the snapshot (the load can take several minutes on large
-chainstates).
+chainstates). The base header is the readiness gate; the full snapshot base
+block does not need to be downloaded before `loadtxoutset`.
+
+For miner-oriented `btx.conf` settings and an end-to-end operator procedure,
+see [Assumeutxo Usage](assumeutxo.md),
+[BTX Download-and-Go Guide](btx-download-and-go.md), and
+[BTX Mining Node Snapshot Runbook](btx-mining-node-snapshot-runbook.md).
 
 ## Memory Requirements
 

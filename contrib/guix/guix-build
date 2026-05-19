@@ -84,26 +84,104 @@ export HOSTS="${HOSTS:-x86_64-linux-gnu arm-linux-gnueabihf aarch64-linux-gnu ri
                        x86_64-w64-mingw32
                        x86_64-apple-darwin arm64-apple-darwin}"
 
-# Usage: distsrc_for_host HOST
+# Usage: linux_flavors_for_host HOST
 #
 #   HOST: The current platform triple we're building for
 #
+linux_flavors_for_host() {
+    case "$1" in
+        x86_64-linux-gnu)
+            echo "${GUIX_LINUX_FLAVORS:-cpu cuda12 cuda13}"
+            ;;
+        *linux*)
+            echo "cpu"
+            ;;
+        *)
+            echo "default"
+            ;;
+    esac
+}
+
+# Usage: validate_linux_flavor HOST FLAVOR
+#
+#   HOST: The current platform triple we're building for
+#   FLAVOR: The Linux release flavor for HOST
+#
+validate_linux_flavor() {
+    case "$2" in
+        default)
+            case "$1" in
+                *linux*) return 1 ;;
+                *) return 0 ;;
+            esac
+            ;;
+        cpu)
+            return 0
+            ;;
+        cuda12|cuda13)
+            [ "$1" = "x86_64-linux-gnu" ]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Usage: workdir_suffix_for_host_flavor HOST FLAVOR
+#
+#   HOST: The current platform triple we're building for
+#   FLAVOR: The Linux release flavor for HOST
+#
+workdir_suffix_for_host_flavor() {
+    case "$1:$2" in
+        x86_64-linux-gnu:cpu|x86_64-linux-gnu:cuda12|x86_64-linux-gnu:cuda13)
+            echo "$2"
+            ;;
+    esac
+}
+
+# Usage: output_suffix_for_host_flavor HOST FLAVOR
+#
+#   HOST: The current platform triple we're building for
+#   FLAVOR: The Linux release flavor for HOST
+#
+output_suffix_for_host_flavor() {
+    case "$1:$2" in
+        x86_64-linux-gnu:cuda12|x86_64-linux-gnu:cuda13)
+            echo "$2"
+            ;;
+    esac
+}
+
+# Usage: distsrc_for_host HOST [FLAVOR]
+#
+#   HOST: The current platform triple we're building for
+#   FLAVOR: The optional Linux release flavor for HOST
+#
 distsrc_for_host() {
-    echo "${DISTSRC_BASE}/distsrc-${VERSION}-${1}"
+    local suffix
+    suffix="$(workdir_suffix_for_host_flavor "$1" "${2:-default}")"
+    echo "${DISTSRC_BASE}/distsrc-${VERSION}-${1}${suffix:+-${suffix}}"
 }
 
 # Accumulate a list of build directories that already exist...
 hosts_distsrc_exists=""
 for host in $HOSTS; do
-    if [ -e "$(distsrc_for_host "$host")" ]; then
-        hosts_distsrc_exists+=" ${host}"
-    fi
+    for linux_flavor in $(linux_flavors_for_host "$host"); do
+        if ! validate_linux_flavor "$host" "$linux_flavor"; then
+            echo "ERR: Unsupported GUIX_LINUX_FLAVOR '${linux_flavor}' for ${host}"
+            exit 1
+        fi
+        if [ -e "$(distsrc_for_host "$host" "$linux_flavor")" ]; then
+            hosts_distsrc_exists+=" ${host}${linux_flavor:+/${linux_flavor}}"
+        fi
+    done
 done
 
 if [ -n "$hosts_distsrc_exists" ]; then
 # ...so that we can print them out nicely in an error message
 cat << EOF
-ERR: Build directories for this commit already exist for the following platform
+ERR: Build directories for this VERSION already exist for the following platform
      triples you're attempting to build, probably because of previous builds.
      Please remove, or otherwise deal with them prior to starting another build.
 
@@ -119,7 +197,9 @@ packages cache, the garbage collector roots for Guix environments, and the
 output directory.
 EOF
 for host in $hosts_distsrc_exists; do
-    echo "     ${host} '$(distsrc_for_host "$host")'"
+    host_name="${host%/*}"
+    host_flavor="${host#*/}"
+    echo "     ${host} '$(distsrc_for_host "$host_name" "$host_flavor")'"
 done
 exit 1
 else
@@ -152,12 +232,15 @@ done
 avail_KiB="$(df -Pk "$VERSION_BASE" | sed 1d | tr -s ' ' | cut -d' ' -f4)"
 total_required_KiB=0
 for host in $HOSTS; do
-    case "$host" in
-        *darwin*) required_KiB=440000 ;;
-        *mingw*)  required_KiB=7600000 ;;
-        *)        required_KiB=6400000 ;;
-    esac
-    total_required_KiB=$((total_required_KiB+required_KiB))
+    for linux_flavor in $(linux_flavors_for_host "$host"); do
+        case "$host:$linux_flavor" in
+            *darwin*:*) required_KiB=440000 ;;
+            *mingw*:*)  required_KiB=7600000 ;;
+            x86_64-linux-gnu:cuda12|x86_64-linux-gnu:cuda13) required_KiB=9000000 ;;
+            *)        required_KiB=6400000 ;;
+        esac
+        total_required_KiB=$((total_required_KiB+required_KiB))
+    done
 done
 
 if (( total_required_KiB > avail_KiB )); then
@@ -307,6 +390,7 @@ done
 # Usage: outdir_for_host HOST SUFFIX
 #
 #   HOST: The current platform triple we're building for
+#   SUFFIX: Optional output directory suffix
 #
 outdir_for_host() {
     echo "${OUTDIR_BASE}/${1}${2:+-${2}}"
@@ -315,6 +399,7 @@ outdir_for_host() {
 # Usage: profiledir_for_host HOST SUFFIX
 #
 #   HOST: The current platform triple we're building for
+#   SUFFIX: Optional profile directory suffix
 #
 profiledir_for_host() {
     echo "${PROFILES_BASE}/${1}${2:+-${2}}"
@@ -348,26 +433,31 @@ guix-prefetch '1h00qp4z5k6lfz310xjwsmqs8fwxi6ngas51169cafz4h9fmc68y' 'https://ar
 # Deterministically build Bitcoin Core
 # shellcheck disable=SC2153
 for host in $HOSTS; do
+for linux_flavor in $(linux_flavors_for_host "$host"); do
 
     # Display proper warning when the user interrupts the build
-    trap 'int_trap ${host}' INT
+    trap 'int_trap ${host}/${linux_flavor}' INT
 
     (
         # Required for 'contrib/guix/manifest.scm' to output the right manifest
-        # for the particular $HOST we're building for
+        # for the particular $HOST/$GUIX_LINUX_FLAVOR we're building for
         export HOST="$host"
+        export GUIX_LINUX_FLAVOR="$linux_flavor"
+        workdir_suffix="$(workdir_suffix_for_host_flavor "$HOST" "$GUIX_LINUX_FLAVOR")"
+        output_suffix="$(output_suffix_for_host_flavor "$HOST" "$GUIX_LINUX_FLAVOR")"
 
         # shellcheck disable=SC2030
 cat << EOF
 INFO: Building ${VERSION:?not set} for platform triple ${HOST:?not set}:
+      ...using Linux release flavor: ${GUIX_LINUX_FLAVOR:?not set}
       ...using reference timestamp: ${SOURCE_DATE_EPOCH:?not set}
       ...running at most ${JOBS:?not set} jobs
       ...from worktree directory: '${PWD}'
           ...bind-mounted in container to: '/bitcoin'
-      ...in build directory: '$(distsrc_for_host "$HOST")'
-          ...bind-mounted in container to: '$(DISTSRC_BASE=/distsrc-base && distsrc_for_host "$HOST")'
-      ...outputting in: '$(outdir_for_host "$HOST")'
-          ...bind-mounted in container to: '$(OUTDIR_BASE=/outdir-base && outdir_for_host "$HOST")'
+      ...in build directory: '$(distsrc_for_host "$HOST" "$GUIX_LINUX_FLAVOR")'
+          ...bind-mounted in container to: '$(DISTSRC_BASE=/distsrc-base && distsrc_for_host "$HOST" "$GUIX_LINUX_FLAVOR")'
+      ...outputting in: '$(outdir_for_host "$HOST" "$output_suffix")'
+          ...bind-mounted in container to: '$(OUTDIR_BASE=/outdir-base && outdir_for_host "$HOST" "$output_suffix")'
       ADDITIONAL FLAGS (if set)
           ADDITIONAL_GUIX_COMMON_FLAGS: ${ADDITIONAL_GUIX_COMMON_FLAGS}
           ADDITIONAL_GUIX_ENVIRONMENT_FLAGS: ${ADDITIONAL_GUIX_ENVIRONMENT_FLAGS}
@@ -455,10 +545,11 @@ EOF
                                  --keep-failed \
                                  --fallback \
                                  --link-profile \
-                                 --root="$(profiledir_for_host "${HOST}")" \
+                                 --root="$(profiledir_for_host "${HOST}" "$workdir_suffix")" \
                                  ${SUBSTITUTE_URLS:+--substitute-urls="$SUBSTITUTE_URLS"} \
                                  ${ADDITIONAL_GUIX_COMMON_FLAGS} ${ADDITIONAL_GUIX_ENVIRONMENT_FLAGS} \
                                  -- env HOST="$host" \
+                                        GUIX_LINUX_FLAVOR="$linux_flavor" \
                                         DISTNAME="$DISTNAME" \
                                         JOBS="$JOBS" \
                                         SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:?unable to determine value}" \
@@ -466,10 +557,11 @@ EOF
                                         ${SOURCES_PATH:+SOURCES_PATH="$SOURCES_PATH"} \
                                         ${BASE_CACHE:+BASE_CACHE="$BASE_CACHE"} \
                                         ${SDK_PATH:+SDK_PATH="$SDK_PATH"} \
-                                        DISTSRC="$(DISTSRC_BASE=/distsrc-base && distsrc_for_host "$HOST")" \
-                                        OUTDIR="$(OUTDIR_BASE=/outdir-base && outdir_for_host "$HOST")" \
+                                        DISTSRC="$(DISTSRC_BASE=/distsrc-base && distsrc_for_host "$HOST" "$GUIX_LINUX_FLAVOR")" \
+                                        OUTDIR="$(OUTDIR_BASE=/outdir-base && outdir_for_host "$HOST" "$output_suffix")" \
                                         DIST_ARCHIVE_BASE=/outdir-base/dist-archive \
                                       bash -c "cd /bitcoin && bash contrib/guix/libexec/build.sh"
     )
 
+done
 done

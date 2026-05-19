@@ -125,6 +125,14 @@ record_result() {
   printf '%s|%s|%s|%s|%s\n' "${id}" "${status}" "${seconds}" "${description}" "${logfile}" >> "${RESULTS_FILE}"
 }
 
+has_override_for_check() {
+  local id="$1"
+  local upper_id override_var
+  upper_id="$(printf '%s' "${id}" | tr '[:lower:]' '[:upper:]')"
+  override_var="BTX_M15_OVERRIDE_${upper_id//-/_}"
+  [[ -n "${!override_var:-}" ]]
+}
+
 run_with_timeout() {
   local timeout_seconds="$1"
   shift
@@ -202,14 +210,22 @@ run_check() {
 }
 
 check_prerequisites() {
-  if [[ ! -x "${BUILD_DIR}/bin/btxd" || ! -x "${BUILD_DIR}/bin/btx-cli" ]]; then
-    [[ -x "${BUILD_DIR}/bin/btxd" ]]
-    [[ -x "${BUILD_DIR}/bin/btx-cli" ]]
+  if ! has_override_for_check "mac_host_lifecycle" || ! has_override_for_check "mac_centos_bridge_lifecycle"; then
+    if [[ ! -x "${BUILD_DIR}/bin/btxd" || ! -x "${BUILD_DIR}/bin/btx-cli" ]]; then
+      [[ -x "${BUILD_DIR}/bin/btxd" ]]
+      [[ -x "${BUILD_DIR}/bin/btx-cli" ]]
+    fi
   fi
-  [[ -x "${ROOT_DIR}/scripts/m15_single_node_wallet_lifecycle.sh" ]]
-  [[ -x "${ROOT_DIR}/scripts/m13_mac_centos_interop_readiness.sh" ]]
-  command -v docker >/dev/null 2>&1
-  docker info >/dev/null 2>&1
+  if ! has_override_for_check "mac_host_lifecycle" || ! has_override_for_check "centos_container_lifecycle"; then
+    [[ -x "${ROOT_DIR}/scripts/m15_single_node_wallet_lifecycle.sh" ]]
+  fi
+  if ! has_override_for_check "mac_centos_bridge_lifecycle"; then
+    [[ -x "${ROOT_DIR}/scripts/m13_mac_centos_interop_readiness.sh" ]]
+  fi
+  if ! has_override_for_check "centos_container_lifecycle" || ! has_override_for_check "mac_centos_bridge_lifecycle"; then
+    command -v docker >/dev/null 2>&1
+    docker info >/dev/null 2>&1
+  fi
 }
 
 run_centos_container_lifecycle() {

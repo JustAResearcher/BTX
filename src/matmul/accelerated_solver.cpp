@@ -271,11 +271,17 @@ bool ShouldUseCudaDevicePreparedInputsFastPath(uint32_t n,
     case CudaDevicePreparedInputsPolicy::FORCED_ON:
         return true;
     case CudaDevicePreparedInputsPolicy::AUTO:
+    {
+        const auto topology = btx::cuda::ProbeCudaTopology();
+        if (topology.available && topology.selected_devices.size() > 1) {
+            return false;
+        }
         return ShouldAutoUseCudaDevicePreparedInputsFastPath(
             n,
             transcript_block_size,
             noise_rank,
             digest_scheme);
+    }
     }
 
     return false;
@@ -399,7 +405,7 @@ std::vector<DigestResult> ComputeCudaDigestsPreparedBatch(const std::vector<CBlo
             for (const auto& prepared : prepared_batch) {
                 generated_inputs.push_back(prepared.cuda_generated_inputs.get());
             }
-            cuda_result = btx::cuda::ComputeCompressedWordsLowRankDeviceBatch(
+            cuda_result = btx::cuda::ComputeCompressedWordsLowRankDeviceBatchMultiDevice(
                 {
                     .n = blocks.front().matmul_dim,
                     .b = transcript_block_size,
@@ -431,7 +437,7 @@ std::vector<DigestResult> ComputeCudaDigestsPreparedBatch(const std::vector<CBlo
                 compress_ptrs.push_back(prepared.compress_vec.data());
             }
 
-            cuda_result = btx::cuda::ComputeCompressedWordsLowRankBatch(
+            cuda_result = btx::cuda::ComputeCompressedWordsLowRankBatchMultiDevice(
                 {
                     .n = blocks.front().matmul_dim,
                     .b = transcript_block_size,

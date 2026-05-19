@@ -34,6 +34,8 @@
              (guix packages)
              ((guix utils) #:select (cc-for-target substitute-keyword-arguments)))
 
+(load (string-append (dirname (current-filename)) "/cuda-packages.scm"))
+
 (define-syntax-rule (search-our-patches file-name ...)
   "Return the list of absolute file names corresponding to each
 FILE-NAME found in ./patches relative to the current file."
@@ -97,6 +99,22 @@ chain for " target " development."))
 (define base-gcc gcc-13) ;; 13.3.0
 
 (define base-linux-kernel-headers linux-libre-headers-6.1)
+
+(define guix-linux-flavor (or (getenv "GUIX_LINUX_FLAVOR") "cpu"))
+
+(define (cuda-toolkit-for-target target)
+  (cond ((and (string=? target "x86_64-linux-gnu")
+              (string=? guix-linux-flavor "cuda12"))
+         (list cuda-toolkit-12.9-btx))
+        ((and (string=? target "x86_64-linux-gnu")
+              (string=? guix-linux-flavor "cuda13"))
+         (list cuda-toolkit-13-btx))
+        ((or (string=? guix-linux-flavor "cpu")
+             (string=? guix-linux-flavor "default"))
+         '())
+        (else
+         (error "unsupported GUIX_LINUX_FLAVOR for target"
+                guix-linux-flavor target))))
 
 (define* (make-bitcoin-cross-toolchain target
                                        #:key
@@ -568,9 +586,11 @@ inspecting signatures in Mach-O binaries.")
                  nss-certs
                  osslsigncode))
           ((string-contains target "-linux-")
-           (list bison
-                 (list gcc-toolchain-13 "static")
-                 (make-bitcoin-cross-toolchain target)))
+           (append
+            (list bison
+                  (list gcc-toolchain-13 "static")
+                  (make-bitcoin-cross-toolchain target))
+            (cuda-toolkit-for-target target)))
           ((string-contains target "darwin")
            (list clang-toolchain-18
                  lld-18

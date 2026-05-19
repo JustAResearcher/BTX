@@ -131,7 +131,7 @@ jobs:
           printf 'snapshot payload\n' > "${workdir}/snapshot.dat"
           printf 'dummy attestation\n' > "${attestations_root}/noncodesigned.SHA256SUMS"
 
-          for platform_id in linux-x86_64 linux-arm64 windows-x86_64 macos-x86_64 macos-arm64; do
+          for platform_id in linux-x86_64 linux-x86_64-cuda12 linux-x86_64-cuda13 linux-arm64 windows-x86_64 macos-x86_64 macos-arm64; do
             python3 scripts/release/package_release_archive.py \
               --output-dir "${archive_root}" \
               --version 0.0.0-test \

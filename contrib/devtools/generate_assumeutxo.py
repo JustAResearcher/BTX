@@ -11,9 +11,13 @@ import argparse
 import hashlib
 import json
 import pathlib
+import struct
 import subprocess
 import sys
 from typing import Any
+
+
+SNAPSHOT_MAGIC_BYTES = b"utxo\xff"
 
 
 @dataclass(frozen=True)
@@ -24,6 +28,7 @@ class AssumeutxoSnapshot:
     blockhash: str
     path: str
     snapshot_sha256: str
+    snapshot_version: int
 
 
 def format_int_with_ticks(value: int) -> str:
@@ -41,6 +46,17 @@ def sha256_file(path: pathlib.Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def read_snapshot_file_version(path: pathlib.Path) -> int:
+    with path.open("rb") as handle:
+        header = handle.read(len(SNAPSHOT_MAGIC_BYTES) + 2)
+    if len(header) < len(SNAPSHOT_MAGIC_BYTES) + 2:
+        raise ValueError(f"Snapshot file {path} is too short to contain metadata")
+    magic = header[: len(SNAPSHOT_MAGIC_BYTES)]
+    if magic != SNAPSHOT_MAGIC_BYTES:
+        raise ValueError(f"Snapshot file {path} has invalid magic bytes")
+    return struct.unpack("<H", header[len(SNAPSHOT_MAGIC_BYTES) :])[0]
 
 
 def build_chainparams_entry(snapshot: AssumeutxoSnapshot, comment: str | None = None) -> str:
@@ -78,6 +94,7 @@ def build_release_manifest(
         "txoutset_hash": snapshot.txoutset_hash,
         "nchaintx": snapshot.nchaintx,
         "blockhash": snapshot.blockhash,
+        "snapshot_file_version": snapshot.snapshot_version,
         "snapshot_sha256": snapshot.snapshot_sha256,
         "sha256": snapshot.snapshot_sha256,
         "snapshot_size_bytes": snapshot_path.stat().st_size,
@@ -113,6 +130,7 @@ def build_report(
             "blockhash": snapshot.blockhash,
             "path": snapshot.path,
             "sha256": snapshot.snapshot_sha256,
+            "file_version": snapshot.snapshot_version,
         },
         "chainparams_snippet": "\n".join(
             [
@@ -158,6 +176,7 @@ def parse_snapshot_metadata(result: dict[str, Any], snapshot_path: pathlib.Path)
         blockhash=str(result["base_hash"]),
         path=str(snapshot_path.resolve()),
         snapshot_sha256=sha256_file(snapshot_path),
+        snapshot_version=read_snapshot_file_version(snapshot_path),
     )
 
 

@@ -12,13 +12,16 @@ trap cleanup EXIT
 
 PASS_ARTIFACT="${TMP_DIR}/pass.json"
 PASS_LOG_DIR="${TMP_DIR}/pass-logs"
+FAKE_BUILD_DIR="${TMP_DIR}/build-btx"
+FAKE_CENTOS_BUILD_DIR="${TMP_DIR}/build-btx-centos"
+mkdir -p "${FAKE_BUILD_DIR}" "${FAKE_CENTOS_BUILD_DIR}"
 
 BTX_M15_OVERRIDE_MAC_HOST_LIFECYCLE='echo mac-pass' \
 BTX_M15_OVERRIDE_CENTOS_CONTAINER_LIFECYCLE='echo centos-pass' \
 BTX_M15_OVERRIDE_MAC_CENTOS_BRIDGE_LIFECYCLE='echo bridge-pass' \
 "${SCRIPT}" \
-  --build-dir "${ROOT_DIR}/build-btx" \
-  --centos-build-dir "${ROOT_DIR}/build-btx-centos" \
+  --build-dir "${FAKE_BUILD_DIR}" \
+  --centos-build-dir "${FAKE_CENTOS_BUILD_DIR}" \
   --artifact "${PASS_ARTIFACT}" \
   --log-dir "${PASS_LOG_DIR}" \
   --timeout-seconds 30
@@ -50,8 +53,8 @@ BTX_M15_OVERRIDE_MAC_HOST_LIFECYCLE='echo mac-pass' \
 BTX_M15_OVERRIDE_CENTOS_CONTAINER_LIFECYCLE='echo centos-pass' \
 BTX_M15_OVERRIDE_MAC_CENTOS_BRIDGE_LIFECYCLE='echo forced fail >&2; exit 9' \
 "${SCRIPT}" \
-  --build-dir "${ROOT_DIR}/build-btx" \
-  --centos-build-dir "${ROOT_DIR}/build-btx-centos" \
+  --build-dir "${FAKE_BUILD_DIR}" \
+  --centos-build-dir "${FAKE_CENTOS_BUILD_DIR}" \
   --artifact "${FAIL_ARTIFACT}" \
   --log-dir "${FAIL_LOG_DIR}" \
   --timeout-seconds 30

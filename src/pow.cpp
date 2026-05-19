@@ -9,6 +9,7 @@
 #include <threadsafety.h>
 #include <chain.h>
 #include <crypto/kawpow.h>
+#include <cuda/cuda_scheduler.h>
 #include <cuda/matmul_accel.h>
 #include <hash.h>
 #include <logging.h>
@@ -205,6 +206,12 @@ uint32_t ResolveCudaMultiprocessorCountForHeuristics()
         return probe.available ? probe.multiprocessor_count : 0U;
     }();
     return sm_count;
+}
+
+uint32_t ExpandCudaAutoBatchSizeForSelectedDevices(uint32_t batch_size)
+{
+    const auto topology = btx::cuda::ProbeCudaTopology();
+    return btx::cuda::ExpandCudaBatchSizeForSelectedDevices(batch_size, topology.selected_devices.size());
 }
 
 std::optional<int32_t> ResolveEnvInt32Override(const char* name)
@@ -906,30 +913,30 @@ uint32_t ResolveSolveBatchSize(matmul::backend::Kind backend,
     if (backend == matmul::backend::Kind::CUDA) {
         const uint32_t cuda_sm_count = ResolveCudaMultiprocessorCountForHeuristics();
         const int32_t solver_threads = ResolveMatMulSolverThreadCount();
+        uint32_t batch_size{1};
         if (n >= 512 && transcript_block_size >= 16 && noise_rank >= 8) {
             if (product_digest_active) {
                 if (cuda_sm_count >= 96) {
-                    return solver_threads >= 6 ? 8 : 4;
+                    batch_size = solver_threads >= 6 ? 8 : 4;
+                } else if (cuda_sm_count >= 64) {
+                    batch_size = solver_threads >= 5 ? 6 : 4;
+                } else {
+                    batch_size = solver_threads >= 5 ? 4 : 2;
                 }
-                if (cuda_sm_count >= 64) {
-                    return solver_threads >= 5 ? 6 : 4;
-                }
-                if (cuda_sm_count >= 48) {
-                    return solver_threads >= 5 ? 4 : 2;
-                }
+            } else {
+                batch_size = solver_threads >= 5 ? 4 : 2;
             }
-            return solver_threads >= 5 ? 4 : 2;
+            return ExpandCudaAutoBatchSizeForSelectedDevices(batch_size);
         }
         if (n >= 256 && transcript_block_size >= 8 && noise_rank >= 4) {
             if (product_digest_active && cuda_sm_count >= 64) {
-                return solver_threads >= 5 ? 6 : 4;
+                batch_size = solver_threads >= 5 ? 6 : 4;
+            } else {
+                batch_size = solver_threads >= 4 ? 4 : 2;
             }
-            if (product_digest_active && cuda_sm_count >= 48) {
-                return solver_threads >= 4 ? 4 : 2;
-            }
-            return solver_threads >= 4 ? 4 : 2;
+            return ExpandCudaAutoBatchSizeForSelectedDevices(batch_size);
         }
-        return 1;
+        return ExpandCudaAutoBatchSizeForSelectedDevices(batch_size);
     }
     if (backend != matmul::backend::Kind::METAL) {
         return 1;

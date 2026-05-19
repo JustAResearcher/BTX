@@ -37,10 +37,13 @@ Use these docs first when you need the live binary-install, fast-start, mining,
 service-profile, or release-publication workflow:
 
 - [BTX Download-and-Go Guide](btx-download-and-go.md)
+- [Linux Release Build Variants](linux-release-builds.md)
 - [Assumeutxo Usage](assumeutxo.md)
+- [BTX Mining Node Snapshot Runbook](btx-mining-node-snapshot-runbook.md)
 - [BTX GitHub Release Automation](btx-github-release-automation.md)
 - [Release Process](release-process.md)
 - [BTX Metal Mining Tuning](btx-metal-mining-tuning.md)
+- [BTX CUDA Multi-Device Mining](btx-cuda-multi-device.md)
 - [Mining Operator Helpers](../contrib/mining/README.md)
 - [Fast-Start Validating Node Helpers](../contrib/faststart/README.md)
 
@@ -93,6 +96,7 @@ The following are developer notes on how to build BTX Node on your native platfo
 - [macOS Build Notes](build-osx.md)
 - [Unix Build Notes](build-unix.md)
 - [BTX CUDA MatMul Optimization Notes](btx-cuda-matmul-optimization-notes-2026-04-13.md)
+- [BTX CUDA Multi-Device Mining](btx-cuda-multi-device.md)
 - [Windows Build Notes](build-windows-msvc.md)
 - [FreeBSD Build Notes](build-freebsd.md)
 - [OpenBSD Build Notes](build-openbsd.md)

@@ -1,7 +1,7 @@
 # JSON-RPC Interface
 
 The headless daemon `btxd` (legacy alias: `bitcoind`) has the JSON-RPC API
-enabled by default, while `btx-qt` (legacy alias: `bitcoin-qt`) has it disabled
+enabled by default, while `btx-qt` has it disabled
 by default. This can be changed with the `-server` option. In the GUI it is
 possible to execute RPC methods in the Debug Console Dialog.
 

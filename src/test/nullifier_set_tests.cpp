@@ -464,6 +464,7 @@ BOOST_AUTO_TEST_CASE(persisted_shielded_state_roundtrip)
         Span<const shielded::registry::ShieldedAccountLeaf>{leaf_payloads.data(), leaf_payloads.size()}));
     const auto account_registry_snapshot = account_registry.ExportPersistedSnapshot();
     BOOST_REQUIRE(account_registry_snapshot.IsValid());
+    const std::vector<uint256> account_registry_roots{account_registry.Root(), GetRandHash()};
 
     BOOST_CHECK(ns.WritePersistedState(tree,
                                       anchor_roots,
@@ -471,10 +472,12 @@ BOOST_AUTO_TEST_CASE(persisted_shielded_state_roundtrip)
                                       tip_height,
                                       pool_balance,
                                       tree.CommitmentIndexDigest(),
-                                      account_registry_snapshot));
+                                      account_registry_snapshot,
+                                      account_registry_roots));
 
     shielded::ShieldedMerkleTree restored_tree;
     std::vector<uint256> restored_anchor_roots;
+    std::vector<uint256> restored_account_registry_roots;
     uint256 restored_tip_hash;
     int32_t restored_tip_height{-1};
     CAmount restored_pool_balance{0};
@@ -488,7 +491,8 @@ BOOST_AUTO_TEST_CASE(persisted_shielded_state_roundtrip)
         restored_tip_height,
         restored_pool_balance,
         restored_commitment_index_digest,
-        restored_account_registry_snapshot));
+        restored_account_registry_snapshot,
+        &restored_account_registry_roots));
 
     BOOST_CHECK_EQUAL(restored_tree.Size(), tree.Size());
     BOOST_CHECK_EQUAL(restored_tree.Root(), tree.Root());
@@ -497,6 +501,10 @@ BOOST_AUTO_TEST_CASE(persisted_shielded_state_roundtrip)
     BOOST_CHECK_EQUAL(restored_anchor_roots.size(), anchor_roots.size());
     for (size_t i = 0; i < anchor_roots.size(); ++i) {
         BOOST_CHECK_EQUAL(restored_anchor_roots[i], anchor_roots[i]);
+    }
+    BOOST_CHECK_EQUAL(restored_account_registry_roots.size(), account_registry_roots.size());
+    for (size_t i = 0; i < account_registry_roots.size(); ++i) {
+        BOOST_CHECK_EQUAL(restored_account_registry_roots[i], account_registry_roots[i]);
     }
     BOOST_CHECK_EQUAL(restored_tip_hash, tip_hash);
     BOOST_CHECK_EQUAL(restored_tip_height, tip_height);

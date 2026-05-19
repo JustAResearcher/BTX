@@ -3,6 +3,7 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <matmul/backend_capabilities.h>
+#include <cuda/cuda_scheduler.h>
 #include <cuda/matmul_accel.h>
 #include <cuda/oracle_accel.h>
 #include <matmul/noise.h>
@@ -19,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 #include <unistd.h>
 
 namespace {
@@ -28,6 +30,54 @@ uint256 ParseUint256(std::string_view hex)
     const auto parsed = uint256::FromHex(hex);
     BOOST_REQUIRE(parsed.has_value());
     return *parsed;
+}
+
+class ScopedEnvVar
+{
+public:
+    ScopedEnvVar(const char* name, const char* value) : m_name(name)
+    {
+        const char* current = std::getenv(name);
+        if (current != nullptr) {
+            m_had_original = true;
+            m_original = current;
+        }
+
+        if (value != nullptr) {
+            setenv(name, value, 1);
+        } else {
+            unsetenv(name);
+        }
+    }
+
+    ~ScopedEnvVar()
+    {
+        if (m_had_original) {
+            setenv(m_name, m_original.c_str(), 1);
+        } else {
+            unsetenv(m_name);
+        }
+    }
+
+private:
+    const char* m_name;
+    bool m_had_original{false};
+    std::string m_original;
+};
+
+btx::cuda::CudaDeviceInfo MakeCudaDeviceInfo(int device_index,
+                                             bool supported,
+                                             uint32_t multiprocessor_count,
+                                             uint32_t clock_rate_khz = 0)
+{
+    btx::cuda::CudaDeviceInfo device;
+    device.device_index = device_index;
+    device.supported = supported;
+    device.reason = supported ? "ready" : "unsupported";
+    device.device_name = "test-device";
+    device.multiprocessor_count = multiprocessor_count;
+    device.clock_rate_khz = clock_rate_khz;
+    return device;
 }
 
 } // namespace
@@ -50,6 +100,205 @@ BOOST_AUTO_TEST_CASE(unknown_backend_falls_back_to_cpu)
     BOOST_CHECK_EQUAL(matmul::backend::ToString(selection.active), "cpu");
     BOOST_CHECK_EQUAL(selection.reason, "unknown_backend_fallback_to_cpu");
 }
+
+BOOST_AUTO_TEST_CASE(cuda_batch_scheduler_splits_equivalent_devices_evenly)
+{
+    const ScopedEnvVar weights_env{"BTX_MATMUL_CUDA_DEVICE_WEIGHTS", nullptr};
+    const std::vector<btx::cuda::CudaDeviceInfo> devices{
+        MakeCudaDeviceInfo(0, true, 30),
+        MakeCudaDeviceInfo(1, true, 30),
+        MakeCudaDeviceInfo(2, true, 30),
+    };
+
+    const auto shards = btx::cuda::PlanCudaBatchShards(devices, 9);
+    BOOST_REQUIRE_EQUAL(shards.size(), 3U);
+    BOOST_CHECK_EQUAL(shards[0].device_index, 0);
+    BOOST_CHECK_EQUAL(shards[0].start_index, 0U);
+    BOOST_CHECK_EQUAL(shards[0].count, 3U);
+    BOOST_CHECK_EQUAL(shards[1].device_index, 1);
+    BOOST_CHECK_EQUAL(shards[1].start_index, 3U);
+    BOOST_CHECK_EQUAL(shards[1].count, 3U);
+    BOOST_CHECK_EQUAL(shards[2].device_index, 2);
+    BOOST_CHECK_EQUAL(shards[2].start_index, 6U);
+    BOOST_CHECK_EQUAL(shards[2].count, 3U);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_batch_scheduler_weights_varying_devices_by_sm_count)
+{
+    const ScopedEnvVar weights_env{"BTX_MATMUL_CUDA_DEVICE_WEIGHTS", nullptr};
+    const std::vector<btx::cuda::CudaDeviceInfo> devices{
+        MakeCudaDeviceInfo(0, true, 10),
+        MakeCudaDeviceInfo(1, true, 30),
+    };
+
+    const auto shards = btx::cuda::PlanCudaBatchShards(devices, 8);
+    BOOST_REQUIRE_EQUAL(shards.size(), 2U);
+    BOOST_CHECK_EQUAL(shards[0].device_index, 1);
+    BOOST_CHECK_EQUAL(shards[0].start_index, 0U);
+    BOOST_CHECK_EQUAL(shards[0].count, 6U);
+    BOOST_CHECK_EQUAL(shards[1].device_index, 0);
+    BOOST_CHECK_EQUAL(shards[1].start_index, 6U);
+    BOOST_CHECK_EQUAL(shards[1].count, 2U);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_batch_scheduler_uses_clock_weighting_when_available)
+{
+    const ScopedEnvVar weights_env{"BTX_MATMUL_CUDA_DEVICE_WEIGHTS", nullptr};
+    const std::vector<btx::cuda::CudaDeviceInfo> devices{
+        MakeCudaDeviceInfo(0, true, 20, 1000),
+        MakeCudaDeviceInfo(1, true, 10, 3000),
+    };
+
+    const auto shards = btx::cuda::PlanCudaBatchShards(devices, 8);
+    BOOST_REQUIRE_EQUAL(shards.size(), 2U);
+    BOOST_CHECK_EQUAL(shards[0].device_index, 1);
+    BOOST_CHECK_EQUAL(shards[0].start_index, 0U);
+    BOOST_CHECK_EQUAL(shards[0].count, 5U);
+    BOOST_CHECK_EQUAL(shards[1].device_index, 0);
+    BOOST_CHECK_EQUAL(shards[1].start_index, 5U);
+    BOOST_CHECK_EQUAL(shards[1].count, 3U);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_batch_scheduler_accepts_manual_device_weights)
+{
+    const ScopedEnvVar weights_env{"BTX_MATMUL_CUDA_DEVICE_WEIGHTS", "0:100,1:1"};
+    const std::vector<btx::cuda::CudaDeviceInfo> devices{
+        MakeCudaDeviceInfo(0, true, 1),
+        MakeCudaDeviceInfo(1, true, 100),
+    };
+
+    const auto shards = btx::cuda::PlanCudaBatchShards(devices, 4);
+    BOOST_REQUIRE_EQUAL(shards.size(), 2U);
+    BOOST_CHECK_EQUAL(shards[0].device_index, 0);
+    BOOST_CHECK_EQUAL(shards[0].start_index, 0U);
+    BOOST_CHECK_EQUAL(shards[0].count, 3U);
+    BOOST_CHECK_EQUAL(shards[1].device_index, 1);
+    BOOST_CHECK_EQUAL(shards[1].start_index, 3U);
+    BOOST_CHECK_EQUAL(shards[1].count, 1U);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_batch_scheduler_skips_unsupported_devices_and_prefers_stronger_card)
+{
+    const ScopedEnvVar weights_env{"BTX_MATMUL_CUDA_DEVICE_WEIGHTS", nullptr};
+    const std::vector<btx::cuda::CudaDeviceInfo> devices{
+        MakeCudaDeviceInfo(0, true, 8),
+        MakeCudaDeviceInfo(1, true, 48),
+        MakeCudaDeviceInfo(2, false, 128),
+    };
+
+    const auto shards = btx::cuda::PlanCudaBatchShards(devices, 1);
+    BOOST_REQUIRE_EQUAL(shards.size(), 1U);
+    BOOST_CHECK_EQUAL(shards[0].device_index, 1);
+    BOOST_CHECK_EQUAL(shards[0].start_index, 0U);
+    BOOST_CHECK_EQUAL(shards[0].count, 1U);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_auto_batch_policy_expands_to_cover_selected_devices)
+{
+    const ScopedEnvVar weights_env{"BTX_MATMUL_CUDA_DEVICE_WEIGHTS", nullptr};
+    const std::vector<btx::cuda::CudaDeviceInfo> selected_devices{
+        MakeCudaDeviceInfo(0, true, 30),
+        MakeCudaDeviceInfo(1, true, 30),
+        MakeCudaDeviceInfo(2, true, 30),
+    };
+
+    const uint32_t batch_size = btx::cuda::ExpandCudaBatchSizeForSelectedDevices(
+        /*batch_size=*/1,
+        selected_devices.size());
+    BOOST_CHECK_EQUAL(batch_size, 3U);
+
+    const auto shards = btx::cuda::PlanCudaBatchShards(selected_devices, batch_size);
+    BOOST_REQUIRE_EQUAL(shards.size(), selected_devices.size());
+    BOOST_CHECK_EQUAL(shards[0].device_index, 0);
+    BOOST_CHECK_EQUAL(shards[0].count, 1U);
+    BOOST_CHECK_EQUAL(shards[1].device_index, 1);
+    BOOST_CHECK_EQUAL(shards[1].count, 1U);
+    BOOST_CHECK_EQUAL(shards[2].device_index, 2);
+    BOOST_CHECK_EQUAL(shards[2].count, 1U);
+
+    BOOST_CHECK_EQUAL(btx::cuda::ExpandCudaBatchSizeForSelectedDevices(8, selected_devices.size()), 8U);
+    BOOST_CHECK_EQUAL(btx::cuda::ExpandCudaBatchSizeForSelectedDevices(1, 0), 1U);
+}
+
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+BOOST_AUTO_TEST_CASE(cuda_device_selection_defaults_to_all_supported_visible_devices)
+{
+    btx::cuda::CudaTopologyProbe topology;
+    topology.compiled = true;
+    topology.visible_devices = {
+        MakeCudaDeviceInfo(0, true, 20),
+        MakeCudaDeviceInfo(1, false, 30),
+        MakeCudaDeviceInfo(2, true, 40),
+    };
+
+    btx::cuda::ResolveSelectedCudaDevices(topology, "");
+    BOOST_CHECK(topology.available);
+    BOOST_CHECK_EQUAL(topology.reason, "ready");
+    BOOST_REQUIRE_EQUAL(topology.selected_devices.size(), 2U);
+    BOOST_CHECK_EQUAL(topology.selected_devices[0].device_index, 0);
+    BOOST_CHECK_EQUAL(topology.selected_devices[1].device_index, 2);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_device_selection_accepts_explicit_visible_ordinals)
+{
+    btx::cuda::CudaTopologyProbe topology;
+    topology.compiled = true;
+    topology.visible_devices = {
+        MakeCudaDeviceInfo(0, true, 20),
+        MakeCudaDeviceInfo(1, true, 30),
+        MakeCudaDeviceInfo(2, true, 40),
+    };
+
+    btx::cuda::ResolveSelectedCudaDevices(topology, "2,0,2");
+    BOOST_CHECK(topology.available);
+    BOOST_CHECK_EQUAL(topology.reason, "ready");
+    BOOST_REQUIRE_EQUAL(topology.selected_devices.size(), 2U);
+    BOOST_CHECK_EQUAL(topology.selected_devices[0].device_index, 2);
+    BOOST_CHECK_EQUAL(topology.selected_devices[1].device_index, 0);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_device_selection_fails_closed_for_invalid_or_unsupported_requests)
+{
+    btx::cuda::CudaTopologyProbe invalid_topology;
+    invalid_topology.compiled = true;
+    invalid_topology.visible_devices = {
+        MakeCudaDeviceInfo(0, true, 20),
+        MakeCudaDeviceInfo(1, true, 30),
+    };
+
+    btx::cuda::ResolveSelectedCudaDevices(invalid_topology, "0,abc");
+    BOOST_CHECK(!invalid_topology.available);
+    BOOST_CHECK_EQUAL(invalid_topology.reason, "invalid_cuda_device_selection:abc");
+    BOOST_CHECK(invalid_topology.selected_devices.empty());
+
+    btx::cuda::CudaTopologyProbe invisible_topology;
+    invisible_topology.compiled = true;
+    invisible_topology.visible_devices = {
+        MakeCudaDeviceInfo(0, true, 20),
+        MakeCudaDeviceInfo(1, true, 30),
+    };
+
+    btx::cuda::ResolveSelectedCudaDevices(invisible_topology, "3");
+    BOOST_CHECK(!invisible_topology.available);
+    BOOST_CHECK_EQUAL(invisible_topology.reason, "selected_cuda_device_not_visible:3");
+    BOOST_CHECK(invisible_topology.selected_devices.empty());
+
+    btx::cuda::CudaTopologyProbe unsupported_topology;
+    unsupported_topology.compiled = true;
+    unsupported_topology.visible_devices = {
+        MakeCudaDeviceInfo(0, true, 20),
+        MakeCudaDeviceInfo(1, false, 30),
+    };
+    unsupported_topology.visible_devices[1].reason = "device_compute_capability_too_old:sm_75";
+
+    btx::cuda::ResolveSelectedCudaDevices(unsupported_topology, "1");
+    BOOST_CHECK(!unsupported_topology.available);
+    BOOST_CHECK_EQUAL(
+        unsupported_topology.reason,
+        "selected_cuda_device_unsupported:1:device_compute_capability_too_old:sm_75");
+    BOOST_CHECK(unsupported_topology.selected_devices.empty());
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(cuda_backend_is_disabled_by_default)
 {
@@ -599,7 +848,7 @@ BOOST_AUTO_TEST_CASE(cuda_kernel_profile_reports_streamed_fused_pipeline)
     BOOST_CHECK(profile.device_prepared_inputs_supported);
     BOOST_CHECK(!profile.device_prepared_inputs_default);
     BOOST_CHECK_EQUAL(profile.device_prepared_inputs_enabled, env_enabled);
-    BOOST_CHECK_EQUAL(profile.execution_model, "nonblocking_stream_per_pool_slot");
+    BOOST_CHECK_EQUAL(profile.execution_model, "nonblocking_stream_per_device_pool_slot");
     BOOST_CHECK_EQUAL(profile.staging_strategy, "pinned_host_with_pageable_fallback");
     BOOST_CHECK_EQUAL(profile.device_prepared_inputs_policy, "auto_product_digest_shape_plus_env");
     BOOST_CHECK_EQUAL(profile.reason, "ready");

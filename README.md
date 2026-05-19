@@ -559,6 +559,9 @@ build walkthrough.
 For native CLI release assembly without Guix, see
 `scripts/release/cut_local_release.py` together with
 [doc/btx-github-release-automation.md](doc/btx-github-release-automation.md).
+For the prepackaged Linux CPU/CUDA release matrix, supported GPU hardware, and
+target-host driver requirements, see
+[doc/linux-release-builds.md](doc/linux-release-builds.md).
 
 If you only need the generic precompiled Windows x64 CLI archive from this
 branch, use the files in `contrib/prebuilt/windows/`.
@@ -592,7 +595,7 @@ branch, use the files in `contrib/prebuilt/windows/`.
 ### Fast-Start Validating Nodes
 
 BTX releases are designed to support a fast-start validating-node workflow for
-binary users: install a precompiled archive, load the matching rollback
+binary users: install a precompiled archive, load the latest matching rollback
 snapshot, and begin using wallet, mining, and service RPCs before a full
 historical sync finishes.
 
@@ -609,7 +612,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.7 \
+  --release-tag v0.30.0 \
   --preset service \
   --datadir="$HOME/.btx"
 ```
@@ -965,11 +968,20 @@ BTX_MATMUL_BACKEND=cuda ./build/bin/btxd \
   -server=1
 ```
 
+CUDA builds automatically detect all supported visible NVIDIA devices and use
+them for host-prepared MatMul digest batches. For multi-GPU selection,
+weighting, and per-device pool-slot tuning, see
+[doc/btx-cuda-multi-device.md](doc/btx-cuda-multi-device.md).
+
 To verify that the local CUDA backend is compiled and runtime-ready:
 
 ```bash
 ./build/bin/btx-matmul-backend-info --backend cuda
 ```
+
+Prepackaged Linux releases include separate CPU-only, CUDA 12, and CUDA 13
+archives. See [doc/linux-release-builds.md](doc/linux-release-builds.md) for
+the archive names, supported GPU targets, and NVIDIA driver requirements.
 
 ---
 
@@ -1008,7 +1020,18 @@ scripts/m15_single_node_wallet_lifecycle.sh \
   --build-dir build-btx \
   --artifact /tmp/btx-m15-single-node.json \
   --node-label mac-host
+
+# Full lifecycle matrix smoke
+scripts/m15_full_lifecycle_matrix.sh \
+  --build-dir build-btx \
+  --centos-build-dir build-btx-centos \
+  --artifact /tmp/btx-m15-matrix.json \
+  --log-dir /tmp/btx-m15-matrix-logs
 ```
+
+Typical pass markers:
+`M15 single-node lifecycle checks passed (mac-host):`
+`Overall status: pass`
 
 ### Full CI Matrix (Local)
 

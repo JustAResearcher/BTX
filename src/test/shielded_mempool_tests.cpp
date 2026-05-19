@@ -7,6 +7,7 @@
 #include <kernel/mempool_entry.h>
 #include <shielded/lattice/params.h>
 #include <shielded/v2_bundle.h>
+#include <test/util/shielded_fee_carrier.h>
 #include <test/util/shielded_account_registry_test_util.h>
 #include <test/util/setup_common.h>
 #include <test/util/shielded_smile_test_util.h>
@@ -469,7 +470,10 @@ BOOST_FIXTURE_TEST_CASE(shielded_v2_settlement_anchor_cleanup_preserves_valid_ma
     ChainstateManager& chainman = *Assert(m_node.chainman);
     CTxMemPool& pool = *Assert(m_node.mempool);
 
-    const auto valid_rebalance_fixture = test::shielded::BuildV2RebalanceFixture();
+    auto valid_rebalance_fixture = test::shielded::BuildV2RebalanceFixture();
+    test::shielded::AttachCoinbaseFeeCarrier(*this,
+                                             valid_rebalance_fixture.tx,
+                                             m_coinbase_txns.at(0));
 
     auto valid_settlement_anchor_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture();
     test::shielded::AttachSettlementAnchorReserveBinding(

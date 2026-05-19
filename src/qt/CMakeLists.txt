@@ -394,54 +394,49 @@ if(qt_lib_type STREQUAL "STATIC_LIBRARY")
   )
 endif()
 
-add_executable(bitcoin-qt
+add_executable(btx-qt
   main.cpp
   ../init/bitcoin-qt.cpp
 )
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-  add_dependencies(bitcoin-qt generate_ico)
+  add_dependencies(btx-qt generate_ico)
 endif()
 
 if(WIN32)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/res/bitcoin-qt-res.rc ${CMAKE_CURRENT_BINARY_DIR}/res/bitcoin-qt-res.rc USE_SOURCE_PERMISSIONS @ONLY)
-  add_windows_resources(bitcoin-qt ${CMAKE_CURRENT_BINARY_DIR}/res/bitcoin-qt-res.rc)
+  add_windows_resources(btx-qt ${CMAKE_CURRENT_BINARY_DIR}/res/bitcoin-qt-res.rc)
 endif()
 
-set_target_properties(bitcoin-qt PROPERTIES OUTPUT_NAME btx-qt)
-target_link_libraries(bitcoin-qt
+target_link_libraries(btx-qt
   core_interface
   bitcoinqt
   bitcoin_node
 )
 
-import_plugins(bitcoin-qt)
-install_binary_component(bitcoin-qt HAS_MANPAGE)
+import_plugins(btx-qt)
+install_binary_component(btx-qt HAS_MANPAGE)
 if(WIN32)
-  set_target_properties(bitcoin-qt PROPERTIES WIN32_EXECUTABLE TRUE)
-endif()
-if(NOT TARGET btx-qt)
-  add_custom_target(btx-qt DEPENDS bitcoin-qt)
+  set_target_properties(btx-qt PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 
 if(WITH_MULTIPROCESS)
-  add_executable(bitcoin-gui
+  add_executable(btx-gui
     main.cpp
     ../init/bitcoin-gui.cpp
   )
-  target_link_libraries(bitcoin-gui
+  target_link_libraries(btx-gui
     core_interface
     bitcoinqt
     bitcoin_node
     bitcoin_ipc
   )
-  import_plugins(bitcoin-gui)
-  install_binary_component(bitcoin-gui)
+  import_plugins(btx-gui)
+  install_binary_component(btx-gui)
+  add_legacy_binary_alias(btx-gui bitcoin-gui)
+  add_legacy_target_alias(bitcoin-gui btx-gui)
   if(WIN32)
-    set_target_properties(bitcoin-gui PROPERTIES WIN32_EXECUTABLE TRUE)
-  endif()
-  if(NOT TARGET btx-gui)
-    add_custom_target(btx-gui DEPENDS bitcoin-gui)
+    set_target_properties(btx-gui PROPERTIES WIN32_EXECUTABLE TRUE)
   endif()
 endif()
 

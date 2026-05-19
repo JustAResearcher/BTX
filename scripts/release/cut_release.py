@@ -28,11 +28,22 @@ PRIMARY_GUIX_HOSTS = (
 )
 PRIMARY_HOST_PATTERNS = {
     "x86_64-linux-gnu": ("*-x86_64-linux-gnu.tar.gz",),
+    "x86_64-linux-gnu-cuda12": ("*-x86_64-linux-gnu-cuda12.tar.gz",),
+    "x86_64-linux-gnu-cuda13": ("*-x86_64-linux-gnu-cuda13.tar.gz",),
     "aarch64-linux-gnu": ("*-aarch64-linux-gnu.tar.gz",),
     "x86_64-w64-mingw32": ("*-win64-pgpverifiable.zip",),
     "x86_64-apple-darwin": ("*-x86_64-apple-darwin-unsigned.tar.gz",),
     "arm64-apple-darwin": ("*-arm64-apple-darwin-unsigned.tar.gz",),
 }
+PRIMARY_GUIX_OUTPUTS = (
+    "x86_64-linux-gnu",
+    "x86_64-linux-gnu-cuda12",
+    "x86_64-linux-gnu-cuda13",
+    "aarch64-linux-gnu",
+    "x86_64-w64-mingw32",
+    "x86_64-apple-darwin",
+    "arm64-apple-darwin",
+)
 
 
 def repo_root_from_script() -> Path:
@@ -62,7 +73,7 @@ def default_smoke_install_dir(bundle_dir: Path, platform_id: str) -> Path:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default="btxchain/btx", help="GitHub repository in owner/name form.")
-    parser.add_argument("--tag", required=True, help="Release tag to stage or publish, for example v0.29.7.")
+    parser.add_argument("--tag", required=True, help="Release tag to stage or publish, for example v0.30.0.")
     parser.add_argument("--release-name", help="Human-readable release title. Defaults to the tag name.")
     parser.add_argument(
         "--repo-root",
@@ -209,6 +220,10 @@ def run_checked(command: list[str], *, cwd: Path | None = None, env: dict[str, s
 
 def resolve_guix_hosts(args: argparse.Namespace) -> list[str]:
     return list(args.guix_host) if args.guix_host else list(PRIMARY_GUIX_HOSTS)
+
+
+def resolve_guix_outputs(args: argparse.Namespace) -> list[str]:
+    return list(args.guix_host) if args.guix_host else list(PRIMARY_GUIX_OUTPUTS)
 
 
 def resolve_guix_output_dir(args: argparse.Namespace, repo_root: Path) -> Path:
@@ -442,11 +457,12 @@ def main(argv: list[str]) -> int:
     repo_root = Path(args.repo_root).resolve()
     bundle_dir = Path(args.bundle_dir).resolve()
     hosts = resolve_guix_hosts(args)
+    guix_outputs = resolve_guix_outputs(args)
 
     maybe_run_guix_build(args, repo_root, hosts)
     guix_output_dir = resolve_guix_output_dir(args, repo_root)
-    source_dirs = ensure_source_dirs(guix_output_dir, hosts)
-    primary_archives = resolve_primary_archives(source_dirs, hosts)
+    source_dirs = ensure_source_dirs(guix_output_dir, guix_outputs)
+    primary_archives = resolve_primary_archives(source_dirs, guix_outputs)
     attestation_dirs = resolve_attestation_dirs(args, repo_root)
     snapshot, snapshot_manifest, snapshot_report = maybe_generate_snapshot(args, repo_root)
 
@@ -485,6 +501,7 @@ def main(argv: list[str]) -> int:
         "release_name": args.release_name or args.tag,
         "guix_output_dir": str(guix_output_dir),
         "guix_hosts": hosts,
+        "guix_outputs": guix_outputs,
         "primary_archives": [str(path) for path in primary_archives],
         "attestations_dir": [str(path) for path in attestation_dirs],
         "snapshot": str(snapshot) if snapshot else None,

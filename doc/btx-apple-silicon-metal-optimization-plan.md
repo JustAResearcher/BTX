@@ -673,7 +673,7 @@ superlinear scaling with more GPU cores.
 
 **Out of scope for this phase:**
 - Consensus math (satoshis, `COIN`, `MAX_MONEY`, chain format)
-- Executable/package names (`bitcoind`, `bitcoin-cli`, `bitcoin-qt`) to avoid release/package churn
+- Executable/package names (`btxd`, `btx-cli`, `btx-qt`) to avoid release/package churn
 - Historical release notes text that is intentionally archival
 
 ### 8B. Required Code Changes (deep scan results)
@@ -685,7 +685,7 @@ superlinear scaling with more GPU cores.
 | RPC help and wallet text that already use `CURRENCY_UNIT` | `src/init.cpp`, `src/rpc/*.cpp`, `src/wallet/init.cpp`, `src/wallet/rpc/*.cpp`, `src/bitcoin-cli.cpp` | Mostly automatic after `CURRENCY_UNIT` update; verify all generated strings | Functional tests parse exact key names like `(.../kvB)` |
 | Hardcoded BTC literals in examples/help | `src/wallet/rpc/spend.cpp`, `src/rpc/util.h`, `src/rpc/mining.cpp` | Replace hardcoded `BTC` examples with `BTX` | Tests comparing error/help text can fail |
 | Qt default unit and labels | `src/qt/bitcoinunits.cpp`, `src/qt/bitcoinunits.h`, `src/qt/optionsmodel.cpp`, `src/qt/overviewpage.cpp`, `src/qt/blockview.cpp`, `src/qt/guiutil.cpp`, `src/qt/psbtoperationsdialog.cpp`, `src/qt/bitcoinamountfield.cpp`, `src/qt/coincontroldialog.cpp`, `src/qt/forms/*.ui` | Change displayed unit short/long names and placeholder text to `BTX`; ensure default display still maps to index 0 | Settings compatibility: avoid changing serialized unit IDs unless migration is explicit |
-| Man pages | `doc/man/bitcoind.1`, `doc/man/bitcoin-qt.1` | Regenerate after help text changes to update `BTC/kvB` references | CI/doc checks can fail if generated docs are stale |
+| Man pages | `doc/man/btxd.1`, `doc/man/btx-qt.1` | Regenerate after help text changes to update `BTC/kvB` references | CI/doc checks can fail if generated docs are stale |
 | General comments/docs | `src/consensus/amount.h`, selected docs/tests | Update where wording is user-facing; keep archival/historical references untouched | Avoid excessive churn in non-user-facing comments |
 
 ### 8C. Dependency-Safe Migration Strategy

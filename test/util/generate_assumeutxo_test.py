@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import struct
 import sys
 import tempfile
 import unittest
@@ -36,6 +37,7 @@ class GenerateAssumeutxoTest(unittest.TestCase):
             blockhash="abcdef0123456789" * 4,
             path="/tmp/utxo.dat",
             snapshot_sha256="f0" * 32,
+            snapshot_version=7,
         )
 
         snippet = self.module.build_chainparams_entry(metadata, comment="mainnet snapshot")
@@ -57,6 +59,7 @@ class GenerateAssumeutxoTest(unittest.TestCase):
                 blockhash="22" * 32,
                 path=str(snapshot_path),
                 snapshot_sha256="33" * 32,
+                snapshot_version=7,
             )
 
             report = self.module.build_report(
@@ -71,9 +74,26 @@ class GenerateAssumeutxoTest(unittest.TestCase):
             self.assertEqual(report["chain"], "main")
             self.assertEqual(report["snapshot"]["height"], 50000)
             self.assertEqual(report["snapshot"]["sha256"], "33" * 32)
+            self.assertEqual(report["snapshot"]["file_version"], 7)
             self.assertIn("m_assumeutxo_data", report["chainparams_snippet"])
             self.assertEqual(report["asset"]["url"], "https://node.btxchain.org/releases/utxo.dat")
             self.assertEqual(report["asset"]["sha256"], "33" * 32)
+            self.assertEqual(report["release_asset_manifest"]["snapshot_file_version"], 7)
+
+    def test_read_snapshot_file_version_reads_header(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = pathlib.Path(tmpdir) / "utxo.dat"
+            snapshot_path.write_bytes(b"utxo\xff" + struct.pack("<H", 7) + b"rest")
+
+            self.assertEqual(self.module.read_snapshot_file_version(snapshot_path), 7)
+
+    def test_read_snapshot_file_version_rejects_invalid_magic(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = pathlib.Path(tmpdir) / "utxo.dat"
+            snapshot_path.write_bytes(b"bad!!" + struct.pack("<H", 7))
+
+            with self.assertRaises(ValueError):
+                self.module.read_snapshot_file_version(snapshot_path)
 
 
 if __name__ == "__main__":

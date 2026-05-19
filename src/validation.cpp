@@ -91,6 +91,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 using kernel::CCoinsStats;
 using kernel::CoinStatsHashType;
@@ -392,6 +393,124 @@ MakePreparedShieldedSnapshot(const shielded::ShieldedMerkleTree& tree,
         /*memory_only=*/false,
         wipe_data);
 }
+
+struct ShieldedStateDirectoryBackupEntry {
+    fs::path live_path;
+    fs::path backup_path;
+};
+
+struct ShieldedStateDirectoryBackup {
+    fs::path backup_root;
+    std::vector<fs::path> managed_paths;
+    std::vector<ShieldedStateDirectoryBackupEntry> entries;
+};
+
+[[nodiscard]] std::vector<fs::path> GetShieldedStateStorePaths(const fs::path& datadir)
+{
+    const fs::path shielded_state_dir = datadir / "shielded_state";
+    return {
+        shielded_state_dir / "nullifiers",
+        shielded_state_dir / "commitments",
+        shielded_state_dir / "account_registry",
+    };
+}
+
+[[nodiscard]] bool RestoreShieldedStateDirectoryBackup(ShieldedStateDirectoryBackup& backup,
+                                                       bool remove_partial_live_paths = true)
+{
+    bool restored{true};
+    if (remove_partial_live_paths) {
+        for (auto it = backup.managed_paths.rbegin(); it != backup.managed_paths.rend(); ++it) {
+            try {
+                if (fs::exists(*it)) {
+                    fs::remove_all(*it);
+                }
+            } catch (const fs::filesystem_error& e) {
+                LogPrintf("RestoreShieldedStateDirectoryBackup: failed removing partial shielded state path %s: %s\n",
+                          fs::PathToString(*it),
+                          fsbridge::get_filesystem_error_message(e));
+                restored = false;
+            }
+        }
+    }
+    for (auto it = backup.entries.rbegin(); it != backup.entries.rend(); ++it) {
+        try {
+            if (!fs::exists(it->backup_path)) {
+                LogPrintf("RestoreShieldedStateDirectoryBackup: missing backup path %s for %s\n",
+                          fs::PathToString(it->backup_path),
+                          fs::PathToString(it->live_path));
+                restored = false;
+                continue;
+            }
+            fs::rename(it->backup_path, it->live_path);
+        } catch (const fs::filesystem_error& e) {
+            LogPrintf("RestoreShieldedStateDirectoryBackup: failed restoring %s from %s: %s\n",
+                      fs::PathToString(it->live_path),
+                      fs::PathToString(it->backup_path),
+                      fsbridge::get_filesystem_error_message(e));
+            restored = false;
+        }
+    }
+
+    try {
+        if (!backup.backup_root.empty() && fs::exists(backup.backup_root)) {
+            fs::remove_all(backup.backup_root);
+        }
+    } catch (const fs::filesystem_error& e) {
+        LogPrintf("RestoreShieldedStateDirectoryBackup: failed removing backup root %s: %s\n",
+                  fs::PathToString(backup.backup_root),
+                  fsbridge::get_filesystem_error_message(e));
+        restored = false;
+    }
+    backup.managed_paths.clear();
+    backup.entries.clear();
+    return restored;
+}
+
+[[nodiscard]] bool DiscardShieldedStateDirectoryBackup(ShieldedStateDirectoryBackup& backup)
+{
+    try {
+        if (!backup.backup_root.empty() && fs::exists(backup.backup_root)) {
+            fs::remove_all(backup.backup_root);
+        }
+    } catch (const fs::filesystem_error& e) {
+        LogPrintf("DiscardShieldedStateDirectoryBackup: failed removing backup root %s: %s\n",
+                  fs::PathToString(backup.backup_root),
+                  fsbridge::get_filesystem_error_message(e));
+        return false;
+    }
+    backup.managed_paths.clear();
+    backup.entries.clear();
+    return true;
+}
+
+[[nodiscard]] std::optional<ShieldedStateDirectoryBackup> BackupShieldedStateDirectories(
+    const fs::path& datadir)
+{
+    ShieldedStateDirectoryBackup backup;
+    backup.backup_root = datadir / fs::PathFromString(
+        strprintf("shielded_state_snapshot_backup_%s", GetRandHash().ToString()));
+    backup.managed_paths = GetShieldedStateStorePaths(datadir);
+
+    try {
+        for (const fs::path& live_path : backup.managed_paths) {
+            if (!fs::exists(live_path)) continue;
+            if (backup.entries.empty()) {
+                fs::create_directories(backup.backup_root);
+            }
+            const fs::path backup_path = backup.backup_root / live_path.filename();
+            fs::rename(live_path, backup_path);
+            backup.entries.push_back({live_path, backup_path});
+        }
+    } catch (const fs::filesystem_error& e) {
+        LogPrintf("BackupShieldedStateDirectories: failed staging shielded state backup under %s: %s\n",
+                  fs::PathToString(backup.backup_root),
+                  fsbridge::get_filesystem_error_message(e));
+        (void)RestoreShieldedStateDirectoryBackup(backup, /*remove_partial_live_paths=*/false);
+        return std::nullopt;
+    }
+    return backup;
+}
 } // namespace
 
 ReorgProtectionRuntimeStats ProbeReorgProtectionRuntimeStats()
@@ -498,6 +617,17 @@ namespace {
         cursor = cursor->pprev;
     }
     return true;
+}
+
+[[nodiscard]] size_t ExpectedShieldedRecentHistoryCount(const CBlockIndex* tip)
+{
+    size_t count{0};
+    const CBlockIndex* cursor = tip;
+    while (count < static_cast<size_t>(SHIELDED_ANCHOR_DEPTH) && cursor != nullptr) {
+        ++count;
+        cursor = cursor->pprev;
+    }
+    return count;
 }
 
 [[nodiscard]] bool UsesShieldedSpendAuthChecks(const CShieldedBundle& bundle)
@@ -998,6 +1128,52 @@ template <typename Spend>
     return chainstate.m_blockman.ReadBlock(block, *fallback_pos, index.GetBlockHash());
 }
 
+[[nodiscard]] static bool ShieldedRebuildBlockAvailable(const Chainstate& chainstate,
+                                                        const CBlockIndex& index)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    AssertLockHeld(::cs_main);
+
+    if (chainstate.m_blockman.IsBlockPruned(index)) {
+        return false;
+    }
+    if ((index.nStatus & BLOCK_HAVE_DATA) == 0 &&
+        index.nDataPos < node::BLOCK_SERIALIZATION_HEADER_SIZE) {
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] static bool ShieldedRebuildHistoryBlocksAvailable(const Chainstate& chainstate,
+                                                                const CBlockIndex* tip)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    AssertLockHeld(::cs_main);
+
+    const CBlockIndex* cursor = tip;
+    for (int depth = 0; depth < SHIELDED_ANCHOR_DEPTH && cursor != nullptr; ++depth) {
+        if (!ShieldedRebuildBlockAvailable(chainstate, *cursor)) {
+            return false;
+        }
+        cursor = cursor->pprev;
+    }
+    return true;
+}
+
+[[nodiscard]] static bool ShieldedFullRebuildBlocksAvailable(const Chainstate& chainstate,
+                                                             const CBlockIndex* tip)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    AssertLockHeld(::cs_main);
+
+    for (const CBlockIndex* cursor = tip; cursor != nullptr; cursor = cursor->pprev) {
+        if (!ShieldedRebuildBlockAvailable(chainstate, *cursor)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] static bool CollectShieldedAnchorHistoryFromTree(
     const Chainstate& chainstate,
     const CBlockIndex* tip,
@@ -1385,6 +1561,156 @@ static void RefreshShieldedValidationSnapshots(
     return true;
 }
 
+[[nodiscard]] bool LoadShieldedAccountRegistryRootWindow(
+    const std::vector<uint256>& roots,
+    const uint256& current_root,
+    std::optional<size_t> expected_size,
+    const char* context,
+    std::deque<uint256>& root_window)
+{
+    if (current_root.IsNull()) {
+        LogError("%s: current account-registry root is null\n", context);
+        return false;
+    }
+    if (roots.empty()) {
+        LogError("%s: account-registry root window is empty\n", context);
+        return false;
+    }
+    if (roots.size() > static_cast<size_t>(SHIELDED_ANCHOR_DEPTH) + 1U) {
+        LogError("%s: account-registry root window has %u entries, maximum is %u\n",
+                 context,
+                 static_cast<unsigned int>(roots.size()),
+                 static_cast<unsigned int>(static_cast<size_t>(SHIELDED_ANCHOR_DEPTH) + 1U));
+        return false;
+    }
+    if (expected_size.has_value() && roots.size() != *expected_size) {
+        LogError("%s: account-registry root window has %u entries, expected %u\n",
+                 context,
+                 static_cast<unsigned int>(roots.size()),
+                 static_cast<unsigned int>(*expected_size));
+        return false;
+    }
+    if (roots.front() != current_root) {
+        LogError("%s: account-registry root window current root mismatch expected=%s actual=%s\n",
+                 context,
+                 current_root.ToString(),
+                 roots.front().ToString());
+        return false;
+    }
+    if (std::any_of(roots.begin(), roots.end(), [](const uint256& root) { return root.IsNull(); })) {
+        LogError("%s: account-registry root window contains a null root\n", context);
+        return false;
+    }
+
+    root_window.assign(roots.begin(), roots.end());
+    return true;
+}
+
+[[nodiscard]] bool DeriveShieldedAccountRegistryHistoryFromV6Snapshot(
+    const shielded::ShieldedMerkleTree& tree,
+    const shielded::registry::ShieldedAccountRegistryState& current_registry,
+    const std::vector<uint64_t>& recent_output_counts,
+    std::deque<uint256>& rebuilt_roots)
+{
+    rebuilt_roots.clear();
+
+    uint64_t recent_output_total{0};
+    for (const uint64_t output_count : recent_output_counts) {
+        const auto next_total = CheckedAdd(recent_output_total, output_count);
+        if (!next_total.has_value()) {
+            LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: recent output count overflow\n");
+            return false;
+        }
+        recent_output_total = *next_total;
+    }
+
+    const uint64_t tree_size = tree.Size();
+    const uint64_t registry_size = static_cast<uint64_t>(current_registry.Size());
+    if (recent_output_total > tree_size) {
+        LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: recent outputs=%" PRIu64 " exceed commitment count=%" PRIu64 "\n",
+                 recent_output_total,
+                 tree_size);
+        return false;
+    }
+    if (recent_output_total > registry_size) {
+        LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: recent outputs=%" PRIu64 " exceed account-registry entries=%" PRIu64 "\n",
+                 recent_output_total,
+                 registry_size);
+        return false;
+    }
+
+    const uint64_t commitment_offset = tree_size - recent_output_total;
+    const uint64_t registry_offset = registry_size - recent_output_total;
+    for (uint64_t i = 0; i < recent_output_total; ++i) {
+        const auto commitment = tree.CommitmentAt(commitment_offset + i);
+        if (!commitment.has_value()) {
+            LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: missing commitment at position=%" PRIu64 "\n",
+                     commitment_offset + i);
+            return false;
+        }
+
+        const auto entry = current_registry.MaterializeEntry(registry_offset + i);
+        if (!entry.has_value()) {
+            LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: missing account-registry entry at index=%" PRIu64 "\n",
+                     registry_offset + i);
+            return false;
+        }
+        if (entry->spent) {
+            LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: account-registry entry at index=%" PRIu64 " is spent\n",
+                     registry_offset + i);
+            return false;
+        }
+
+        const auto leaf = shielded::registry::DeserializeShieldedAccountLeafPayload(
+            Span<const uint8_t>{entry->account_leaf_payload.data(),
+                                entry->account_leaf_payload.size()});
+        if (!leaf.has_value()) {
+            LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: invalid account-registry leaf payload at index=%" PRIu64 "\n",
+                     registry_offset + i);
+            return false;
+        }
+        if (leaf->note_commitment != *commitment) {
+            LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: note commitment mismatch at recent offset=%" PRIu64 " commitment=%s leaf=%s\n",
+                     i,
+                     commitment->ToString(),
+                     leaf->note_commitment.ToString());
+            return false;
+        }
+    }
+
+    shielded::registry::ShieldedAccountRegistryState cursor_registry = current_registry;
+    const uint256 current_root = cursor_registry.Root();
+    if (current_root.IsNull()) {
+        LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: current account-registry root is null\n");
+        return false;
+    }
+    rebuilt_roots.push_back(current_root);
+    for (const uint64_t output_count : recent_output_counts) {
+        const uint64_t cursor_size = static_cast<uint64_t>(cursor_registry.Size());
+        if (output_count > cursor_size) {
+            LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: output count=%" PRIu64 " exceeds cursor registry size=%" PRIu64 "\n",
+                     output_count,
+                     cursor_size);
+            return false;
+        }
+        if (output_count > 0 &&
+            !cursor_registry.Truncate(
+                static_cast<size_t>(cursor_size - output_count),
+                shielded::registry::ShieldedAccountRegistryState::PayloadPruneMode::KEEP)) {
+            LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: failed to remove %" PRIu64 " account-registry leaves\n",
+                     output_count);
+            return false;
+        }
+        const uint256 rebuilt_root = cursor_registry.Root();
+        if (rebuilt_root.IsNull()) {
+            LogError("DeriveShieldedAccountRegistryHistoryFromV6Snapshot: derived null account-registry root\n");
+            return false;
+        }
+        rebuilt_roots.push_back(rebuilt_root);
+    }
+    return true;
+}
+
 [[nodiscard]] bool RebuildShieldedSettlementAnchorState(const node::BlockManager& blockman,
                                                         const Consensus::Params& consensus,
                                                         const CBlockIndex* tip,
@@ -1676,6 +2002,7 @@ enum class PersistedShieldedMetadataSyncMode {
     AssertLockHeld(::cs_main);
     if (&chainstate != &chainstate.m_chainman.ActiveChainstate()) return true;
     if (!chainstate.m_chainman.HasShieldedState()) return true;
+    if (chainstate.m_from_snapshot_blockhash) return true;
 
     shielded::ShieldedMerkleTree rebuilt_tree{
         shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
@@ -9951,6 +10278,22 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         return util::Error{std::move(reason)};
     };
 
+    auto release_partial_shielded_snapshot_state = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        m_shielded_nullifiers.reset();
+        m_shielded_merkle_tree = shielded::ShieldedMerkleTree{
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+        shielded::ShieldedMerkleTree::ResetCommitmentIndexStore();
+        m_shielded_account_registry = shielded::registry::ShieldedAccountRegistryState{};
+        shielded::registry::ShieldedAccountRegistryState::ResetPayloadStore();
+        m_shielded_smile_public_accounts.clear();
+        m_shielded_account_leaf_commitments.clear();
+        InvalidateShieldedAccountStateSnapshotCaches();
+        m_shielded_anchor_roots.clear();
+        m_shielded_account_registry_roots.clear();
+        m_shielded_pool_balance = ShieldedPoolBalance{};
+        m_shielded_state_initialized = false;
+    };
+
     if (auto res{this->PopulateAndValidateSnapshot(*snapshot_chainstate, coins_file, metadata)}; !res) {
         LOCK(::cs_main);
         return cleanup_bad_snapshot(Untranslated(strprintf("Population failed: %s", util::ErrorString(res).original)));
@@ -9991,6 +10334,7 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
 
     if (shielded_snapshot_section &&
         !LoadShieldedSnapshotSection(coins_file, *shielded_snapshot_section, snapshot_start_block)) {
+        release_partial_shielded_snapshot_state();
         return cleanup_bad_snapshot(Untranslated("could not load BTX shielded snapshot section"));
     }
 
@@ -10830,6 +11174,18 @@ ShieldedSnapshotSectionHeader ChainstateManager::GetShieldedSnapshotSectionHeade
     if (!CollectRecentShieldedOutputCounts(chainstate, tip, header.m_recent_output_counts)) {
         throw std::runtime_error("Failed to collect BTX shielded snapshot output counts");
     }
+    std::deque<uint256> account_registry_roots;
+    if (!CollectShieldedAccountRegistryHistoryFromState(chainstate,
+                                                        tip,
+                                                        m_shielded_account_registry,
+                                                        account_registry_roots)) {
+        throw std::runtime_error("Failed to collect BTX shielded account-registry snapshot roots");
+    }
+    if (account_registry_roots.size() != header.m_recent_output_counts.size() + 1U) {
+        throw std::runtime_error("BTX shielded account-registry snapshot root/count mismatch");
+    }
+    header.m_account_registry_roots.assign(account_registry_roots.begin(),
+                                           account_registry_roots.end());
     return header;
 }
 
@@ -10895,6 +11251,12 @@ bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip)
         anchor_roots.push_back(root);
     }
 
+    std::vector<uint256> account_registry_roots;
+    account_registry_roots.reserve(m_shielded_account_registry_roots.size());
+    for (const auto& root : m_shielded_account_registry_roots) {
+        account_registry_roots.push_back(root);
+    }
+
     const auto account_registry_snapshot = m_shielded_account_registry.ExportPersistedSnapshot();
     if (!account_registry_snapshot.IsValid()) {
         LogPrintf("PersistShieldedState: invalid account registry snapshot size=%u root=%s\n",
@@ -10910,7 +11272,8 @@ bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip)
         tip ? tip->nHeight : -1,
         m_shielded_pool_balance.GetBalance(),
         commitment_index_digest,
-        account_registry_snapshot)) {
+        account_registry_snapshot,
+        account_registry_roots)) {
         return false;
     }
     return m_shielded_nullifiers->ClearMutationMarker();
@@ -10924,7 +11287,8 @@ bool ChainstateManager::ReadPersistedShieldedState(
     CAmount& balance,
     std::optional<uint256>& commitment_index_digest,
     std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>&
-        account_registry_snapshot) const
+        account_registry_snapshot,
+    std::vector<uint256>* account_registry_roots) const
 {
     AssertLockHeld(::cs_main);
     if (!m_shielded_nullifiers) return false;
@@ -10934,7 +11298,8 @@ bool ChainstateManager::ReadPersistedShieldedState(
                                                      tip_height,
                                                      balance,
                                                      commitment_index_digest,
-                                                     account_registry_snapshot);
+                                                     account_registry_snapshot,
+                                                     account_registry_roots);
 }
 
 bool ChainstateManager::WritePersistedShieldedState(
@@ -10945,7 +11310,8 @@ bool ChainstateManager::WritePersistedShieldedState(
     CAmount balance,
     std::optional<uint256> commitment_index_digest,
     std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
-        account_registry_snapshot)
+        account_registry_snapshot,
+    std::vector<uint256> account_registry_roots)
 {
     AssertLockHeld(::cs_main);
     if (!m_shielded_nullifiers) return false;
@@ -10955,7 +11321,8 @@ bool ChainstateManager::WritePersistedShieldedState(
                                                       tip_height,
                                                       balance,
                                                       std::move(commitment_index_digest),
-                                                      std::move(account_registry_snapshot));
+                                                      std::move(account_registry_snapshot),
+                                                      std::move(account_registry_roots));
 }
 
 bool ChainstateManager::LoadShieldedSnapshotSection(
@@ -10971,11 +11338,46 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
 
     m_shielded_nullifiers.reset();
     // Snapshot activation may run while the manager already has a live
-    // shielded tree bound to the current commitment index store. Release that
-    // handle before wiping/reopening the shared store or LevelDB will reject
-    // the second open with the same LOCK file still held in-process.
+    // shielded state bound to shared LevelDB stores. Release those handles
+    // before moving/wiping/reopening the stores or LevelDB will reject the
+    // second open with the same LOCK file still held in-process.
     m_shielded_merkle_tree = shielded::ShieldedMerkleTree{
         shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+    shielded::ShieldedMerkleTree::ResetCommitmentIndexStore();
+    m_shielded_account_registry = shielded::registry::ShieldedAccountRegistryState{};
+    shielded::registry::ShieldedAccountRegistryState::ResetPayloadStore();
+
+    auto backup = BackupShieldedStateDirectories(m_options.datadir);
+    if (!backup.has_value()) {
+        return false;
+    }
+    auto release_partial_shielded_snapshot_state = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        m_shielded_nullifiers.reset();
+        m_shielded_merkle_tree = shielded::ShieldedMerkleTree{
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+        shielded::ShieldedMerkleTree::ResetCommitmentIndexStore();
+        m_shielded_account_registry = shielded::registry::ShieldedAccountRegistryState{};
+        shielded::registry::ShieldedAccountRegistryState::ResetPayloadStore();
+        m_shielded_smile_public_accounts.clear();
+        m_shielded_account_leaf_commitments.clear();
+        InvalidateShieldedAccountStateSnapshotCaches();
+        m_shielded_anchor_roots.clear();
+        m_shielded_account_registry_roots.clear();
+        m_shielded_pool_balance = ShieldedPoolBalance{};
+        m_shielded_state_initialized = false;
+    };
+    auto rollback_backup = [&](ShieldedStateDirectoryBackup* backup_to_restore) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        if (backup_to_restore == nullptr) return;
+        release_partial_shielded_snapshot_state();
+        if (!RestoreShieldedStateDirectoryBackup(*backup_to_restore)) {
+            LogPrintf("LoadShieldedSnapshotSection: failed to restore previous shielded state directories after snapshot load failure\n");
+        }
+        delete backup_to_restore;
+    };
+    std::unique_ptr<ShieldedStateDirectoryBackup, decltype(rollback_backup)> rollback_guard{
+        new ShieldedStateDirectoryBackup{std::move(*backup)},
+        rollback_backup};
+
     if (!PrepareShieldedCommitmentIndex(commitment_index_db_path,
                                         m_options.retain_shielded_commitment_index,
                                         /*wipe_data=*/true)) {
@@ -11066,7 +11468,7 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
             }
         }
 
-        if (header.m_snapshot_version >= SnapshotMetadata::CURRENT_VERSION) {
+        if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
             shielded::registry::ShieldedAccountRegistrySnapshot snapshot;
             snapshot.entries.reserve(std::min<uint64_t>(header.m_account_registry_entry_count, 8192));
             for (uint64_t i = 0; i < header.m_account_registry_entry_count; ++i) {
@@ -11088,7 +11490,7 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
     if (!m_shielded_pool_balance.SetBalance(header.m_pool_balance)) {
         return false;
     }
-    if (header.m_snapshot_version < SnapshotMetadata::CURRENT_VERSION) {
+    if (header.m_snapshot_version < node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
         if (m_active_chainstate != nullptr &&
             !RebuildShieldedSmilePublicAccountState(*m_active_chainstate,
                                                     tip,
@@ -11123,8 +11525,6 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
 
     m_shielded_anchor_roots.clear();
     RecordShieldedAnchorRoot(m_shielded_merkle_tree.Root());
-    m_shielded_account_registry_roots.clear();
-    RecordShieldedAccountRegistryRoot(m_shielded_account_registry.Root());
     shielded::ShieldedMerkleTree cursor_tree = m_shielded_merkle_tree;
     if (!cursor_tree.DetachToMemoryOnly()) {
         return false;
@@ -11135,10 +11535,54 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
         }
         RecordShieldedAnchorRoot(cursor_tree.Root());
     }
-    if (m_active_chainstate != nullptr) {
+
+    m_shielded_account_registry_roots.clear();
+    if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION) {
+        const size_t expected_recent_history = ExpectedShieldedRecentHistoryCount(tip);
+        if (header.m_recent_output_counts.size() != expected_recent_history) {
+            LogPrintf("LoadShieldedSnapshotSection: v7 account-registry snapshot has %u recent output-count entries, expected %u at height=%d hash=%s\n",
+                      static_cast<unsigned int>(header.m_recent_output_counts.size()),
+                      static_cast<unsigned int>(expected_recent_history),
+                      tip != nullptr ? tip->nHeight : -1,
+                      tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+            return false;
+        }
+        if (!LoadShieldedAccountRegistryRootWindow(
+                header.m_account_registry_roots,
+                m_shielded_account_registry.Root(),
+                expected_recent_history + 1U,
+                "LoadShieldedSnapshotSection",
+                m_shielded_account_registry_roots)) {
+            return false;
+        }
+    } else if (m_active_chainstate != nullptr &&
+               ShieldedRebuildHistoryBlocksAvailable(*m_active_chainstate, tip)) {
         if (!RebuildShieldedAccountRegistryHistory(*m_active_chainstate, tip)) {
             return false;
         }
+    } else if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
+        const size_t expected_recent_history = ExpectedShieldedRecentHistoryCount(tip);
+        if (header.m_recent_output_counts.size() != expected_recent_history) {
+            LogPrintf("LoadShieldedSnapshotSection: v6 account-registry snapshot has %u recent output-count entries, expected %u at height=%d hash=%s\n",
+                      static_cast<unsigned int>(header.m_recent_output_counts.size()),
+                      static_cast<unsigned int>(expected_recent_history),
+                      tip != nullptr ? tip->nHeight : -1,
+                      tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+            return false;
+        }
+        std::deque<uint256> derived_roots;
+        if (!DeriveShieldedAccountRegistryHistoryFromV6Snapshot(m_shielded_merkle_tree,
+                                                                m_shielded_account_registry,
+                                                                header.m_recent_output_counts,
+                                                                derived_roots)) {
+            LogPrintf("LoadShieldedSnapshotSection: v6 account-registry snapshot lacks enough data to derive recent root history at height=%d hash=%s\n",
+                      tip != nullptr ? tip->nHeight : -1,
+                      tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+            return false;
+        }
+        m_shielded_account_registry_roots = std::move(derived_roots);
+    } else {
+        return false;
     }
     if (header.m_snapshot_version < 4) {
         if (!SyncShieldedSettlementAnchorState(m_blockman, tip, *m_shielded_nullifiers)) {
@@ -11159,7 +11603,16 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
     }
 
     m_shielded_state_initialized = true;
-    return PersistShieldedState(tip);
+    if (!PersistShieldedState(tip)) {
+        return false;
+    }
+    ShieldedStateDirectoryBackup* committed_backup = rollback_guard.release();
+    if (!DiscardShieldedStateDirectoryBackup(*committed_backup)) {
+        LogPrintf("LoadShieldedSnapshotSection: loaded snapshot but failed to remove previous shielded state backup at %s\n",
+                  fs::PathToString(committed_backup->backup_root));
+    }
+    delete committed_backup;
+    return true;
 }
 
 std::optional<shielded::registry::ShieldedAccountRegistrySnapshot>
@@ -11383,20 +11836,16 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             m_shielded_account_registry = std::move(*restored_registry);
             m_shielded_smile_public_accounts.clear();
             m_shielded_account_leaf_commitments.clear();
+            if (!shielded::registry::BuildRegistryAccountState(
+                    m_shielded_account_registry,
+                    m_shielded_smile_public_accounts,
+                    m_shielded_account_leaf_commitments)) {
+                return false;
+            }
             InvalidateShieldedAccountStateSnapshotCaches();
             m_shielded_anchor_roots.clear();
             m_shielded_account_registry_roots.clear();
 
-            if (!RebuildShieldedSmilePublicAccountState(*m_active_chainstate,
-                                                        tip,
-                                                        m_shielded_smile_public_accounts)) {
-                return false;
-            }
-            if (!RebuildShieldedAccountLeafCommitmentState(*m_active_chainstate,
-                                                           tip,
-                                                           m_shielded_account_leaf_commitments)) {
-                return false;
-            }
             if (tip != nullptr &&
                 UseAccountRegistryEntryCountLimit(GetConsensus(), tip->nHeight) &&
                 m_shielded_account_registry.Size() > GetConsensus().nMaxShieldedAccountRegistryEntries) {
@@ -11404,9 +11853,20 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             }
             m_shielded_state_initialized = true;
             if (!RebuildShieldedAnchorHistory(*m_active_chainstate, tip) ||
-                !RebuildShieldedAccountRegistryHistory(*m_active_chainstate, tip) ||
                 !SyncShieldedSettlementAnchorState(m_blockman, tip, *m_shielded_nullifiers) ||
                 !SyncShieldedNettingManifestState(m_blockman, tip, *m_shielded_nullifiers)) {
+                m_shielded_state_initialized = false;
+                return false;
+            }
+            if (ShieldedRebuildHistoryBlocksAvailable(*m_active_chainstate, tip)) {
+                if (!RebuildShieldedAccountRegistryHistory(*m_active_chainstate, tip)) {
+                    m_shielded_state_initialized = false;
+                    return false;
+                }
+            } else {
+                LogPrintf("EnsureShieldedStateInitialized: prepared mutation marker cannot restore account-registry root history without recent blocks at height=%d hash=%s\n",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
                 m_shielded_state_initialized = false;
                 return false;
             }
@@ -11457,6 +11917,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
     std::optional<uint256> persisted_commitment_index_digest;
     std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
         persisted_account_registry_snapshot;
+    std::vector<uint256> persisted_account_registry_roots;
     const bool preserve_snapshot_bridge_metadata_extras =
         m_shielded_nullifiers->ReadSnapshotBridgeMetadataHint();
     if (tip != nullptr &&
@@ -11467,7 +11928,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             persisted_tip_height,
             persisted_balance,
             persisted_commitment_index_digest,
-            persisted_account_registry_snapshot) &&
+            persisted_account_registry_snapshot,
+            &persisted_account_registry_roots) &&
         persisted_tip_hash == tip->GetBlockHash() &&
         persisted_tip_height == tip->nHeight) {
         if (!m_shielded_pool_balance.SetBalance(persisted_balance)) {
@@ -11481,8 +11943,6 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         if (m_shielded_anchor_roots.empty()) {
             m_shielded_anchor_roots.push_front(m_shielded_merkle_tree.Root());
         }
-        m_shielded_account_registry_roots.clear();
-        m_shielded_account_registry_roots.push_front(m_shielded_account_registry.Root());
         auto restore_rebuilt_commitment_index = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
             AssertLockHeld(::cs_main);
             shielded::ShieldedMerkleTree rebuilt_tree;
@@ -11542,16 +12002,21 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
 
         if (restored_index && m_shielded_merkle_tree.HasCommitmentIndex()) {
             const auto loaded_anchor_roots = m_shielded_anchor_roots;
-            if (!RebuildShieldedSmilePublicAccountState(*m_active_chainstate,
-                                                        tip,
-                                                        m_shielded_smile_public_accounts)) {
-                return false;
-            }
-            if (!RebuildShieldedAccountLeafCommitmentState(*m_active_chainstate,
-                                                           tip,
-                                                           m_shielded_account_leaf_commitments)) {
-                return false;
-            }
+            const auto loaded_account_registry_roots = persisted_account_registry_roots;
+            bool anchor_history_rebuilt{false};
+            bool account_registry_rebuilt_from_chain{false};
+            auto build_account_registry_views =
+                [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
+                    AssertLockHeld(::cs_main);
+                    if (!shielded::registry::BuildRegistryAccountState(
+                            m_shielded_account_registry,
+                            m_shielded_smile_public_accounts,
+                            m_shielded_account_leaf_commitments)) {
+                        return false;
+                    }
+                    InvalidateShieldedAccountStateSnapshotCaches();
+                    return true;
+                };
             auto rebuild_account_registry_from_chain =
                 [&](const char* reason) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
                     AssertLockHeld(::cs_main);
@@ -11571,32 +12036,37 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                                                              m_shielded_account_registry)) {
                         return false;
                     }
-                    startup_shielded_repair_performed = true;
-                    if (!PersistShieldedState(tip)) {
+                    if (!build_account_registry_views()) {
                         return false;
                     }
+                    startup_shielded_repair_performed = true;
+                    account_registry_rebuilt_from_chain = true;
                     return true;
                 };
-            if (!RebuildShieldedAnchorHistory(*m_active_chainstate, tip)) {
-                LogPrintf("EnsureShieldedStateInitialized: failed to rebuild recent shielded anchor history at height=%d hash=%s; rebuilding full state from chain\n",
-                          persisted_tip_height,
-                          persisted_tip_hash.ToString());
-                reset_shielded_state();
-                if (!rebuild_from_chain()) {
-                    return false;
+            if (ShieldedRebuildHistoryBlocksAvailable(*m_active_chainstate, tip)) {
+                if (!RebuildShieldedAnchorHistory(*m_active_chainstate, tip)) {
+                    LogPrintf("EnsureShieldedStateInitialized: failed to rebuild recent shielded anchor history at height=%d hash=%s; rebuilding full state from chain\n",
+                              persisted_tip_height,
+                              persisted_tip_hash.ToString());
+                    reset_shielded_state();
+                    if (!rebuild_from_chain()) {
+                        return false;
+                    }
+                    return finish_success();
                 }
-                return finish_success();
-            }
-            if (loaded_anchor_roots != m_shielded_anchor_roots) {
-                LogPrintf("EnsureShieldedStateInitialized: rebuilt shielded anchor history at height=%d hash=%s replacing %u persisted roots with %u chain-derived roots\n",
-                          persisted_tip_height,
-                          persisted_tip_hash.ToString(),
-                          static_cast<unsigned int>(loaded_anchor_roots.size()),
-                          static_cast<unsigned int>(m_shielded_anchor_roots.size()));
-                startup_shielded_repair_performed = true;
-                if (!PersistShieldedState(tip)) {
-                    return false;
+                if (loaded_anchor_roots != m_shielded_anchor_roots) {
+                    LogPrintf("EnsureShieldedStateInitialized: rebuilt shielded anchor history at height=%d hash=%s replacing %u persisted roots with %u chain-derived roots\n",
+                              persisted_tip_height,
+                              persisted_tip_hash.ToString(),
+                              static_cast<unsigned int>(loaded_anchor_roots.size()),
+                              static_cast<unsigned int>(m_shielded_anchor_roots.size()));
+                    startup_shielded_repair_performed = true;
+                    anchor_history_rebuilt = true;
                 }
+            } else {
+                LogPrintf("EnsureShieldedStateInitialized: snapshot anchor history blocks unavailable at height=%d hash=%s; retaining persisted anchor roots\n",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
             }
             if (persisted_account_registry_snapshot.has_value()) {
                 auto restored_registry =
@@ -11617,6 +12087,12 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     }
                 } else {
                     m_shielded_account_registry = std::move(*restored_registry);
+                    if (!build_account_registry_views()) {
+                        if (!rebuild_account_registry_from_chain(
+                                "persisted account registry views could not be restored")) {
+                            return false;
+                        }
+                    }
                 }
             } else {
                 if (!rebuild_account_registry_from_chain(
@@ -11624,38 +12100,91 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     return false;
                 }
             }
-            if (!RebuildShieldedAccountRegistryHistory(*m_active_chainstate, tip)) {
-                if (!rebuild_account_registry_from_chain(
-                        "persisted account registry history mismatch") ||
-                    !RebuildShieldedAccountRegistryHistory(*m_active_chainstate, tip)) {
+            bool account_registry_roots_changed{false};
+            if (ShieldedRebuildHistoryBlocksAvailable(*m_active_chainstate, tip)) {
+                if (!RebuildShieldedAccountRegistryHistory(*m_active_chainstate, tip)) {
+                    if (!rebuild_account_registry_from_chain(
+                            "persisted account registry history mismatch") ||
+                        !RebuildShieldedAccountRegistryHistory(*m_active_chainstate, tip)) {
+                        return false;
+                    }
+                }
+                std::vector<uint256> rebuilt_account_registry_roots;
+                rebuilt_account_registry_roots.reserve(m_shielded_account_registry_roots.size());
+                for (const auto& root : m_shielded_account_registry_roots) {
+                    rebuilt_account_registry_roots.push_back(root);
+                }
+                account_registry_roots_changed =
+                    loaded_account_registry_roots != rebuilt_account_registry_roots;
+                if (account_registry_roots_changed) {
+                    LogPrintf("EnsureShieldedStateInitialized: rebuilt account-registry history at height=%d hash=%s replacing %u persisted roots with %u chain-derived roots\n",
+                              persisted_tip_height,
+                              persisted_tip_hash.ToString(),
+                              static_cast<unsigned int>(loaded_account_registry_roots.size()),
+                              static_cast<unsigned int>(rebuilt_account_registry_roots.size()));
+                    startup_shielded_repair_performed = true;
+                }
+                if (account_registry_rebuilt_from_chain || account_registry_roots_changed) {
+                    if (!PersistShieldedState(tip)) {
+                        return false;
+                    }
+                }
+            } else {
+                const size_t expected_account_registry_roots =
+                    ExpectedShieldedRecentHistoryCount(tip) + 1U;
+                if (!LoadShieldedAccountRegistryRootWindow(
+                        persisted_account_registry_roots,
+                        m_shielded_account_registry.Root(),
+                        expected_account_registry_roots,
+                        "EnsureShieldedStateInitialized",
+                        m_shielded_account_registry_roots)) {
+                    LogPrintf("EnsureShieldedStateInitialized: snapshot account-registry history blocks unavailable and persisted root window is incomplete at height=%d hash=%s\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
                     return false;
                 }
+                LogPrintf("EnsureShieldedStateInitialized: snapshot account-registry history blocks unavailable at height=%d hash=%s; retaining %u persisted account-registry roots\n",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
+                          static_cast<unsigned int>(m_shielded_account_registry_roots.size()));
             }
-            if (!SyncShieldedSettlementAnchorState(m_blockman,
-                                                   tip,
-                                                   *m_shielded_nullifiers,
-                                                   preserve_snapshot_bridge_metadata_extras
-                                                       ? PersistedShieldedMetadataSyncMode::PRESERVE_PERSISTED_EXTRAS
-                                                       : PersistedShieldedMetadataSyncMode::STRICT_CHAIN_CONVERGENCE)) {
-                LogPrintf("EnsureShieldedStateInitialized: failed to sync persisted settlement-anchor state; rebuilding full state from chain\n");
-                reset_shielded_state();
-                if (!rebuild_from_chain()) {
-                    return false;
-                }
-                return finish_success();
+            if (anchor_history_rebuilt &&
+                !account_registry_rebuilt_from_chain &&
+                !account_registry_roots_changed &&
+                !PersistShieldedState(tip)) {
+                return false;
             }
-            if (!SyncShieldedNettingManifestState(m_blockman,
-                                                  tip,
-                                                  *m_shielded_nullifiers,
-                                                  preserve_snapshot_bridge_metadata_extras
-                                                      ? PersistedShieldedMetadataSyncMode::PRESERVE_PERSISTED_EXTRAS
-                                                      : PersistedShieldedMetadataSyncMode::STRICT_CHAIN_CONVERGENCE)) {
-                LogPrintf("EnsureShieldedStateInitialized: failed to sync persisted netting-manifest metadata; rebuilding full state from chain\n");
-                reset_shielded_state();
-                if (!rebuild_from_chain()) {
+            if (ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+                if (preserve_snapshot_bridge_metadata_extras) {
+                    LogPrintf("EnsureShieldedStateInitialized: full shielded rebuild blocks available at height=%d hash=%s; converging snapshot bridge metadata to chain state\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                }
+                if (!SyncShieldedSettlementAnchorState(m_blockman, tip, *m_shielded_nullifiers)) {
+                    LogPrintf("EnsureShieldedStateInitialized: failed to sync persisted settlement-anchor state; rebuilding full state from chain\n");
+                    reset_shielded_state();
+                    if (!rebuild_from_chain()) {
+                        return false;
+                    }
+                    return finish_success();
+                }
+                if (!SyncShieldedNettingManifestState(m_blockman, tip, *m_shielded_nullifiers)) {
+                    LogPrintf("EnsureShieldedStateInitialized: failed to sync persisted netting-manifest metadata; rebuilding full state from chain\n");
+                    reset_shielded_state();
+                    if (!rebuild_from_chain()) {
+                        return false;
+                    }
+                    return finish_success();
+                }
+                if (preserve_snapshot_bridge_metadata_extras &&
+                    !m_shielded_nullifiers->WriteSnapshotBridgeMetadataHint(false)) {
+                    LogPrintf("EnsureShieldedStateInitialized: failed to clear snapshot bridge metadata hint after strict chain convergence\n");
                     return false;
                 }
-                return finish_success();
+            } else {
+                LogPrintf("EnsureShieldedStateInitialized: full shielded rebuild blocks unavailable at height=%d hash=%s; retaining persisted settlement-anchor and netting-manifest state\n",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
             }
             m_shielded_state_initialized = true;
             std::string audit_error;
@@ -11876,6 +12405,13 @@ bool ChainstateManager::WriteShieldedPoolBalanceForTest(CAmount balance)
     AssertLockHeld(::cs_main);
     if (!m_shielded_nullifiers) return false;
     return m_shielded_nullifiers->WritePoolBalance(balance);
+}
+
+bool ChainstateManager::WriteSnapshotBridgeMetadataHintForTest(bool preserve_snapshot_extras)
+{
+    AssertLockHeld(::cs_main);
+    if (!m_shielded_nullifiers) return false;
+    return m_shielded_nullifiers->WriteSnapshotBridgeMetadataHint(preserve_snapshot_extras);
 }
 
 void ChainstateManager::SetShieldedAnchorRootsForTest(const std::vector<uint256>& roots)

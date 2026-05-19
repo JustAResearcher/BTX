@@ -2,7 +2,7 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
 
-add_executable(bench_bitcoin
+add_executable(bench_btx
   bench_bitcoin.cpp
   bench.cpp
   nanobench.cpp
@@ -66,32 +66,32 @@ add_executable(bench_bitcoin
   verify_script.cpp
   xor.cpp
 )
-set_target_properties(bench_bitcoin PROPERTIES OUTPUT_NAME bench_btx)
+set_target_properties(bench_btx PROPERTIES OUTPUT_NAME bench_btx)
 
 include(TargetDataSources)
-target_raw_data_sources(bench_bitcoin NAMESPACE benchmark::data
+target_raw_data_sources(bench_btx NAMESPACE benchmark::data
   data/block413567.raw
 )
 
-target_link_libraries(bench_bitcoin
+target_link_libraries(bench_btx
   core_interface
   $<TARGET_NAME_IF_EXISTS:bitcoinconsensus>
   Boost::headers
 )
 if(UNIX AND NOT APPLE)
   if(ENABLE_WALLET)
-    target_link_btx_linux_archive_group(bench_bitcoin
+    target_link_btx_linux_archive_group(bench_btx
       test_util
       ${BTX_NODE_WALLET_ARCHIVES}
     )
   else()
-    target_link_btx_linux_archive_group(bench_bitcoin
+    target_link_btx_linux_archive_group(bench_btx
       test_util
       ${BTX_NODE_ARCHIVES}
     )
   endif()
 else()
-  target_link_libraries(bench_bitcoin
+  target_link_libraries(bench_btx
     test_util
     bitcoin_node
     $<$<BOOL:${ENABLE_WALLET}>:bitcoin_wallet>
@@ -99,7 +99,7 @@ else()
 endif()
 
 if(ENABLE_WALLET)
-  target_sources(bench_bitcoin
+  target_sources(bench_btx
     PRIVATE
       coin_selection.cpp
       wallet_balance.cpp
@@ -111,14 +111,13 @@ if(ENABLE_WALLET)
   )
 endif()
 
-# Canonical BTX build target name while preserving legacy bench_bitcoin target.
-add_custom_target(bench_btx DEPENDS bench_bitcoin)
-# Keep legacy executable name as a symlink/copy to bench_btx for compatibility.
-add_legacy_binary_alias(bench_bitcoin bench_bitcoin)
+# Keep backward-compatible bench_bitcoin target and executable alias.
+add_legacy_binary_alias(bench_btx bench_bitcoin)
+add_legacy_target_alias(bench_bitcoin bench_btx)
 
 add_test(NAME bench_sanity_check_high_priority
-  COMMAND bench_bitcoin -sanity-check -priority-level=high
+  COMMAND $<TARGET_FILE:bench_btx> -sanity-check -priority-level=high
 )
 
-make_libbitcoinconsensus_dll_available(bench_bitcoin)
-install_binary_component(bench_bitcoin)
+make_libbitcoinconsensus_dll_available(bench_btx)
+install_binary_component(bench_btx)

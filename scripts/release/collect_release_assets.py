@@ -50,6 +50,8 @@ PRIMARY_BINARY_EXCLUDE_TOKENS = (
 )
 PLATFORM_ALIASES = {
     "linux-x86_64": ("x86_64-linux-gnu",),
+    "linux-x86_64-cuda12": ("x86_64-linux-gnu-cuda12",),
+    "linux-x86_64-cuda13": ("x86_64-linux-gnu-cuda13",),
     "linux-arm64": ("aarch64-linux-gnu", "arm64-linux-gnu"),
     "windows-x86_64": ("x86_64-w64-mingw32", "win64"),
     "macos-x86_64": ("x86_64-apple-darwin",),
@@ -84,18 +86,38 @@ def classify_primary_platform_asset(name: str) -> dict[str, str] | None:
     if any(token in lowered for token in PRIMARY_BINARY_EXCLUDE_TOKENS):
         return None
 
+    for platform_id in ("linux-x86_64-cuda12", "linux-x86_64-cuda13"):
+        if any(alias in lowered for alias in PLATFORM_ALIASES[platform_id]):
+            return build_platform_classification(platform_id, name, archive_format)
+
     for platform_id, aliases in PLATFORM_ALIASES.items():
+        if platform_id == "linux-x86_64" and "-cuda" in lowered:
+            continue
+        if platform_id in {"linux-x86_64-cuda12", "linux-x86_64-cuda13"}:
+            continue
         if any(alias in lowered for alias in aliases):
-            operating_system, arch = platform_id.split("-", 1)
-            return {
-                "platform_id": platform_id,
-                "os": operating_system,
-                "arch": arch,
-                "asset_name": name,
-                "archive_format": archive_format,
-                "kind": "primary_binary_archive",
-            }
+            return build_platform_classification(platform_id, name, archive_format)
     return None
+
+
+def build_platform_classification(platform_id: str, name: str, archive_format: str) -> dict[str, str]:
+    operating_system, arch = platform_id.split("-", 1)
+    flavor = "cpu"
+    if arch.endswith("-cuda12"):
+        arch = arch.removesuffix("-cuda12")
+        flavor = "cuda12"
+    elif arch.endswith("-cuda13"):
+        arch = arch.removesuffix("-cuda13")
+        flavor = "cuda13"
+    return {
+        "platform_id": platform_id,
+        "os": operating_system,
+        "arch": arch,
+        "flavor": flavor,
+        "asset_name": name,
+        "archive_format": archive_format,
+        "kind": "primary_binary_archive",
+    }
 
 
 def collect_platform_assets(staged_assets: list[tuple[str, Path]]) -> dict[str, dict[str, str]]:

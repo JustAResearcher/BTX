@@ -118,7 +118,7 @@ done
 if [ -n "$hosts_distsrc_exists" ]; then
 # ...so that we can print them out nicely in an error message
 cat << EOF
-ERR: Build directories for this commit already exist for the following platform
+ERR: Build directories for this VERSION already exist for the following platform
      triples you're attempting to build, probably because of previous builds.
      Please remove, or otherwise deal with them prior to starting another build.
 

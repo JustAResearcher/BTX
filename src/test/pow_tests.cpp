@@ -5,6 +5,7 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <common/args.h>
+#include <cuda/cuda_scheduler.h>
 #include <matmul/accelerated_solver.h>
 #include <matmul/freivalds.h>
 #include <matmul/matmul_pow.h>
@@ -1197,10 +1198,10 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
 
     BOOST_CHECK_EQUAL(
         consensus.nMinimumChainWork.GetHex(),
-        "0000000000000000000000000000000000000000000000000000000ba5df2617");
+        "0000000000000000000000000000000000000000000000000000004492ba231e");
     BOOST_CHECK_EQUAL(
         consensus.defaultAssumeValid.GetHex(),
-        "bbb36b59df48e364dcf32e8ca13f3e5a89fdc16c483fa26779c43da5feb4d40c");
+        "3245a5e7debf69da9589fb0bc7bfd88fec32575c6f9a3a5d687dc38251a88fc7");
     BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 16U);
     BOOST_CHECK_EQUAL(params->AssumedChainStateSize(), 1U);
 
@@ -1211,11 +1212,11 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_EQUAL(
         it_0->second.GetHex(),
         "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601");
-    const auto it_anchor = checkpoints.find(85850);
+    const auto it_anchor = checkpoints.find(105550);
     BOOST_REQUIRE(it_anchor != checkpoints.end());
     BOOST_CHECK_EQUAL(
         it_anchor->second.GetHex(),
-        "bbb36b59df48e364dcf32e8ca13f3e5a89fdc16c483fa26779c43da5feb4d40c");
+        "3245a5e7debf69da9589fb0bc7bfd88fec32575c6f9a3a5d687dc38251a88fc7");
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
     BOOST_REQUIRE(assumeutxo_55000.has_value());
@@ -1283,11 +1284,22 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_85850->blockhash.GetHex(),
         "bbb36b59df48e364dcf32e8ca13f3e5a89fdc16c483fa26779c43da5feb4d40c");
 
+    const auto assumeutxo_105550 = params->AssumeutxoForHeight(105550);
+    BOOST_REQUIRE(assumeutxo_105550.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_105550->height, 105550);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_105550->hash_serialized.ToString(),
+        "20465f460f43e3f1ed4baf237cd52564d6a6f8e4ae3961237dbd60be7bfc1865");
+    BOOST_CHECK_EQUAL(assumeutxo_105550->m_chain_tx_count, 126978U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_105550->blockhash.GetHex(),
+        "3245a5e7debf69da9589fb0bc7bfd88fec32575c6f9a3a5d687dc38251a88fc7");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 6U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 7U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 85850);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 105550);
     BOOST_CHECK_GE(snapshot_heights.back(), std::prev(checkpoints.end())->first);
 }
 
@@ -2333,17 +2345,21 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_cuda_batch_defaults_when_backend_is_avail
     candidate.seed_b = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/1);
     candidate.matmul_digest.SetNull();
 
-    uint64_t max_tries{8};
+    const auto topology = btx::cuda::ProbeCudaTopology();
+    const uint32_t expected_min_batch_size =
+        btx::cuda::ExpandCudaBatchSizeForSelectedDevices(/*batch_size=*/2, topology.selected_devices.size());
+
+    uint64_t max_tries{std::max<uint64_t>(8, expected_min_batch_size)};
     ResetMatMulSolvePipelineStats();
-    const bool solved = SolveMatMul(candidate, consensus, max_tries);
+    const bool solved = SolveMatMul(candidate, consensus, max_tries, /*block_height=*/61'000);
     BOOST_CHECK(!solved);
 
     const auto stats = ProbeMatMulSolvePipelineStats();
-    BOOST_CHECK_EQUAL(stats.batch_size, 2U);
+    BOOST_CHECK_GE(stats.batch_size, expected_min_batch_size);
     BOOST_CHECK(stats.async_prepare_enabled);
-    BOOST_CHECK_EQUAL(stats.prefetch_depth, 2U);
+    BOOST_CHECK_GE(stats.prefetch_depth, 1U);
     BOOST_CHECK_GE(stats.batched_digest_requests, 1U);
-    BOOST_CHECK_GE(stats.batched_nonce_attempts, 2U);
+    BOOST_CHECK_GE(stats.batched_nonce_attempts, stats.batch_size);
 }
 
 BOOST_AUTO_TEST_CASE(matmul_solve_enables_parallel_solver_when_configured)

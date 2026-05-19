@@ -1533,6 +1533,10 @@ public:
     /** Test/diagnostic hook to overwrite the persisted shielded pool balance. */
     [[nodiscard]] bool WriteShieldedPoolBalanceForTest(CAmount balance) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Test/diagnostic hook to mark persisted bridge metadata as snapshot-seeded. */
+    [[nodiscard]] bool WriteSnapshotBridgeMetadataHintForTest(bool preserve_snapshot_extras)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Test/diagnostic hook to replace the in-memory recent anchor window. */
     void SetShieldedAnchorRootsForTest(const std::vector<uint256>& roots) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
@@ -1608,7 +1612,8 @@ public:
         CAmount& balance,
         std::optional<uint256>& commitment_index_digest,
         std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>&
-            account_registry_snapshot) const
+            account_registry_snapshot,
+        std::vector<uint256>* account_registry_roots = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Overwrite the persisted shielded restart snapshot for testing and diagnostics. */
@@ -1620,7 +1625,8 @@ public:
         CAmount balance,
         std::optional<uint256> commitment_index_digest,
         std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
-            account_registry_snapshot)
+            account_registry_snapshot,
+        std::vector<uint256> account_registry_roots = {})
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Load shielded state from a BTX assumeutxo snapshot section. */

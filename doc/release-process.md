@@ -58,7 +58,7 @@ Release Process
   - `nMinimumChainWork` with the "chainwork" value of RPC `getblockheader` using the same height as that selected for the previous step.
   - `m_assumeutxo_data` array should be appended to with the values returned by the BTX helper script:
     - `python3 contrib/devtools/generate_assumeutxo.py --btx-cli ./build-btx/bin/btx-cli --chain main --snapshot /tmp/snapshot.dat --snapshot-type rollback --rollback <height or hash> --rpc-arg=-datadir=<canonical-node-datadir> --rpc-arg=-rpcuser=<user> --rpc-arg=-rpcpassword=<pass> --json-out /tmp/snapshot.report.json --manifest-out /tmp/snapshot.manifest.json`
-    - the generated JSON contains a ready-to-paste `chainparams_snippet`; the compact manifest is the published snapshot receipt
+    - the generated JSON contains a ready-to-paste `chainparams_snippet`; the compact manifest is the published snapshot receipt and includes `snapshot_file_version` for troubleshooting
     - publish `snapshot.dat` together with `snapshot.manifest.json`
     - include both files in `SHA256SUMS`, and sign that file as `SHA256SUMS.asc` using the same release-process expectations as the binary payloads
     - for BTX, the published snapshot must come from a build that includes the shielded snapshot appendix and must be verified with the assumeutxo functional path below before release
@@ -73,9 +73,10 @@ Release Process
     - use this only for clearly labeled native-built CLI releases; it does not claim Guix reproducibility or signer attestation coverage
     - if you do not also pass snapshot artifacts and a checksum signature, treat the output as a binary-install track rather than a full download-and-go release
   - Assemble the final fast-start bundle after the multi-architecture build finishes:
-    - `python3 scripts/release/collect_release_assets.py --output-dir /tmp/btx-release-bundle --source <guix-output-dir>/x86_64-linux-gnu --source <guix-output-dir>/aarch64-linux-gnu --source <guix-output-dir>/x86_64-w64-mingw32 --source <guix-output-dir>/x86_64-apple-darwin --source <guix-output-dir>/arm64-apple-darwin --snapshot /tmp/snapshot.dat --snapshot-manifest /tmp/snapshot.manifest.json --release-tag <tag> --release-name <title> --sign-with <release-gpg-key>`
+    - `python3 scripts/release/collect_release_assets.py --output-dir /tmp/btx-release-bundle --source <guix-output-dir>/x86_64-linux-gnu --source <guix-output-dir>/x86_64-linux-gnu-cuda12 --source <guix-output-dir>/x86_64-linux-gnu-cuda13 --source <guix-output-dir>/aarch64-linux-gnu --source <guix-output-dir>/x86_64-w64-mingw32 --source <guix-output-dir>/x86_64-apple-darwin --source <guix-output-dir>/arm64-apple-darwin --snapshot /tmp/snapshot.dat --snapshot-manifest /tmp/snapshot.manifest.json --release-tag <tag> --release-name <title> --sign-with <release-gpg-key>`
     - this step must target a fresh output directory and produces the single directory that should be uploaded to the GitHub release page: binaries, snapshot, manifests, `SHA256SUMS`, and `SHA256SUMS.asc`
     - the collector now fails the staging step if any supported primary archive is missing, so a successful run implies the generated `btx-release-manifest.json` contains one `platform_assets` entry for each supported primary archive
+    - Linux publishes CPU-only, CUDA 12, and CUDA 13 x86_64 archives; see [`doc/linux-release-builds.md`](/doc/linux-release-builds.md) for the hardware and target-host driver matrix.
     - if a `guix.sigs/<version>` directory is available, pass `--attestations-dir <path-to-guix.sigs>/<version>` so the final bundle also publishes signer-qualified attestation assets and records them in `attestation_assets`
   - Publish the bundle to GitHub Releases:
     - `python3 scripts/release/publish_github_release.py --repo btxchain/btx --tag <tag> --bundle-dir /tmp/btx-release-bundle --body-file <release-notes.md> --token-file <github.key> --publish`
@@ -202,6 +203,7 @@ details.
 
 Follow the relevant Guix README.md sections:
 - [Building](/contrib/guix/README.md#building)
+- [Linux release flavors](/contrib/guix/README.md#linux-release-flavors)
 - [Attesting to build outputs](/contrib/guix/README.md#attesting-to-build-outputs)
 
 ### Verify other builders' signatures to your own (optional)
@@ -223,18 +225,23 @@ Then open a Pull Request to the [guix.sigs repository](https://github.com/bitcoi
 
 ### macOS codesigner only: Create detached macOS signatures (assuming [signapple](https://github.com/achow101/signapple/) is installed and up to date with master branch)
 
+These examples assume `HEAD` is checked out at the exact release tag, so the
+Guix work directory is `guix-build-${VERSION}`. If `HEAD` is not tagged, the
+default work directory root is instead `guix-build-<short-commit-hash>` unless
+`FORCE_VERSION` is exported explicitly.
+
 In the `guix-build-${VERSION}/output/x86_64-apple-darwin` and `guix-build-${VERSION}/output/arm64-apple-darwin` directories:
 
-    tar xf bitcoin-${VERSION}-${ARCH}-apple-darwin-codesigning.tar.gz
+    tar xf btx-${VERSION}-${ARCH}-apple-darwin-codesigning.tar.gz
     ./detached-sig-create.sh /path/to/codesign.p12 /path/to/AuthKey_foo.p8 uuid
     Enter the keychain password and authorize the signature
-    signature-osx.tar.gz will be created
+    signature-osx-${ARCH}.tar.gz will be created
 
 ### Windows codesigner only: Create detached Windows signatures
 
 In the `guix-build-${VERSION}/output/x86_64-w64-mingw32` directory:
 
-    tar xf bitcoin-${VERSION}-win64-codesigning.tar.gz
+    tar xf btx-${VERSION}-win64-codesigning.tar.gz
     ./detached-sig-create.sh /path/to/codesign.key
     Enter the passphrase for the key when prompted
     signature-win.tar.gz will be created
@@ -251,7 +258,7 @@ pushd ./bitcoin-detached-sigs
 git checkout --orphan <branch>
 # if you are the macOS codesigner
 rm -rf osx
-tar xf signature-osx.tar.gz
+for sig in signature-osx-*.tar.gz; do tar xf "${sig}"; done
 # if you are the windows codesigner
 rm -rf win
 tar xf signature-win.tar.gz

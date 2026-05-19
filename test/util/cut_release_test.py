@@ -41,12 +41,14 @@ class CutReleaseTest(unittest.TestCase):
         primary_assets: dict[str, pathlib.Path] = {}
         file_names = {
             "x86_64-linux-gnu": f"bitcoin-{version}-x86_64-linux-gnu.tar.gz",
+            "x86_64-linux-gnu-cuda12": f"bitcoin-{version}-x86_64-linux-gnu-cuda12.tar.gz",
+            "x86_64-linux-gnu-cuda13": f"bitcoin-{version}-x86_64-linux-gnu-cuda13.tar.gz",
             "aarch64-linux-gnu": f"bitcoin-{version}-aarch64-linux-gnu.tar.gz",
             "x86_64-w64-mingw32": f"bitcoin-{version}-win64-pgpverifiable.zip",
             "x86_64-apple-darwin": f"bitcoin-{version}-x86_64-apple-darwin-unsigned.tar.gz",
             "arm64-apple-darwin": f"bitcoin-{version}-arm64-apple-darwin-unsigned.tar.gz",
         }
-        for host in self.module.PRIMARY_GUIX_HOSTS:
+        for host in self.module.PRIMARY_GUIX_OUTPUTS:
             host_dir = output_dir / host
             host_dir.mkdir(parents=True, exist_ok=True)
             asset_path = host_dir / file_names[host]
@@ -106,7 +108,7 @@ class CutReleaseTest(unittest.TestCase):
                 collect_command[1].endswith("/scripts/release/collect_release_assets.py")
             )
             self.assertEqual(collect_command[2], "--output-dir")
-            for host in self.module.PRIMARY_GUIX_HOSTS:
+            for host in self.module.PRIMARY_GUIX_OUTPUTS:
                 self.assertIn(str(primary_assets[host].resolve()), collect_command)
             self.assertNotIn(
                 str((output_dir / "x86_64-linux-gnu" / "bitcoin-29.2-x86_64-linux-gnu-debug.tar.gz").resolve()),
@@ -124,7 +126,7 @@ class CutReleaseTest(unittest.TestCase):
             self.assertEqual(summary["guix_output_dir"], str(output_dir.resolve()))
             self.assertEqual(
                 summary["primary_archives"],
-                [str(primary_assets[host].resolve()) for host in self.module.PRIMARY_GUIX_HOSTS],
+                [str(primary_assets[host].resolve()) for host in self.module.PRIMARY_GUIX_OUTPUTS],
             )
             self.assertEqual(summary["attestations_dir"], [str((root / "guix.sigs" / "29.2").resolve())])
             self.assertEqual(summary["published"], False)
@@ -169,7 +171,7 @@ class CutReleaseTest(unittest.TestCase):
             self.assertIn("generate_assumeutxo.py", commands[0][1])
             self.assertIn("--rollback", commands[0])
             self.assertIn("collect_release_assets.py", commands[1][1])
-            for host in self.module.PRIMARY_GUIX_HOSTS:
+            for host in self.module.PRIMARY_GUIX_OUTPUTS:
                 self.assertIn(str(primary_assets[host].resolve()), commands[1])
             self.assertIn("--dry-run", commands[2])
             self.assertIn("--publish", commands[3])
@@ -233,7 +235,7 @@ class CutReleaseTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(len(commands), 3)
             self.assertIn("collect_release_assets.py", commands[0][1])
-            for host in self.module.PRIMARY_GUIX_HOSTS:
+            for host in self.module.PRIMARY_GUIX_OUTPUTS:
                 self.assertIn(str(primary_assets[host].resolve()), commands[0])
             self.assertIn("--dry-run", commands[1])
             self.assertIn("btx-agent-setup.py", commands[2][1])

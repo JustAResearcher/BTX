@@ -3,6 +3,48 @@ project(libbitcoinpqc C ASM)
 
 include(CheckCCompilerFlag)
 
+function(probe_shake_a64_asm out_var)
+    set(probe_root "${CMAKE_CURRENT_BINARY_DIR}/shake_a64_probe")
+    set(probe_build_dir "${probe_root}/build")
+    file(MAKE_DIRECTORY "${probe_root}")
+    file(WRITE "${probe_root}/CMakeLists.txt" [=[
+cmake_minimum_required(VERSION 3.22)
+project(shake_a64_probe ASM)
+add_library(shake_a64_probe STATIC shake_a64_probe.s)
+set_source_files_properties(shake_a64_probe.s PROPERTIES COMPILE_OPTIONS "-march=armv8.4-a+sha3")
+]=])
+    file(WRITE "${probe_root}/shake_a64_probe.s" [=[
+        .text
+        .globl shake_a64_probe
+shake_a64_probe:
+        eor3 v0.16b, v0.16b, v0.16b, v0.16b
+        rax1 v0.2d, v0.2d, v0.2d
+        xar v0.2d, v0.2d, v0.2d, #63
+        bcax v0.16b, v0.16b, v0.16b, v0.16b
+        ret
+]=])
+
+    set(saved_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+    try_compile(${out_var}
+        "${probe_build_dir}"
+        "${probe_root}"
+        shake_a64_probe
+        OUTPUT_VARIABLE probe_output
+    )
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE "${saved_try_compile_target_type}")
+
+    if(${out_var})
+        message(STATUS "Assembler supports SPHINCS+ shake-a64 probe")
+    else()
+        string(REPLACE "\n" "\n  " probe_output_indented "${probe_output}")
+        message(STATUS "Assembler cannot build SPHINCS+ shake-a64 probe; using SPHINCS+ ref variant")
+        message(STATUS "shake-a64 probe output:\n  ${probe_output_indented}")
+    endif()
+
+    set(${out_var} "${${out_var}}" PARENT_SCOPE)
+endfunction()
+
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -19,15 +61,23 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 set(SPHINCSPLUS_VARIANT "ref")
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
-    # The optimized assembly path is known-good on Apple arm64 toolchains.
-    # Linux toolchains in CI often lack support for required ARMv8.4-A
-    # mnemonics (e.g. `bcax`), so keep Linux on the portable reference path.
+    # The optimized assembly path is only considered for native Darwin builds.
+    # Linux-hosted Darwin cross-builds still surface unsupported ARMv8.4-A
+    # SHA3 mnemonics (e.g. `eor3`, `rax1`, `xar`, `bcax`) in the assembler, so
+    # keep those on the portable reference path without even probing.
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-        check_c_compiler_flag("-march=armv8.4-a+sha3" COMPILER_SUPPORTS_ARMV84_SHA3)
-        if(COMPILER_SUPPORTS_ARMV84_SHA3)
-            set(SPHINCSPLUS_VARIANT "shake-a64")
+        if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+            check_c_compiler_flag("-march=armv8.4-a+sha3" COMPILER_SUPPORTS_ARMV84_SHA3)
+            if(COMPILER_SUPPORTS_ARMV84_SHA3)
+                probe_shake_a64_asm(ASSEMBLER_SUPPORTS_SHAKE_A64)
+                if(ASSEMBLER_SUPPORTS_SHAKE_A64)
+                    set(SPHINCSPLUS_VARIANT "shake-a64")
+                endif()
+            else()
+                message(STATUS "Compiler does not support -march=armv8.4-a+sha3; using SPHINCS+ ref variant")
+            endif()
         else()
-            message(STATUS "Compiler does not support -march=armv8.4-a+sha3; using SPHINCS+ ref variant")
+            message(STATUS "Darwin build on non-Darwin host; using SPHINCS+ ref variant")
         endif()
     endif()
 endif()

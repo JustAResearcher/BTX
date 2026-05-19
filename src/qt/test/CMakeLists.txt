@@ -46,8 +46,3 @@ if(WIN32 AND VCPKG_TARGET_TRIPLET)
 endif()
 
 install_binary_component(test_btx-qt)
-
-# Keep backward-compatible CMake build target name for existing automation.
-add_custom_target(test_bitcoin-qt DEPENDS test_btx-qt)
-# Keep legacy executable name available for existing CI and packaging scripts.
-add_legacy_binary_alias(test_btx-qt test_bitcoin-qt)

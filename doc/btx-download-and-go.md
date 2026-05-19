@@ -12,6 +12,9 @@ fast-start validating node: a normal validating BTX node that boots from a
 published rollback snapshot instead of waiting for a full historical sync
 before becoming useful.
 
+For a detailed from-scratch mining-node procedure using generic `/var/btx/`
+paths, see [BTX Mining Node Snapshot Runbook](btx-mining-node-snapshot-runbook.md).
+
 ## 1. Fast-sync with Assumeutxo
 
 For agentic or unattended installs, the shortest end-to-end flow is:
@@ -21,7 +24,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.7 \
+  --release-tag v0.30.0 \
   --preset miner \
   --datadir="$HOME/.btx"
 ```
@@ -32,6 +35,11 @@ against `SHA256SUMS` and `SHA256SUMS.asc` for remote releases, downloads the
 matching snapshot manifest, and invokes the fast-start bootstrap wrapper. The
 installer keeps its temporary download cache in a sibling
 `<install-dir>-agent-setup-cache` directory unless you override `--cache-dir`.
+Linux release bundles include CPU-only, CUDA 12, and CUDA 13 x86_64 archives;
+see [Linux Release Build Variants](linux-release-builds.md) for the supported
+GPU hardware and target-host NVIDIA driver requirements. Pass
+`--platform linux-x86_64-cuda12` or `--platform linux-x86_64-cuda13` when you
+want to force a CUDA archive instead of relying on the detected default.
 For private GitHub releases, set `BTX_GITHUB_TOKEN`, `GITHUB_TOKEN`, or
 `GH_TOKEN` before running the installer so it can authenticate the manifest and
 archive fetches through the GitHub release asset API. The same token env vars
@@ -45,7 +53,7 @@ progress on stderr and prints a clean JSON summary on stdout:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.7 \
+  --release-tag v0.30.0 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"
@@ -63,19 +71,55 @@ local mining supervisor without guessing paths.
 If you prefer to run the bootstrap steps yourself:
 
 1. Download the BTX binary release.
-2. Download the matching `snapshot.dat`, `snapshot.manifest.json`, and
-   `btx-release-manifest.json`.
+2. Download the latest matching `snapshot.dat`, `snapshot.manifest.json`, and
+   `btx-release-manifest.json` published for that release.
 3. Verify `SHA256SUMS` and `SHA256SUMS.asc`.
 4. Check that the manifest's `snapshot_sha256`, height, and base block hash
-   match the release notes or `m_assumeutxo_data`.
-5. Start the daemon.
-6. Load the snapshot:
+   match the release notes or `m_assumeutxo_data`, and keep
+   `snapshot_file_version` as the troubleshooting record.
+5. Create a miner-oriented `btx.conf` under the datadir:
+
+```ini
+server=1
+listen=1
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+
+# Keep peer discovery on and use DNS-only bootstrap hints.
+dnsseed=1
+fixedseeds=1
+addnode=node.btx.tools:19335
+
+# Miner fast-start posture.
+prune=4096
+blockfilterindex=1
+coinstatsindex=1
+retainshieldedcommitmentindex=1
+miningminoutboundpeers=2
+miningminsyncedoutboundpeers=1
+miningmaxheaderlag=8
+```
+
+6. Start the daemon.
+7. Wait until the manifest's base block hash is known in the local header
+   chain:
+
+```bash
+SNAPSHOT_BLOCKHASH="$(jq -r .blockhash /path/to/snapshot.manifest.json)"
+btx-cli getblockheader "$SNAPSHOT_BLOCKHASH" false
+```
+
+The full snapshot base block does not need to be downloaded before loading the
+snapshot. If the header is not found yet, keep `btxd` connected to peers and
+retry after header sync advances.
+
+8. Load the snapshot:
 
 ```bash
 btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
 ```
 
-7. Monitor background validation:
+9. Monitor background validation:
 
 ```bash
 btx-cli getchainstates
@@ -83,6 +127,15 @@ btx-cli getchainstates
 
 Once the snapshot chainstate is active, wallet and mining RPCs become usable
 without waiting for a full historical sync.
+Mining itself remains guarded: `getblocktemplate` will pause while the node is
+still in IBD, lacks sufficient outbound peers, or has peers that are too far
+behind the header tip. Keep DNS seed and fixed seed discovery enabled, and use
+DNS names rather than hard-coded peer IP addresses in any `addnode=` hints.
+When checking readiness manually, pass a BIP 9 template-request object:
+
+```bash
+btx-cli getblocktemplate '{"rules":["segwit"]}'
+```
 
 If you prefer a one-command bootstrap flow, the scripts under
 `contrib/faststart/` can consume the same published bundle directly.
@@ -265,10 +318,11 @@ Operational note:
 To keep this workflow usable for binary users, every release should ship:
 
 - the BTX archives for every supported platform
+- the Linux x86_64 CPU-only, CUDA 12, and CUDA 13 archives
 - the matching `snapshot.dat`
-- a compact `snapshot.manifest.json`
+- a compact `snapshot.manifest.json` that records `snapshot_file_version`
 - `btx-release-manifest.json` with `platform_assets` entries for the supported
-  Linux, macOS, and Windows archives
+  Linux CPU, Linux CUDA, macOS, and Windows archives
 - `SHA256SUMS` and `SHA256SUMS.asc` covering both release assets
 - updated `m_assumeutxo_data` in `src/kernel/chainparams.cpp`
 - a release build that has passed the BTX assumeutxo functional coverage

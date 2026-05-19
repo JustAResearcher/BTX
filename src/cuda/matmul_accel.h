@@ -177,7 +177,21 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsBatch(const MatMulCompres
 MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatch(
     const MatMulLowRankCompressedWordsBatchRequest& request,
     MatMulCompressedWordsMode mode);
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatchOnDevice(
+    const MatMulLowRankCompressedWordsBatchRequest& request,
+    MatMulCompressedWordsMode mode,
+    int device_index);
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatchMultiDevice(
+    const MatMulLowRankCompressedWordsBatchRequest& request,
+    MatMulCompressedWordsMode mode);
 MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatch(
+    const MatMulLowRankCompressedWordsDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode);
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchOnDevice(
+    const MatMulLowRankCompressedWordsDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode,
+    int device_index);
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchMultiDevice(
     const MatMulLowRankCompressedWordsDeviceBatchRequest& request,
     MatMulCompressedWordsMode mode);
 

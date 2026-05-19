@@ -14,6 +14,7 @@ and the `issuematmulservicechallengeprofile` issuance path.
 Included scripts:
 - `start-live-mining.sh`: starts the health-aware local mining supervisor in the background after preflighting `jq`, and now auto-creates / loads the mining wallet plus address file when you do not pass `--address` or `--address-file`.
 - `live-mining-loop.sh`: continuously mines to a configured address while watching `getmininginfo.chain_guard` and an optional local idleness gate.
+- `live-mining-loop.py`: a leaner RPC-keepalive variant of `live-mining-loop.sh`. A single long-running Python process holds one HTTP connection to the JSON-RPC endpoint instead of forking `btx-cli` once per iteration. Use this when the per-spawn cost of the shell loop is the dominant operational concern — for example, on macOS hosts where every fork triggers `syspolicyd` and `XprotectService` malware checks, which at one-second cadence can keep those system services warm continuously and induce thermal throttling. It does not include the supervisor's chain-guard reaction, peer remediation, or daemon restart logic, so it expects a separately-monitored healthy node.
 - `stop-live-mining.sh`: stops the supervisor and any lingering `generatetoaddress` worker.
 - `backup-wallet.sh`: wraps `backupwallet` and exports descriptors + wallet metadata with a checksum.
 - `test-live-mining-loop-health.sh`: deterministic self-test for the supervisor restart path.
@@ -70,7 +71,7 @@ Quick start:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.7 \
+  --release-tag v0.30.0 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

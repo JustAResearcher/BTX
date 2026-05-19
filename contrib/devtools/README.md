@@ -196,21 +196,24 @@ snapshot assets, and generate the final `SHA256SUMS` / optional
 python3 scripts/release/collect_release_assets.py \
   --output-dir /tmp/btx-release-bundle \
   --source /tmp/guix-build/output/x86_64-linux-gnu \
+  --source /tmp/guix-build/output/x86_64-linux-gnu-cuda12 \
+  --source /tmp/guix-build/output/x86_64-linux-gnu-cuda13 \
   --source /tmp/guix-build/output/aarch64-linux-gnu \
   --source /tmp/guix-build/output/x86_64-w64-mingw32 \
   --source /tmp/guix-build/output/x86_64-apple-darwin \
   --source /tmp/guix-build/output/arm64-apple-darwin \
   --snapshot /tmp/snapshot.dat \
   --snapshot-manifest /tmp/snapshot.manifest.json \
-  --release-tag v0.29.7 \
-  --release-name "BTX 0.29.7" \
+  --release-tag v0.30.0 \
+  --release-name "BTX 0.30.0" \
   --sign-with release-signing-key
 ```
 
 The resulting `btx-release-manifest.json` includes `platform_assets` entries
-for the primary Linux, macOS, and Windows archives. That is the stable contract
-consumed by `contrib/faststart/btx-agent-setup.py` when an operator wants to
-download the correct archive and bootstrap immediately from a published release.
+for the primary Linux CPU, Linux CUDA, macOS, and Windows archives. That is the
+stable contract consumed by `contrib/faststart/btx-agent-setup.py` when an
+operator wants to download the correct archive and bootstrap immediately from a
+published release.
 
 Create or update a GitHub release and upload every file from the prepared
 bundle directory using the token stored in `github.key`:
@@ -218,7 +221,7 @@ bundle directory using the token stored in `github.key`:
 ```bash
 python3 scripts/release/publish_github_release.py \
   --repo btxchain/btx \
-  --tag v0.29.7 \
+  --tag v0.30.0 \
   --bundle-dir /tmp/btx-release-bundle \
   --body-file /tmp/release-notes.md \
   --token-file /path/to/github.key \

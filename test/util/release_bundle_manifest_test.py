@@ -37,6 +37,15 @@ class ReleaseBundleManifestTest(unittest.TestCase):
         self.assertIsNotNone(info)
         self.assertEqual(info["platform_id"], "linux-x86_64")
         self.assertEqual(info["archive_format"], "tar.gz")
+        self.assertEqual(info["flavor"], "cpu")
+
+        cuda_info = self.module.classify_primary_platform_asset(
+            "btx-29.2-x86_64-linux-gnu-cuda13.tar.gz"
+        )
+        self.assertIsNotNone(cuda_info)
+        self.assertEqual(cuda_info["platform_id"], "linux-x86_64-cuda13")
+        self.assertEqual(cuda_info["arch"], "x86_64")
+        self.assertEqual(cuda_info["flavor"], "cuda13")
 
         self.assertIsNone(
             self.module.classify_primary_platform_asset(

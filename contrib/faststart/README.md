@@ -3,7 +3,7 @@
 This directory contains the first-run bootstrap wrapper for operators who want
 to:
 
-1. fetch the matching snapshot for a chain,
+1. fetch the latest matching snapshot for a chain,
 2. load it with `loadtxoutset`,
 3. keep an eye on background validation with `getchainstates`.
 
@@ -14,6 +14,11 @@ canonical snapshot distribution system for BTX. Instead, they support either:
 - a JSON manifest that maps each chain name to the published snapshot metadata, or
 - the compact per-release `snapshot.manifest.json` emitted by
   `contrib/devtools/generate_assumeutxo.py`.
+
+For release installs, use the latest snapshot bundle published with the same
+BTX release as the binary. The compact manifest records `snapshot_file_version`
+for troubleshooting; the wrapper and `loadtxoutset` read the snapshot file
+directly and do not require operators to choose a snapshot format manually.
 
 Entry points
 
@@ -29,6 +34,9 @@ Current support matrix
 - `main`: supported with compiled assumeutxo metadata and published release snapshots
 - `regtest`: supported for default-consensus dev/test flows
 - `testnet`, `testnet4`, `signet`: unsupported for fast-start until `src/kernel/chainparams.cpp` gains real assumeutxo entries for those chains
+
+For a detailed from-scratch mining-node procedure using generic `/var/btx/`
+paths, see [BTX Mining Node Snapshot Runbook](../../doc/btx-mining-node-snapshot-runbook.md).
 
 Presets
 
@@ -47,6 +55,32 @@ wallet, mining, and service users. The fast-start presets still write
 clear and portable; use `retainshieldedcommitmentindex=0` only if you
 intentionally want the slower externalized path.
 
+The recommended miner fast-start config shape is:
+
+```ini
+server=1
+listen=1
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+dnsseed=1
+fixedseeds=1
+addnode=node.btx.tools:19335
+prune=4096
+blockfilterindex=1
+coinstatsindex=1
+retainshieldedcommitmentindex=1
+miningminoutboundpeers=2
+miningminsyncedoutboundpeers=1
+miningmaxheaderlag=8
+```
+
+Use DNS names rather than hard-coded peer IP addresses in configs and runbooks.
+Peer IPs can change or disappear; DNS bootstrap names can be updated without
+requiring every miner to edit local config. Avoid `connect=`-only production
+mining topologies because they bypass normal peer diversity and can increase
+stale block risk. The mining guard will keep `getblocktemplate` paused until
+the node is caught up and has enough useful outbound peer context.
+
 For horizontally scaled service gateways, add
 `--matmul-service-challenge-file=/shared/path/matmul_service_challenges.dat`
 so every issuer/redeemer node points at the same shared challenge registry.
@@ -62,10 +96,13 @@ clean. Pass `--cache-dir` if you want that cache somewhere else.
 Published release bundles should also include `btx-release-manifest.json`.
 That manifest advertises `platform_assets`, which map the release archives for
 Linux/macOS/Windows to stable platform ids such as `linux-x86_64` and
-`macos-arm64`. `btx-agent-setup.py` consumes that manifest so binary users can
-install the right archive without hard-coding filenames. For remote release
-URLs, the installer now treats `SHA256SUMS` as the source of truth for the
-manifest, archive, and snapshot-manifest hashes, and it verifies
+`macos-arm64`. Linux CUDA release archives use the explicit ids
+`linux-x86_64-cuda12` and `linux-x86_64-cuda13`; see
+[`doc/linux-release-builds.md`](../../doc/linux-release-builds.md) for the
+hardware and driver matrix. `btx-agent-setup.py` consumes that manifest so
+binary users can install the right archive without hard-coding filenames. For
+remote release URLs, the installer now treats `SHA256SUMS` as the source of
+truth for the manifest, archive, and snapshot-manifest hashes, and it verifies
 `SHA256SUMS.asc` when the release advertises one. Use
 `--allow-unsigned-release` only for intentionally unsigned test bundles.
 If the GitHub repository or release is private, export `BTX_GITHUB_TOKEN`,
@@ -88,7 +125,7 @@ One-shot install + bootstrap
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.7 \
+  --release-tag v0.30.0 \
   --preset service \
   --datadir="$HOME/.btx-service"
 ```
@@ -112,7 +149,7 @@ handing off to mining or service automation:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.7 \
+  --release-tag v0.30.0 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"
@@ -136,6 +173,23 @@ When `--preset miner` is used, the JSON summary also includes
 handoff into unattended mining supervisors.
 
 Manifest shape
+
+The preferred per-release manifest emitted by
+`contrib/devtools/generate_assumeutxo.py` includes the snapshot height, base
+block hash, file version, and checksum:
+
+```json
+{
+  "chain": "main",
+  "height": 123456,
+  "blockhash": "...",
+  "snapshot_file_version": 7,
+  "snapshot_sha256": "...",
+  "asset_url": "https://.../snapshot.dat"
+}
+```
+
+The wrapper also accepts a chain-mapped manifest:
 
 ```json
 {
@@ -176,6 +230,9 @@ daemon reaches a better active chainstate before `loadtxoutset` runs, the
 wrapper now treats the snapshot as superseded and continues instead of failing.
 Daemon-side RPC connection overrides such as `--daemon-arg=-rpcport=...` are
 also mirrored into the wrapper's internal `btx-cli` calls automatically.
+The snapshot base block must be known in the local header chain before
+`loadtxoutset` can activate it; the wrapper waits for headers using the
+manifest block hash and does not require the full base block to be downloaded.
 
 Service-gateway example with a shared redeem registry:
 

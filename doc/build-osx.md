@@ -65,7 +65,7 @@ git clone https://github.com/bitcoin/bitcoin.git
 
 #### Wallet Dependencies
 
-It is not necessary to build wallet functionality to run `btxd` or `bitcoin-qt`.
+It is not necessary to build wallet functionality to run `btxd` or `btx-qt`.
 
 ###### Descriptor Wallet Support
 
@@ -225,9 +225,9 @@ cmake --build build --target deploy
 ## Running Bitcoin Core
 
 Bitcoin Core should now be available at `./build/bin/btxd`.
-If you compiled support for the GUI, it should be available at `./build/bin/bitcoin-qt`.
+If you compiled support for the GUI, it should be available at `./build/bin/btx-qt`.
 
-The first time you run `btxd` or `bitcoin-qt`, it will start downloading the blockchain.
+The first time you run `btxd` or `btx-qt`, it will start downloading the blockchain.
 This process could take many hours, or even days on slower than average systems.
 
 By default, blockchain and wallet data files will be stored in:
@@ -258,5 +258,5 @@ tail -f $HOME/Library/Application\ Support/Bitcoin/debug.log
 ./build/bin/btxd -daemon      # Starts the BTX daemon.
 ./build/bin/btx-cli --help    # Outputs a list of command-line options.
 ./build/bin/btx-cli help      # Outputs a list of RPC commands when the daemon is running.
-./build/bin/bitcoin-qt -server # Starts bitcoin-qt server mode, allows btx-cli control
+./build/bin/btx-qt -server # Starts btx-qt server mode, allows btx-cli control
 ```

@@ -85,7 +85,7 @@ if ! [[ "${VERIFY_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-mkdir -p "$(dirname "${ARTIFACT_JSON}")" "$(dirname "${CHECKLIST_MD}")" "$(dirname "${VERIFY_ARTIFACT}")"
+mkdir -p "$(dirname "${ARTIFACT_JSON}")" "$(dirname "${CHECKLIST_MD}")" "$(dirname "${VERIFY_ARTIFACT}")" "$(dirname "${VERIFY_LOG}")"
 
 verify_rc=0
 if [[ "${SKIP_RUN}" -eq 0 ]]; then

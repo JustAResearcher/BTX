@@ -23,6 +23,7 @@ class WalletShieldedRandomizedSimTest(BitcoinTestFramework):
         self.num_nodes = 1
         self.setup_clean_chain = True
         self.extra_args = [["-regtestshieldedmatrictdisableheight=500"]]
+        self.rpc_timeout = 120
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()

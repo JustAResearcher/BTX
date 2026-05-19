@@ -492,7 +492,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--asset-base-url",
         help="Override the base URL or directory used to resolve asset names from the release manifest.",
     )
-    parser.add_argument("--platform", help="Override detected platform id, for example linux-x86_64.")
+    parser.add_argument("--platform", help="Override detected platform id, for example linux-x86_64 or linux-x86_64-cuda12.")
     parser.add_argument(
         "--install-dir",
         help="Directory where the BTX archive will be extracted. Defaults to ~/.local/btx/<tag>/<platform>.",

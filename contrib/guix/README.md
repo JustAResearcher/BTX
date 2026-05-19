@@ -64,6 +64,50 @@ following from the top of a clean repository:
 ./contrib/guix/guix-build
 ```
 
+The Guix source input is created with `git archive HEAD`. If you need to test a
+source-tree workaround under `src/`, `cmake/`, or other archived paths, commit
+it first and clear the cached `guix-build-*/output/dist-archive/` tarball
+before rerunning so the updated `HEAD` is re-archived.
+
+The top-level work directory name is derived from `VERSION`, not `DISTNAME`.
+The resolution order is:
+
+1. `FORCE_VERSION`, if exported
+2. exact `HEAD` tag, without the leading `v`
+3. short commit hash
+
+So release builds from a tagged `HEAD` naturally land under
+`guix-build-${VERSION}/...`, while ad hoc builds from an untagged commit land
+under `guix-build-<short-hash>/...`. Use `FORCE_VERSION` if you need to pin a
+local staging label explicitly.
+
+## Linux release flavors
+
+For `x86_64-linux-gnu`, `guix-build` produces three Linux release flavors by
+default:
+
+| Output directory | Archive flavor | Runtime support |
+|---|---|---|
+| `output/x86_64-linux-gnu` | CPU-only | No CUDA runtime or NVIDIA driver requirement. |
+| `output/x86_64-linux-gnu-cuda12` | CUDA 12 | CUDA 12.9.1 runtime statically linked into the release binaries. |
+| `output/x86_64-linux-gnu-cuda13` | CUDA 13 | CUDA 13.2.0 runtime statically linked into the release binaries. |
+
+Other Linux hosts only build the CPU flavor. Non-Linux hosts use their normal
+single output directory.
+
+Use `GUIX_LINUX_FLAVORS` to narrow the x86_64 Linux build while iterating:
+
+```sh
+env HOSTS='x86_64-linux-gnu' GUIX_LINUX_FLAVORS='cpu' ./contrib/guix/guix-build
+env HOSTS='x86_64-linux-gnu' GUIX_LINUX_FLAVORS='cuda12 cuda13' ./contrib/guix/guix-build
+```
+
+The CUDA release archives do not package the NVIDIA driver and do not require
+the CUDA Toolkit to be installed on the target machine. The target machine must
+have a compatible NVIDIA driver and a GPU covered by the archive's embedded CUDA
+architecture list. See [Linux Release Build
+Variants](/doc/linux-release-builds.md) for the hardware and driver matrix.
+
 ## Codesigning build outputs
 
 The `guix-codesign` command attaches codesignatures (produced by codesigners) to
@@ -222,9 +266,22 @@ details.
   Override the space-separated list of platform triples for which to perform a
   bootstrappable build.
 
+  For `x86_64-linux-gnu`, each selected host is expanded into the Linux release
+  flavors from `GUIX_LINUX_FLAVORS`.
+
   _(defaults to "x86\_64-linux-gnu arm-linux-gnueabihf aarch64-linux-gnu
   riscv64-linux-gnu powerpc64-linux-gnu powerpc64le-linux-gnu
   x86\_64-w64-mingw32 x86\_64-apple-darwin arm64-apple-darwin")_
+
+* _**GUIX_LINUX_FLAVORS**_
+
+  Override the space-separated Linux release flavors produced for
+  `x86_64-linux-gnu`.
+
+  Supported values are `cpu`, `cuda12`, and `cuda13`.
+
+  _(defaults to "cpu cuda12 cuda13" for `x86_64-linux-gnu`; other Linux hosts
+  build only `cpu`)_
 
 * _**SOURCES_PATH**_
 

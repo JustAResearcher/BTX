@@ -10,9 +10,10 @@ SIGNAPPLE=signapple
 TEMPDIR=sign.temp
 
 BUNDLE_ROOT=dist
-BUNDLE_NAME="Bitcoin-Qt.app"
-UNSIGNED_BUNDLE="${BUNDLE_ROOT}/${BUNDLE_NAME}"
-UNSIGNED_BINARY="${UNSIGNED_BUNDLE}/Contents/MacOS/Bitcoin-Qt"
+UNSIGNED_BUNDLE="$(find "${BUNDLE_ROOT}" -maxdepth 1 -type d -name '*.app' | sort | head -n 1)"
+test -n "${UNSIGNED_BUNDLE}"
+BUNDLE_NAME="$(basename "${UNSIGNED_BUNDLE}")"
+UNSIGNED_BINARY="${UNSIGNED_BUNDLE}/Contents/MacOS/${BUNDLE_NAME%.app}"
 
 ARCH=$(${SIGNAPPLE} info ${UNSIGNED_BINARY} | head -n 1 | cut -d " " -f 1)
 

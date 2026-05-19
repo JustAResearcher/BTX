@@ -286,7 +286,8 @@ public:
                                           std::optional<uint256>& commitment_index_digest,
                                           std::optional<
                                               shielded::registry::ShieldedAccountRegistryPersistedSnapshot>&
-                                              account_registry_snapshot) const;
+                                              account_registry_snapshot,
+                                          std::vector<uint256>* account_registry_roots = nullptr) const;
 
     /** Persist the active shielded frontier state for restart recovery. */
     [[nodiscard]] bool WritePersistedState(const shielded::ShieldedMerkleTree& tree,
@@ -297,7 +298,8 @@ public:
                                            std::optional<uint256> commitment_index_digest,
                                            std::optional<
                                                shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
-                                               account_registry_snapshot);
+                                               account_registry_snapshot,
+                                           std::vector<uint256> account_registry_roots = {});
 
     /** Iterate over persisted nullifiers in on-disk order. */
     template <typename Fn>

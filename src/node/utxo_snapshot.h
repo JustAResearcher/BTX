@@ -28,6 +28,9 @@ static constexpr std::array<uint8_t, 5> SNAPSHOT_MAGIC_BYTES = {'u', 't', 'x', '
 class Chainstate;
 
 namespace node {
+static constexpr uint16_t SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION{6};
+static constexpr uint16_t SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION{7};
+
 //! Metadata describing a serialized version of a UTXO set from which an
 //! assumeutxo Chainstate can be constructed.
 //! All metadata fields come from an untrusted file, so must be validated
@@ -35,10 +38,16 @@ namespace node {
 class SnapshotMetadata
 {
 public:
-    inline static constexpr uint16_t CURRENT_VERSION{6};
+    inline static constexpr uint16_t CURRENT_VERSION{SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION};
 
 private:
-    const std::set<uint16_t> m_supported_versions{2, 3, 4, 5, CURRENT_VERSION};
+    const std::set<uint16_t> m_supported_versions{
+        2,
+        3,
+        4,
+        5,
+        SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION,
+        SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION};
     const MessageStartChars m_network_magic;
     uint16_t m_version{CURRENT_VERSION};
 
@@ -124,6 +133,7 @@ public:
     uint64_t m_netting_manifest_count{0};
     uint64_t m_account_registry_entry_count{0};
     std::vector<uint64_t> m_recent_output_counts;
+    std::vector<uint256> m_account_registry_roots;
     CAmount m_pool_balance{0};
 
     template <typename Stream>
@@ -137,8 +147,11 @@ public:
         if (m_snapshot_version >= 4) {
             s << m_settlement_anchor_count;
             s << m_netting_manifest_count;
-            if (m_snapshot_version >= SnapshotMetadata::CURRENT_VERSION) {
+            if (m_snapshot_version >= SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
                 s << m_account_registry_entry_count;
+            }
+            if (m_snapshot_version >= SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION) {
+                s << m_account_registry_roots;
             }
         }
     }
@@ -159,18 +172,27 @@ public:
         if (m_snapshot_version >= 4) {
             s >> m_settlement_anchor_count;
             s >> m_netting_manifest_count;
-            if (m_snapshot_version >= SnapshotMetadata::CURRENT_VERSION) {
+            if (m_snapshot_version >= SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
                 s >> m_account_registry_entry_count;
             } else {
                 m_account_registry_entry_count = 0;
+            }
+            if (m_snapshot_version >= SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION) {
+                s >> m_account_registry_roots;
+            } else {
+                m_account_registry_roots.clear();
             }
         } else {
             m_settlement_anchor_count = 0;
             m_netting_manifest_count = 0;
             m_account_registry_entry_count = 0;
+            m_account_registry_roots.clear();
         }
         if (m_recent_output_counts.size() > static_cast<size_t>(SHIELDED_ANCHOR_DEPTH)) {
             throw std::ios_base::failure("BTX shielded snapshot section has too many anchor history entries.");
+        }
+        if (m_account_registry_roots.size() > static_cast<size_t>(SHIELDED_ANCHOR_DEPTH) + 1U) {
+            throw std::ios_base::failure("BTX shielded snapshot section has too many account-registry history entries.");
         }
     }
 };

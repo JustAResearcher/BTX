@@ -9,23 +9,88 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(APPLE)
   option(BTX_ENABLE_METAL "Enable optional Metal acceleration helpers for BTX utilities" ON)
+  function(find_btx_apple_framework out_var framework_name)
+    set(framework_hints)
+    if(CMAKE_OSX_SYSROOT)
+      list(APPEND framework_hints
+        "${CMAKE_OSX_SYSROOT}/System/Library/Frameworks"
+        "${CMAKE_OSX_SYSROOT}/Library/Frameworks"
+      )
+    endif()
+    if(CMAKE_FRAMEWORK_PATH)
+      list(APPEND framework_hints ${CMAKE_FRAMEWORK_PATH})
+    endif()
+    if(CMAKE_SYSTEM_FRAMEWORK_PATH)
+      list(APPEND framework_hints ${CMAKE_SYSTEM_FRAMEWORK_PATH})
+    endif()
+    list(REMOVE_DUPLICATES framework_hints)
+
+    foreach(framework_dir IN LISTS framework_hints)
+      set(framework_bundle "${framework_dir}/${framework_name}.framework")
+      if(EXISTS "${framework_bundle}")
+        set(${out_var} "${framework_bundle}" CACHE FILEPATH "Path to ${framework_name}.framework" FORCE)
+        set(${out_var} "${framework_bundle}" PARENT_SCOPE)
+        return()
+      endif()
+    endforeach()
+
+    if(framework_hints)
+      find_library(${out_var} NAMES ${framework_name} HINTS ${framework_hints} NO_DEFAULT_PATH)
+    endif()
+    if(NOT EXISTS "${${out_var}}")
+      find_library(${out_var} NAMES ${framework_name})
+    endif()
+    if(EXISTS "${${out_var}}")
+      set(${out_var} "${${out_var}}" PARENT_SCOPE)
+      return()
+    endif()
+
+    if(NOT EXISTS "${${out_var}}")
+      list(JOIN framework_hints ", " searched_framework_hints)
+      if(searched_framework_hints)
+        message(FATAL_ERROR "Unable to locate ${framework_name}.framework. Searched SDK/framework hints: ${searched_framework_hints}")
+      else()
+        message(FATAL_ERROR "Unable to locate ${framework_name}.framework.")
+      endif()
+    endif()
+  endfunction()
 else()
   option(BTX_ENABLE_METAL "Enable optional Metal acceleration helpers for BTX utilities" OFF)
 endif()
 option(BTX_ENABLE_CUDA_EXPERIMENTAL "Enable experimental CUDA backend scaffolding for BTX miner integration" OFF)
 set(BTX_CUDA_ARCHITECTURES "" CACHE STRING "Semicolon-separated CUDA SM architectures for the experimental MatMul backend (for example 120)")
+set(BTX_CUDA_RUNTIME_LIBRARY_DEFAULT "Shared")
+if(DEFINED CMAKE_CUDA_RUNTIME_LIBRARY AND NOT CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "")
+  set(BTX_CUDA_RUNTIME_LIBRARY_DEFAULT "${CMAKE_CUDA_RUNTIME_LIBRARY}")
+endif()
+set(BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES Shared Static)
+set(BTX_CUDA_RUNTIME_LIBRARY "${BTX_CUDA_RUNTIME_LIBRARY_DEFAULT}" CACHE STRING "CUDA runtime library linkage for the experimental CUDA backend: Shared or Static")
+set_property(CACHE BTX_CUDA_RUNTIME_LIBRARY PROPERTY STRINGS Shared Static)
 
 if(BTX_ENABLE_CUDA_EXPERIMENTAL)
-  include(CheckLanguage)
-  check_language(CUDA)
-  if(NOT CMAKE_CUDA_COMPILER)
-    message(FATAL_ERROR "BTX_ENABLE_CUDA_EXPERIMENTAL=ON requires a CUDA compiler. Set CMAKE_CUDA_COMPILER or install a supported toolkit.")
+  if(BTX_CUDA_ARCHITECTURES STREQUAL "" AND DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+    set(BTX_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}" CACHE STRING "Semicolon-separated CUDA SM architectures for the experimental MatMul backend (for example 120)" FORCE)
   endif()
   if(BTX_CUDA_ARCHITECTURES STREQUAL "")
     message(FATAL_ERROR "BTX_ENABLE_CUDA_EXPERIMENTAL=ON requires BTX_CUDA_ARCHITECTURES to be set explicitly.")
   endif()
+  set(CMAKE_CUDA_ARCHITECTURES "${BTX_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architectures for compiler detection and BTX CUDA targets" FORCE)
+  if(NOT BTX_CUDA_RUNTIME_LIBRARY IN_LIST BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES)
+    message(FATAL_ERROR "BTX_CUDA_RUNTIME_LIBRARY must be Shared or Static")
+  endif()
   enable_language(CUDA)
+  if(CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA"
+      AND CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0
+      AND (NOT DEFINED CMAKE_CUDA20_STANDARD_COMPILE_OPTION OR CMAKE_CUDA20_STANDARD_COMPILE_OPTION STREQUAL ""))
+    set(CMAKE_CUDA20_STANDARD_COMPILE_OPTION "-std=c++20")
+    set(CMAKE_CUDA20_EXTENSION_COMPILE_OPTION "-std=c++20")
+    set(CMAKE_CUDA20_COMPILE_FEATURES cuda_std_20)
+    list(APPEND CMAKE_CUDA_COMPILE_FEATURES cuda_std_20)
+  endif()
   find_package(CUDAToolkit REQUIRED)
+  if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "Static" AND NOT TARGET CUDA::cudart_static)
+    message(FATAL_ERROR "BTX_CUDA_RUNTIME_LIBRARY=Static requires CUDA::cudart_static from the selected CUDA toolkit.")
+  endif()
 endif()
 
 #=============================
@@ -267,7 +332,7 @@ target_link_libraries(bitcoin_common
     $<$<PLATFORM_ID:Windows>:ws2_32>
 )
 if(APPLE)
-  find_library(BTX_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
+  find_btx_apple_framework(BTX_ACCELERATE_FRAMEWORK Accelerate)
   target_link_libraries(bitcoin_common PRIVATE ${BTX_ACCELERATE_FRAMEWORK})
 endif()
 
@@ -327,6 +392,7 @@ set_source_files_properties(matmul/matmul_pow.cpp PROPERTIES
 
 add_library(btx_matmul_backend STATIC EXCLUDE_FROM_ALL
   matmul/backend_capabilities.cpp
+  cuda/cuda_scheduler.cpp
   metal/matmul_accel_env.cpp
 )
 if(APPLE AND BTX_ENABLE_METAL)
@@ -339,8 +405,8 @@ if(APPLE AND BTX_ENABLE_METAL)
     metal/nonce_accel.mm
     metal/oracle_accel.mm
   )
-  find_library(BTX_FOUNDATION_FRAMEWORK Foundation REQUIRED)
-  find_library(BTX_METAL_FRAMEWORK Metal REQUIRED)
+  find_btx_apple_framework(BTX_FOUNDATION_FRAMEWORK Foundation)
+  find_btx_apple_framework(BTX_METAL_FRAMEWORK Metal)
   option(BTX_MATMUL_METAL_PRECOMPILE_KERNELS "Precompile MatMul Metal kernels with xcrun metallib at build time" ON)
   find_program(BTX_XCRUN_EXECUTABLE xcrun)
   if(BTX_MATMUL_METAL_PRECOMPILE_KERNELS AND BTX_XCRUN_EXECUTABLE)
@@ -399,9 +465,14 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     cuda/oracle_accel.cu
   )
   target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_CUDA_EXPERIMENTAL=1)
-  target_link_libraries(btx_matmul_backend PRIVATE CUDA::cudart)
+  if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "Static")
+    target_link_libraries(btx_matmul_backend PRIVATE CUDA::cudart_static)
+  else()
+    target_link_libraries(btx_matmul_backend PRIVATE CUDA::cudart)
+  endif()
   set_target_properties(btx_matmul_backend PROPERTIES
     CUDA_ARCHITECTURES "${BTX_CUDA_ARCHITECTURES}"
+    CUDA_RUNTIME_LIBRARY "${BTX_CUDA_RUNTIME_LIBRARY}"
     CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON
   )
@@ -453,9 +524,9 @@ function(add_legacy_binary_alias target_name legacy_binary)
   endif()
 endfunction()
 
-# Provide canonical BTX CMake build targets while preserving legacy target names.
-# Example: `cmake --build build --target btxd` builds legacy target `bitcoind`.
-function(add_btx_target_alias alias_name target_name)
+# Provide backward-compatible legacy CMake build targets.
+# Example: `cmake --build build --target bitcoind` builds canonical target `btxd`.
+function(add_legacy_target_alias alias_name target_name)
   if(TARGET ${target_name} AND NOT TARGET ${alias_name})
     add_custom_target(${alias_name} DEPENDS ${target_name})
   endif()
@@ -508,30 +579,30 @@ if(ENABLE_WALLET)
   add_subdirectory(wallet)
 
   if(BUILD_WALLET_TOOL)
-    add_executable(bitcoin-wallet
+    add_executable(btx-wallet
       bitcoin-wallet.cpp
       init/bitcoin-wallet.cpp
       wallet/wallettool.cpp
     )
-    set_target_properties(bitcoin-wallet PROPERTIES OUTPUT_NAME btx-wallet)
-    add_windows_resources(bitcoin-wallet bitcoin-wallet-res.rc)
-    target_link_libraries(bitcoin-wallet
+    set_target_properties(btx-wallet PROPERTIES OUTPUT_NAME btx-wallet)
+    add_windows_resources(btx-wallet bitcoin-wallet-res.rc)
+    target_link_libraries(btx-wallet
       core_interface
       Boost::headers
     )
     if(UNIX AND NOT APPLE)
-      target_link_btx_linux_archive_group(bitcoin-wallet ${BTX_NODE_WALLET_ARCHIVES})
+      target_link_btx_linux_archive_group(btx-wallet ${BTX_NODE_WALLET_ARCHIVES})
     else()
-      target_link_libraries(bitcoin-wallet bitcoin_wallet)
+      target_link_libraries(btx-wallet bitcoin_wallet)
     endif()
-    install_binary_component(bitcoin-wallet HAS_MANPAGE)
-    add_legacy_binary_alias(bitcoin-wallet bitcoin-wallet)
-    add_btx_target_alias(btx-wallet bitcoin-wallet)
+    install_binary_component(btx-wallet HAS_MANPAGE)
+    add_legacy_binary_alias(btx-wallet bitcoin-wallet)
+    add_legacy_target_alias(bitcoin-wallet btx-wallet)
   endif()
 endif()
 
 
-# P2P and RPC server functionality used by `bitcoind` and `bitcoin-qt` executables.
+# P2P and RPC server functionality used by `btxd` and `btx-qt` executables.
 add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   addrdb.cpp
   addrman.cpp
@@ -648,57 +719,58 @@ target_link_libraries(bitcoin_node
 )
 
 
-# Bitcoin Core bitcoind.
+# BTX daemon executable.
 if(BUILD_DAEMON)
-  add_executable(bitcoind
+  add_executable(btxd
     bitcoind.cpp
     init/bitcoind.cpp
   )
-  set_target_properties(bitcoind PROPERTIES OUTPUT_NAME btxd)
-  add_windows_resources(bitcoind bitcoind-res.rc)
-  target_link_libraries(bitcoind
+  set_target_properties(btxd PROPERTIES OUTPUT_NAME btxd)
+  add_windows_resources(btxd bitcoind-res.rc)
+  target_link_libraries(btxd
     core_interface
   )
   if(UNIX AND NOT APPLE)
     if(TARGET bitcoin_wallet)
-      target_link_btx_linux_archive_group(bitcoind ${BTX_NODE_WALLET_ARCHIVES})
+      target_link_btx_linux_archive_group(btxd ${BTX_NODE_WALLET_ARCHIVES})
     else()
-      target_link_btx_linux_archive_group(bitcoind ${BTX_NODE_ARCHIVES})
+      target_link_btx_linux_archive_group(btxd ${BTX_NODE_ARCHIVES})
     endif()
   else()
-    target_link_libraries(bitcoind
+    target_link_libraries(btxd
       bitcoin_node
       $<TARGET_NAME_IF_EXISTS:bitcoin_wallet>
     )
   endif()
-  install_binary_component(bitcoind HAS_MANPAGE)
-  add_legacy_binary_alias(bitcoind bitcoind)
-  add_btx_target_alias(btxd bitcoind)
+  install_binary_component(btxd HAS_MANPAGE)
+  add_legacy_binary_alias(btxd bitcoind)
+  add_legacy_target_alias(bitcoind btxd)
 endif()
 if(WITH_MULTIPROCESS AND BUILD_DAEMON)
-  add_executable(bitcoin-node
+  add_executable(btx-node
     bitcoind.cpp
     init/bitcoin-node.cpp
   )
-  set_target_properties(bitcoin-node PROPERTIES OUTPUT_NAME btx-node)
-  target_link_libraries(bitcoin-node
+  set_target_properties(btx-node PROPERTIES OUTPUT_NAME btx-node)
+  target_link_libraries(btx-node
     core_interface
     bitcoin_ipc
   )
   if(UNIX AND NOT APPLE)
     if(TARGET bitcoin_wallet)
-      target_link_btx_linux_archive_group(bitcoin-node ${BTX_NODE_WALLET_ARCHIVES})
+      target_link_btx_linux_archive_group(btx-node ${BTX_NODE_WALLET_ARCHIVES})
     else()
-      target_link_btx_linux_archive_group(bitcoin-node ${BTX_NODE_ARCHIVES})
+      target_link_btx_linux_archive_group(btx-node ${BTX_NODE_ARCHIVES})
     endif()
   else()
-    target_link_libraries(bitcoin-node
+    target_link_libraries(btx-node
       bitcoin_node
       $<TARGET_NAME_IF_EXISTS:bitcoin_wallet>
     )
   endif()
-  install_binary_component(bitcoin-node)
-  add_btx_target_alias(btx-node bitcoin-node)
+  install_binary_component(btx-node)
+  add_legacy_binary_alias(btx-node bitcoin-node)
+  add_legacy_target_alias(bitcoin-node btx-node)
 endif()
 
 if(WITH_MULTIPROCESS AND BUILD_TESTS)
@@ -731,62 +803,62 @@ target_link_libraries(bitcoin_cli
 
 # Bitcoin Core RPC client
 if(BUILD_CLI)
-  add_executable(bitcoin-cli bitcoin-cli.cpp)
-  set_target_properties(bitcoin-cli PROPERTIES OUTPUT_NAME btx-cli)
-  add_windows_resources(bitcoin-cli bitcoin-cli-res.rc)
-  target_link_libraries(bitcoin-cli
+  add_executable(btx-cli bitcoin-cli.cpp)
+  set_target_properties(btx-cli PROPERTIES OUTPUT_NAME btx-cli)
+  add_windows_resources(btx-cli bitcoin-cli-res.rc)
+  target_link_libraries(btx-cli
     core_interface
     bitcoin_cli
     bitcoin_common
     libevent::core
     libevent::extra
   )
-  install_binary_component(bitcoin-cli HAS_MANPAGE)
-  add_legacy_binary_alias(bitcoin-cli bitcoin-cli)
-  add_btx_target_alias(btx-cli bitcoin-cli)
+  install_binary_component(btx-cli HAS_MANPAGE)
+  add_legacy_binary_alias(btx-cli bitcoin-cli)
+  add_legacy_target_alias(bitcoin-cli btx-cli)
 endif()
 
 
 if(BUILD_TX)
-  add_executable(bitcoin-tx bitcoin-tx.cpp)
-  set_target_properties(bitcoin-tx PROPERTIES OUTPUT_NAME btx-tx)
-  add_windows_resources(bitcoin-tx bitcoin-tx-res.rc)
-  target_include_directories(bitcoin-tx PRIVATE
+  add_executable(btx-tx bitcoin-tx.cpp)
+  set_target_properties(btx-tx PROPERTIES OUTPUT_NAME btx-tx)
+  add_windows_resources(btx-tx bitcoin-tx-res.rc)
+  target_include_directories(btx-tx PRIVATE
     $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
   )
-  target_link_libraries(bitcoin-tx
+  target_link_libraries(btx-tx
     core_interface
   )
   if(UNIX AND NOT APPLE)
-    target_link_btx_linux_archive_group(bitcoin-tx ${BTX_BASE_ARCHIVES})
+    target_link_btx_linux_archive_group(btx-tx ${BTX_BASE_ARCHIVES})
   else()
-    target_link_libraries(bitcoin-tx
+    target_link_libraries(btx-tx
       bitcoin_shielded
     )
   endif()
-  install_binary_component(bitcoin-tx HAS_MANPAGE)
-  add_legacy_binary_alias(bitcoin-tx bitcoin-tx)
-  add_btx_target_alias(btx-tx bitcoin-tx)
+  install_binary_component(btx-tx HAS_MANPAGE)
+  add_legacy_binary_alias(btx-tx bitcoin-tx)
+  add_legacy_target_alias(bitcoin-tx btx-tx)
 endif()
 
 
 if(BUILD_UTIL)
-  add_executable(bitcoin-util bitcoin-util.cpp)
-  set_target_properties(bitcoin-util PROPERTIES OUTPUT_NAME btx-util)
-  add_windows_resources(bitcoin-util bitcoin-util-res.rc)
-  target_link_libraries(bitcoin-util
+  add_executable(btx-util bitcoin-util.cpp)
+  set_target_properties(btx-util PROPERTIES OUTPUT_NAME btx-util)
+  add_windows_resources(btx-util bitcoin-util-res.rc)
+  target_link_libraries(btx-util
     core_interface
   )
   if(UNIX AND NOT APPLE)
-    target_link_btx_linux_archive_group(bitcoin-util ${BTX_BASE_ARCHIVES})
+    target_link_btx_linux_archive_group(btx-util ${BTX_BASE_ARCHIVES})
   else()
-    target_link_libraries(bitcoin-util
+    target_link_libraries(btx-util
       bitcoin_shielded
     )
   endif()
-  install_binary_component(bitcoin-util HAS_MANPAGE)
-  add_legacy_binary_alias(bitcoin-util bitcoin-util)
-  add_btx_target_alias(btx-util bitcoin-util)
+  install_binary_component(btx-util HAS_MANPAGE)
+  add_legacy_binary_alias(btx-util bitcoin-util)
+  add_legacy_target_alias(bitcoin-util btx-util)
 
   add_executable(btx-matmul-backend-info btx-matmul-backend-info.cpp)
   target_link_libraries(btx-matmul-backend-info
@@ -855,7 +927,7 @@ if(BUILD_KERNEL_LIB)
 endif()
 
 if(BUILD_UTIL_CHAINSTATE)
-  add_executable(bitcoin-chainstate
+  add_executable(btx-chainstate
     bitcoin-chainstate.cpp
   )
   # TO-DO: The `SKIP_BUILD_RPATH` property setting can be deleted
@@ -864,16 +936,16 @@ if(BUILD_UTIL_CHAINSTATE)
   # Relevant discussions:
   # - https://github.com/hebasto/bitcoin/pull/236#issuecomment-2183120953
   # - https://github.com/bitcoin/bitcoin/pull/30312#issuecomment-2191235833
-  set_target_properties(bitcoin-chainstate PROPERTIES
+  set_target_properties(btx-chainstate PROPERTIES
     SKIP_BUILD_RPATH OFF
     OUTPUT_NAME btx-chainstate
   )
-  target_link_libraries(bitcoin-chainstate
+  target_link_libraries(btx-chainstate
     PRIVATE
       core_interface
       bitcoinkernel
   )
-  add_btx_target_alias(btx-chainstate bitcoin-chainstate)
+  add_legacy_target_alias(bitcoin-chainstate btx-chainstate)
 endif()
 
 

@@ -109,7 +109,9 @@ mkdir -p "$DISTSRC"
             esac
 
             # Apply detached codesignatures (in-place)
-            signapple apply dist/Bitcoin-Qt.app codesignatures/osx/"${HOST}"/dist/Bitcoin-Qt.app
+            app_bundle="$(find dist -maxdepth 1 -type d -name '*.app' | sort | head -n 1)"
+            test -n "${app_bundle}"
+            signapple apply "${app_bundle}" "codesignatures/osx/${HOST}/${app_bundle}"
             find "${DISTNAME}" -wholename "*/bin/*" -type f | while read -r bin
             do
                 signapple apply "${bin}" "codesignatures/osx/${HOST}/${bin}.${ARCH}sign"

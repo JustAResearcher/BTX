@@ -4,6 +4,10 @@ Guide to the design and architecture of the Bitcoin Core multiprocess feature
 
 _This document describes the design of the multiprocess feature. For usage information, see the top-level [multiprocess.md](../multiprocess.md) file._
 
+Current status: this is a design reference for a feature that is presently
+disabled in this repository. Top-level CMake forces `WITH_MULTIPROCESS=OFF`, so
+`-DWITH_MULTIPROCESS=ON` does not currently produce a supported build.
+
 ## Table of contents
 
 - [Introduction](#introduction)
@@ -31,7 +35,7 @@ The Bitcoin Core software has historically employed a monolithic architecture. T
 
 ## Current Architecture
 
-The current system features two primary executables: `bitcoind` and `bitcoin-qt`. `bitcoind` combines a Bitcoin P2P node with an integrated JSON-RPC server, wallet, and indexes. `bitcoin-qt` extends this by incorporating a Qt-based GUI. This monolithic structure, although robust, presents challenges such as limited operational flexibility and increased security risks due to the tight integration of components.
+The current system features two primary executables: `bitcoind` and `btx-qt`. `bitcoind` combines a Bitcoin P2P node with an integrated JSON-RPC server, wallet, and indexes. `btx-qt` extends this by incorporating a Qt-based GUI. This monolithic structure, although robust, presents challenges such as limited operational flexibility and increased security risks due to the tight integration of components.
 
 ## Proposed Architecture
 
