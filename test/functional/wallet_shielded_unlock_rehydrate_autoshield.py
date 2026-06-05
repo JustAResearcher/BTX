@@ -22,6 +22,8 @@ class WalletShieldedUnlockRehydrateAutoshieldTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.extra_args = [[
             f"-regtestshieldedmatrictdisableheight={DISABLE_HEIGHT}",
+            # v0.31.1: auto-shield is now opt-in (default off); enable it explicitly for this test.
+            "-autoshieldcoinbase=1",
         ]]
         self.rpc_timeout = 1200
 

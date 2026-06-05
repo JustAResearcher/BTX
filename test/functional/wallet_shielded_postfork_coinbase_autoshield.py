@@ -22,6 +22,9 @@ class WalletShieldedPostForkCoinbaseAutoshieldTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.extra_args = [[
             f"-regtestshieldedmatrictdisableheight={DISABLE_HEIGHT}",
+            # v0.31.1: auto-shield is now opt-in (default off) + gated to the C-002 height; on regtest
+            # the gate floor defaults to 0, so just enabling it exercises auto-shield as before.
+            "-autoshieldcoinbase=1",
         ]]
         self.rpc_timeout = 1200
 

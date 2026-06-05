@@ -276,6 +276,24 @@ struct Params {
     uint64_t nMaxShieldedAccountRegistryEntries{
         DEFAULT_MAX_SHIELDED_ACCOUNT_REGISTRY_ENTRIES};
 
+    /** Shielded-pool unshield (z->t egress) velocity cap. Defense-in-depth on top of the turnstile
+     *  (net-supply firewall) and the C-002 value-conservation binding (per-tx soundness): bounds how
+     *  fast value can leave the pool, so a stolen spend key or a future soundness regression becomes a
+     *  slow, observable leak rather than an instant drain. Consensus rule: a block is invalid if the
+     *  total net unshield value over the trailing window exceeds nShieldedUnshieldVelocityCapBps basis
+     *  points of the shielded pool balance at the window start. Inert until the activation height
+     *  (fast-follow after C-002); self-serve unshield does not exist before C-002 anyway. */
+    int32_t nShieldedUnshieldVelocityActivationHeight{std::numeric_limits<int32_t>::max()};
+    /** Trailing window length in blocks over which net unshield value is summed. */
+    uint32_t nShieldedUnshieldVelocityWindowBlocks{960}; // ~1 day at 90s spacing
+    /** Cap as basis points (1/10000) of the pool balance at window start. 1000 bps = 10%. */
+    uint32_t nShieldedUnshieldVelocityCapBps{1000};
+    bool IsShieldedUnshieldVelocityCapActive(int32_t height) const
+    {
+        return nShieldedUnshieldVelocityActivationHeight != std::numeric_limits<int32_t>::max() &&
+               height >= nShieldedUnshieldVelocityActivationHeight;
+    }
+
     int64_t nPowTargetSpacing;
     int64_t nPowTargetTimespan;
     std::chrono::seconds PowTargetSpacing() const

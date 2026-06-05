@@ -142,6 +142,7 @@ add_executable(test_btx
   shielded_proof_adversarial_tests.cpp
   shielded_mempool_tests.cpp
   shielded_turnstile_tests.cpp
+  shielded_unshield_velocity_tests.cpp
   shielded_validation_checks_tests.cpp
   shielded_matrict_plus_tests.cpp
   shielded_matrict_runtime_report.cpp
