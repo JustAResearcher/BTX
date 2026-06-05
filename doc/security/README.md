@@ -18,6 +18,13 @@ Use these files in the following order:
    - Closeout for the later PR #134 lifecycle/operator-note follow-on review.
 6. [findings/l12-pq128-parameter-upgrade.md](findings/l12-pq128-parameter-upgrade.md)
    - The remaining open PQ-128 parameter-set redesign item.
+7. [../../formal-verification/PLAN.md](../../formal-verification/PLAN.md)
+   - Tiered formal verification of the shielded value-soundness stack:
+     Tier 1 accounting firewall (turnstile / supply floor / velocity cap),
+     Tier 2 verifier-relation binding (serial<->key, value/inflation), Tier 3
+     reduction to Module-SIS. 21 machine-checked obligations plus a
+     paper-rigorous `PROOFS.md` per tier; run `python3
+     formal-verification/run_all.py`.
 
 Detailed tracker:
 

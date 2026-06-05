@@ -56,6 +56,7 @@
 #include <tinyformat.h>
 #include <uint256.h>
 #include <univalue.h>
+#include <util/chaintype.h>
 #include <util/check.h>
 #include <util/fs.h>
 #include <util/fs_helpers.h>
@@ -2053,8 +2054,10 @@ void CWallet::blockConnected(ChainstateRole role, const interfaces::BlockInfo& b
                 m_shielded_wallet->ScanBlock(*block.data, block.height);
             }
 
-            // Auto-shield mature coinbase outputs into the shielded pool.
-            if (m_shielded_wallet && gArgs.GetBoolArg("-autoshieldcoinbase", true)) {
+            // Auto-shield mature coinbase outputs into the shielded pool. Opt-in (default off) for
+            // fund preservation: mined rewards stay as PQ transparent (P2MR) outputs, with no
+            // shielded-proof soundness exposure, until the operator chooses privacy.
+            if (m_shielded_wallet && gArgs.GetBoolArg("-autoshieldcoinbase", false)) {
                 MaybeAutoShieldCoinbase();
             }
         }
@@ -2096,6 +2099,17 @@ void CWallet::MaybeAutoShieldCoinbase()
     if (IsLocked()) return;
     if (chain().shutdownRequested()) return;
     if (m_last_block_processed_height < m_autoshield_retry_after_height) return;
+
+    // Fund-preservation gate: do not auto-sweep mined rewards into the shielded pool until the
+    // C-002 shielded-pool hardening has activated. Until then the pool's per-tx value/serial
+    // bindings are not yet in force, so we keep coinbase as post-quantum transparent (P2MR)
+    // outputs, which carry no shielded-proof soundness exposure. Default floor = the C-002 height
+    // (0 on regtest, where C-002 is treated as active early for testing); operator-overridable.
+    const int32_t default_autoshield_min_height =
+        gArgs.GetChainType() == ChainType::REGTEST ? 0 : smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+    const int32_t autoshield_min_height = static_cast<int32_t>(
+        gArgs.GetIntArg("-autoshieldcoinbaseminheight", default_autoshield_min_height));
+    if (m_last_block_processed_height < autoshield_min_height) return;
 
     static constexpr int AUTO_SHIELD_RETRY_BLOCKS{25};
 

@@ -5582,6 +5582,17 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         m_chainman.m_shielded_account_leaf_commitments = std::move(projected_account_leaf_entries);
         m_chainman.InvalidateShieldedAccountStateSnapshotCaches();
         m_chainman.m_shielded_pool_balance = projected_pool;
+
+        // v0.31.1 unshield velocity cap: erase this block's net-egress entry from the trailing window
+        // (exact reorg undo). Only the entry recorded at connect time (height >= activation) exists.
+        if (m_chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(pindex->nHeight)) {
+            ShieldedUnshieldVelocity rolled_back_velocity = m_chainman.m_shielded_unshield_velocity;
+            rolled_back_velocity.UndoBlock(pindex->nHeight);
+            if (!m_chainman.m_shielded_nullifiers->WriteUnshieldVelocity(rolled_back_velocity)) {
+                return DISCONNECT_FAILED;
+            }
+            m_chainman.m_shielded_unshield_velocity = std::move(rolled_back_velocity);
+        }
     }
 
     if (apply_shielded_state && this == &m_chainman.ActiveChainstate() && m_chainman.m_shielded_state_initialized) {
@@ -6698,6 +6709,34 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                                      "shielded-netting-manifest-db-write-failed");
             }
+
+            // v0.31.1 unshield velocity cap (gated). The block's net z->t egress is the pool's net
+            // decrease this block (value that left the pool); a trailing-window sum of net egress must
+            // stay within cap_bps/10000 of the pool balance at block start. Computed, checked, and
+            // persisted before the pool-balance commit so a violation rejects the block cleanly.
+            const auto& vparams = params.GetConsensus();
+            const bool velocity_active = vparams.IsShieldedUnshieldVelocityCapActive(pindex->nHeight);
+            ShieldedUnshieldVelocity next_velocity;
+            if (velocity_active) {
+                next_velocity = m_chainman.m_shielded_unshield_velocity;
+                const CAmount pool_start = m_chainman.m_shielded_pool_balance.GetBalance();
+                const CAmount pool_end = next_pool_balance.GetBalance();
+                const CAmount block_net_egress = pool_start > pool_end ? pool_start - pool_end : 0;
+                next_velocity.RecordBlock(pindex->nHeight, block_net_egress);
+                if (!next_velocity.WithinCap(pindex->nHeight, pool_start,
+                                             vparams.nShieldedUnshieldVelocityCapBps,
+                                             vparams.nShieldedUnshieldVelocityWindowBlocks)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                         "shielded-unshield-velocity-exceeded");
+                }
+                next_velocity.Prune(pindex->nHeight -
+                    2 * static_cast<int32_t>(vparams.nShieldedUnshieldVelocityWindowBlocks));
+                if (!m_chainman.m_shielded_nullifiers->WriteUnshieldVelocity(next_velocity)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                         "shielded-velocity-db-write-failed");
+                }
+            }
+
             if (!m_chainman.m_shielded_nullifiers->WritePoolBalance(next_pool_balance.GetBalance())) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "shielded-pool-db-write-failed");
             }
@@ -6714,6 +6753,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 m_chainman.InvalidateShieldedAccountStateSnapshotCaches();
             }
             m_chainman.m_shielded_pool_balance = next_pool_balance;
+            if (velocity_active) m_chainman.m_shielded_unshield_velocity = std::move(next_velocity);
         }
     }
 
@@ -11854,6 +11894,13 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         AssertLockHeld(::cs_main);
         if (startup_shielded_repair_performed) {
             AutoReconsiderShieldedInvalidBlocksAfterStartupRepair();
+        }
+        // v0.31.1 unshield velocity cap: load the persisted trailing-window egress log so the rule is
+        // evaluated identically on every node (incl. pruned ones, which cannot replay the window).
+        if (m_shielded_nullifiers &&
+            !m_shielded_nullifiers->ReadUnshieldVelocity(m_shielded_unshield_velocity)) {
+            LogPrintf("EnsureShieldedStateInitialized: failed to load unshield-velocity window\n");
+            return false;
         }
         // Register the shielded prune-retention lock at startup, before any FindFilesToPrune can run,
         // even if no new block has connected yet (no-op unless pruning + shielded).

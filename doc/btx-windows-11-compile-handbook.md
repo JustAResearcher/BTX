@@ -320,7 +320,7 @@ with the plain CPU-backed path first.
 Use the wrapper defaults. They are intentionally short:
 
 - `C:\btx-deps\vcpkg`
-- `C:\btx-deps\vcpkg_installed\btx-node`
+- `C:\btx-deps\vcpkg_installed\btx`
 - `C:\btx-deps\vcpkg-buildtrees`
 
 These paths are there to reduce the most common Windows path-length problems.

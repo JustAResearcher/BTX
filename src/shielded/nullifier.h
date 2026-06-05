@@ -14,6 +14,7 @@
 #include <shielded/account_registry.h>
 #include <shielded/merkle_tree.h>
 #include <shielded/note.h>
+#include <shielded/unshield_velocity.h>
 #include <uint256.h>
 
 #include <atomic>
@@ -263,6 +264,12 @@ public:
     /** Persist the shielded pool balance. */
     [[nodiscard]] bool WritePoolBalance(CAmount balance);
 
+    /** Read the persisted unshield-velocity window log. Missing value leaves the object empty. */
+    [[nodiscard]] bool ReadUnshieldVelocity(ShieldedUnshieldVelocity& velocity) const;
+
+    /** Persist the unshield-velocity window log. */
+    [[nodiscard]] bool WriteUnshieldVelocity(const ShieldedUnshieldVelocity& velocity);
+
     /** Return the in-flight shielded mutation marker, if any. */
     [[nodiscard]] std::optional<ShieldedStateMutationMarker> ReadMutationMarker() const;
 
@@ -438,6 +445,7 @@ private:
     static constexpr uint8_t DB_PERSISTED_STATE{'S'};
     static constexpr uint8_t DB_SNAPSHOT_BRIDGE_METADATA_HINT{'G'};
     static constexpr uint8_t DB_NULLIFIER_ACCUMULATOR{'U'};
+    static constexpr uint8_t DB_UNSHIELD_VELOCITY{'V'};
 
     //! Order-independent, incrementally maintained MuHash of the nullifier set, used to cheaply
     //! verify on restart that the persisted nullifier set has not drifted. Maintained under m_rwlock

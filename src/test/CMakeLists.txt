@@ -142,6 +142,7 @@ add_executable(test_btx
   shielded_proof_adversarial_tests.cpp
   shielded_mempool_tests.cpp
   shielded_turnstile_tests.cpp
+  shielded_unshield_velocity_tests.cpp
   shielded_validation_checks_tests.cpp
   shielded_matrict_plus_tests.cpp
   shielded_matrict_runtime_report.cpp
@@ -203,6 +204,7 @@ add_executable(test_btx
   smile2_wallet_bridge_tests.cpp
   smile2_adversarial_tests.cpp
   smile2_deep_adversarial_tests.cpp
+  smile2_monomial_challenge_tests.cpp
   smile2_extreme_adversarial_tests.cpp
   smile2_edge_case_tests.cpp
   smile2_comprehensive_gap_tests.cpp

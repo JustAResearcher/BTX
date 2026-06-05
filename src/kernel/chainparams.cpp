@@ -227,6 +227,10 @@ public:
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
+        // v0.31.1: shielded unshield (z->t) velocity cap. Fast-follow after the v0.31.0 C-002 fork
+        // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
+        // post-fork regime. Set well clear of 123,000 to give the network time to upgrade to v0.31.1.
+        consensus.nShieldedUnshieldVelocityActivationHeight = 130'000;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1815; // 90% of 2016
@@ -470,6 +474,10 @@ public:
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
+        // v0.31.1: shielded unshield (z->t) velocity cap. Fast-follow after the v0.31.0 C-002 fork
+        // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
+        // post-fork regime. Set well clear of 123,000 to give the network time to upgrade to v0.31.1.
+        consensus.nShieldedUnshieldVelocityActivationHeight = 130'000;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
@@ -633,6 +641,10 @@ public:
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
+        // v0.31.1: shielded unshield (z->t) velocity cap. Fast-follow after the v0.31.0 C-002 fork
+        // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
+        // post-fork regime. Set well clear of 123,000 to give the network time to upgrade to v0.31.1.
+        consensus.nShieldedUnshieldVelocityActivationHeight = 130'000;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
@@ -826,6 +838,10 @@ public:
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
+        // v0.31.1: shielded unshield (z->t) velocity cap. Fast-follow after the v0.31.0 C-002 fork
+        // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
+        // post-fork regime. Set well clear of 123,000 to give the network time to upgrade to v0.31.1.
+        consensus.nShieldedUnshieldVelocityActivationHeight = 130'000;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
@@ -989,6 +1005,10 @@ public:
             opts.shielded_matrict_disable_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedSpendPathRecoveryActivationHeight =
             opts.shielded_spend_path_recovery_activation_height.value_or(0);  // Activate at genesis for instant regtest
+        // v0.31.1 velocity cap: inert on regtest by default (so existing shielded tests are unaffected);
+        // a functional test lowers it via -regtestshieldedunshieldvelocityactivationheight to exercise it.
+        consensus.nShieldedUnshieldVelocityActivationHeight =
+            opts.shielded_unshield_velocity_activation_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedPQ128UpgradeHeight =
             opts.shielded_pq128_upgrade_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedSettlementAnchorMaturity = 6;
@@ -1227,6 +1247,10 @@ public:
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
+        // v0.31.1: shielded unshield (z->t) velocity cap. Fast-follow after the v0.31.0 C-002 fork
+        // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
+        // post-fork regime. Set well clear of 123,000 to give the network time to upgrade to v0.31.1.
+        consensus.nShieldedUnshieldVelocityActivationHeight = 130'000;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 108;

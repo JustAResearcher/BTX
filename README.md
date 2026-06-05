@@ -304,8 +304,17 @@ For the full PQ specification and tutorials, see:
 
 BTX includes a **shielded transaction pool** active from genesis on all
 networks. Shielded transactions hide sender, receiver, and amount using
-lattice-based zero-knowledge proofs, while coinbase rewards are automatically
-moved into the shielded pool by default.
+lattice-based zero-knowledge proofs. As of v0.31.1, coinbase auto-shielding is
+opt-in (default off; `-autoshieldcoinbase=1`) so mined rewards stay as
+post-quantum transparent outputs unless an operator chooses to shield.
+
+The shielded pool's value soundness is covered by a tiered formal-verification
+suite — an accounting firewall (turnstile / supply floor / velocity cap), the
+C-002 verifier-relation bindings (serial↔key and value/inflation), and a
+reduction of forgery hardness to Module-SIS — with 21 machine-checked
+obligations plus paper-rigorous proofs per tier. See
+[formal-verification/PLAN.md](formal-verification/PLAN.md) (run `python3
+formal-verification/run_all.py`).
 
 ### Production Status
 
@@ -614,7 +623,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.31.0 \
+  --release-tag v0.31.1 \
   --preset service \
   --datadir="$HOME/.btx"
 ```

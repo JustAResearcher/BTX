@@ -197,6 +197,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.shielded_spend_path_recovery_activation_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedspendpathrecoveryactivationheight");
     }
+    if (args.IsArgSet("-regtestshieldedunshieldvelocityactivationheight")) {
+        options.shielded_unshield_velocity_activation_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedunshieldvelocityactivationheight");
+    }
     if (args.IsArgSet("-regtestshieldedpq128upgradeheight")) {
         options.shielded_pq128_upgrade_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedpq128upgradeheight");

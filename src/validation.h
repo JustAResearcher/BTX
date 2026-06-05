@@ -29,6 +29,7 @@
 #include <shielded/nullifier.h>
 #include <shielded/smile2/public_account.h>
 #include <shielded/turnstile.h>
+#include <shielded/unshield_velocity.h>
 #include <shielded/validation.h>
 #include <sync.h>
 #include <txdb.h>
@@ -1050,6 +1051,8 @@ private:
     std::deque<uint256> m_shielded_anchor_roots GUARDED_BY(::cs_main);
     std::deque<uint256> m_shielded_account_registry_roots GUARDED_BY(::cs_main);
     ShieldedPoolBalance m_shielded_pool_balance GUARDED_BY(::cs_main);
+    //! v0.31.1 defense-in-depth: trailing-window net-unshield log enforcing the egress velocity cap.
+    ShieldedUnshieldVelocity m_shielded_unshield_velocity GUARDED_BY(::cs_main);
     bool m_shielded_state_initialized GUARDED_BY(::cs_main){false};
     std::optional<ShieldedAutoRepairGeneration> m_last_shielded_anchor_auto_repair_generation GUARDED_BY(::cs_main);
     std::optional<ShieldedAutoRepairGeneration> m_last_shielded_state_rebuild_generation GUARDED_BY(::cs_main);
