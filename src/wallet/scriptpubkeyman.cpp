@@ -815,7 +815,7 @@ SigningResult LegacyScriptPubKeyMan::SignMessage(const MessageSignatureFormat fo
     return SigningResult::SIGNING_FAILED;
 }
 
-std::optional<PSBTError> LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize) const
+std::optional<PSBTError> LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize, bool slhdsa_fips205) const
 {
     if (n_signed) {
         *n_signed = 0;
@@ -842,7 +842,7 @@ std::optional<PSBTError> LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransact
             // There's no UTXO so we can just skip this now
             continue;
         }
-        SignPSBTInput(HidingSigningProvider(this, !sign, !bip32derivs), psbtx, i, &txdata, sighash_type, nullptr, finalize);
+        SignPSBTInput(HidingSigningProvider(this, !sign, !bip32derivs), psbtx, i, &txdata, sighash_type, nullptr, finalize, slhdsa_fips205);
 
         bool signed_one = PSBTInputSigned(input);
         if (n_signed && (signed_one || !sign)) {
@@ -2900,7 +2900,7 @@ SigningResult DescriptorScriptPubKeyMan::SignMessage(const MessageSignatureForma
     return SigningResult::OK;
 }
 
-std::optional<PSBTError> DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize) const
+std::optional<PSBTError> DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize, bool slhdsa_fips205) const
 {
     if (n_signed) {
         *n_signed = 0;
@@ -3035,9 +3035,9 @@ std::optional<PSBTError> DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTran
 
             for (size_t j = batch_start; j < batch_end; ++j) {
                 auto& item = work_items[j];
-                futures.push_back(std::async(std::launch::async, [&psbtx, &txdata, sighash_type, bip32derivs, finalize, &item]() {
+                futures.push_back(std::async(std::launch::async, [&psbtx, &txdata, sighash_type, bip32derivs, finalize, slhdsa_fips205, &item]() {
                     SignPSBTInput(HidingSigningProvider(item.keys.get(), /*hide_secret=*/false, /*hide_origin=*/!bip32derivs),
-                                 psbtx, item.index, &txdata, sighash_type, nullptr, finalize);
+                                 psbtx, item.index, &txdata, sighash_type, nullptr, finalize, slhdsa_fips205);
                     return PSBTInputSigned(psbtx.inputs.at(item.index));
                 }));
             }
@@ -3076,7 +3076,7 @@ std::optional<PSBTError> DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTran
         // Non-signing path or single input: run sequentially
         for (auto& item : work_items) {
             SignPSBTInput(HidingSigningProvider(item.keys.get(), /*hide_secret=*/!sign, /*hide_origin=*/!bip32derivs),
-                         psbtx, item.index, &txdata, sighash_type, nullptr, finalize);
+                         psbtx, item.index, &txdata, sighash_type, nullptr, finalize, slhdsa_fips205);
             bool signed_one = PSBTInputSigned(psbtx.inputs.at(item.index));
             if (n_signed && (signed_one || !sign)) {
                 (*n_signed)++;

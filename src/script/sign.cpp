@@ -277,7 +277,7 @@ static bool CreateP2MRCSFSSig(SignatureData& sigdata,
             const CPQPubKey verifier(algo, pubkey);
             HashWriter hasher = HASHER_CSFS;
             hasher.write(AsBytes(msg));
-            if (verifier.Verify(hasher.GetSHA256(), it->second)) {
+            if (verifier.Verify(hasher.GetSHA256(), it->second, slhdsa_fips205)) {
                 sig_out = it->second;
                 return true;
             }
@@ -1123,6 +1123,15 @@ static CScript PushAll(const std::vector<valtype>& values)
     return result;
 }
 
+static unsigned int SigningVerifyFlags(bool slhdsa_fips205)
+{
+    unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS;
+    if (slhdsa_fips205) {
+        flags |= SCRIPT_VERIFY_SLHDSA_FIPS205;
+    }
+    return flags;
+}
+
 bool ProduceSignature(const SigningProvider& provider, const BaseSignatureCreator& creator, const CScript& fromPubKey, SignatureData& sigdata)
 {
     if (sigdata.complete) return true;
@@ -1199,7 +1208,7 @@ bool ProduceSignature(const SigningProvider& provider, const BaseSignatureCreato
     sigdata.scriptSig = PushAll(result);
 
     // Test solution
-    sigdata.complete = solved && VerifyScript(sigdata.scriptSig, fromPubKey, &sigdata.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, creator.Checker());
+    sigdata.complete = solved && VerifyScript(sigdata.scriptSig, fromPubKey, &sigdata.scriptWitness, SigningVerifyFlags(creator.SlhdsaFips205()), creator.Checker());
     return sigdata.complete;
 }
 
@@ -1620,7 +1629,9 @@ bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, 
 
             SignatureData probe_sigdata = DataFromTransaction(mtx, i, coin->second.out);
             probe_sigdata.preferred_pq_signing_algo = preferred_pq_signing_algo;
-            ProduceSignature(*keystore, MutableTransactionSignatureCreator(mtx, i, coin->second.out.nValue, &probe_txdata, nHashType), coin->second.out.scriptPubKey, probe_sigdata);
+            MutableTransactionSignatureCreator probe_creator(mtx, i, coin->second.out.nValue, &probe_txdata, nHashType);
+            probe_creator.SetSlhdsaFips205(slhdsa_fips205);
+            ProduceSignature(*keystore, probe_creator, coin->second.out.scriptPubKey, probe_sigdata);
             if (!probe_sigdata.p2mr_leaf_script.empty()) {
                 p2mr_timelocked_inputs.push_back({i, std::move(probe_sigdata.p2mr_leaf_script)});
             }
@@ -1686,7 +1697,7 @@ bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, 
         }
 
         ScriptError serror = SCRIPT_ERR_OK;
-        if (!sigdata.complete && !VerifyScript(txin.scriptSig, prevPubKey, &txin.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txConst, i, amount, txdata, MissingDataBehavior::FAIL), &serror)) {
+        if (!sigdata.complete && !VerifyScript(txin.scriptSig, prevPubKey, &txin.scriptWitness, SigningVerifyFlags(slhdsa_fips205), TransactionSignatureChecker(&txConst, i, amount, txdata, MissingDataBehavior::FAIL), &serror)) {
             if (serror == SCRIPT_ERR_INVALID_STACK_OPERATION) {
                 // Unable to sign input and verification failed (possible attempt to partially sign).
                 input_errors[i] = Untranslated("Unable to sign input, invalid stack size (possibly missing key)");

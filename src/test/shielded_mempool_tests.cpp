@@ -200,6 +200,7 @@ CMutableTransaction BuildShieldedRecoveryExitTx(const ShieldedNote& note,
     using namespace shielded::v2;
     RecoveryExitPayload payload;
     payload.value = note.value;
+    payload.note_commitment = note.GetCommitment();
     payload.recipient_pk_hash = note.recipient_pk_hash;
     payload.rho = note.rho;
     payload.rcm = note.rcm;
@@ -208,7 +209,7 @@ CMutableTransaction BuildShieldedRecoveryExitTx(const ShieldedNote& note,
     payload.membership_proof = {0x02};
     const auto nf = smile2::wallet::ComputeSmileNullifierFromNote(smile2::wallet::SMILE_GLOBAL_SEED, note);
     out_nf = nf.value_or(uint256{});
-    out_cm = note.GetCommitment();
+    out_cm = payload.note_commitment;
 
     TransactionBundle bundle;
     bundle.header.family_id = TransactionFamily::V2_RECOVERY_EXIT;

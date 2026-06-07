@@ -292,7 +292,7 @@ struct PendingBridgeCommitResult
     }
 
     CMutableTransaction mtx;
-    if (!FinalizeAndExtractPSBT(psbt, mtx)) {
+    if (!FinalizeAndExtractPSBT(psbt, mtx, wallet.SlhdsaFips205ForNextBlock())) {
         error = "Failed to finalize bridge PSBT";
         return false;
     }
@@ -386,6 +386,9 @@ bool BridgeArchivedOperation::IsValid() const
 }
 
 namespace {
+static constexpr const char* BRIDGE_SHIELD_POOL_CREDIT_DISABLED_ERROR{
+    "Bridge shield settlement disabled because shielded pool credits are disabled"};
+
 [[nodiscard]] bool PendingBridgeFundingUnspent(CWallet& wallet, const COutPoint& outpoint)
 {
     std::map<COutPoint, Coin> coins;
@@ -400,7 +403,8 @@ namespace {
     return error.find("Failed to sign") != std::string::npos ||
            error.find("wallet keys") != std::string::npos ||
            error.find("finalize") != std::string::npos ||
-           error.find("refund destination") != std::string::npos;
+           error.find("refund destination") != std::string::npos ||
+           error.find("shielded pool credits are disabled") != std::string::npos;
 }
 
 [[nodiscard]] std::string PendingBridgeStatusString(const BridgePendingStatusSnapshot& snapshot)
@@ -1789,6 +1793,12 @@ bool CWallet::TransactionCanBeAbandoned(const uint256& hashTx) const
     return wtx && !wtx->isAbandoned() && GetTxDepthInMainChain(*wtx) == 0 && !wtx->InMempool();
 }
 
+bool CWallet::SlhdsaFips205ForNextBlock() const
+{
+    const int next_height = chain().getHeight().value_or(-1) + 1;
+    return Params().GetConsensus().IsShieldedC002Active(next_height);
+}
+
 void CWallet::MarkInputsDirty(const CTransactionRef& tx)
 {
     for (const CTxIn& txin : tx->vin) {
@@ -2100,13 +2110,25 @@ void CWallet::MaybeAutoShieldCoinbase()
     if (chain().shutdownRequested()) return;
     if (m_last_block_processed_height < m_autoshield_retry_after_height) return;
 
+    const int32_t build_height =
+        m_last_block_processed_height >= std::numeric_limits<int32_t>::max() - 1
+            ? std::numeric_limits<int32_t>::max()
+            : m_last_block_processed_height + 1;
+    const auto& consensus = Params().GetConsensus();
+    if (consensus.IsShieldedPoolCreditDisabled(build_height)) {
+        m_autoshield_retry_after_height = std::numeric_limits<int>::max();
+        WalletLogPrintf("AutoShieldCoinbase: disabled at height %d because shielded pool credits are disabled\n",
+                        build_height);
+        return;
+    }
+
     // Fund-preservation gate: do not auto-sweep mined rewards into the shielded pool until the
     // C-002 shielded-pool hardening has activated. Until then the pool's per-tx value/serial
     // bindings are not yet in force, so we keep coinbase as post-quantum transparent (P2MR)
     // outputs, which carry no shielded-proof soundness exposure. Default floor = the C-002 height
     // (0 on regtest, where C-002 is treated as active early for testing); operator-overridable.
     const int32_t default_autoshield_min_height =
-        gArgs.GetChainType() == ChainType::REGTEST ? 0 : smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+        gArgs.GetChainType() == ChainType::REGTEST ? 0 : consensus.nShieldedC002ActivationHeight;
     const int32_t autoshield_min_height = static_cast<int32_t>(
         gArgs.GetIntArg("-autoshieldcoinbaseminheight", default_autoshield_min_height));
     if (m_last_block_processed_height < autoshield_min_height) return;
@@ -2199,13 +2221,9 @@ void CWallet::MaybeAutoShieldCoinbase()
         WalletLogPrintf("AutoShieldCoinbase: found %d mature signable coinbase outputs totaling %s, shielding...\n",
                         mature_coinbase_utxos.size(), FormatMoney(total_in));
 
-        const int32_t build_height =
-            m_last_block_processed_height >= std::numeric_limits<int32_t>::max() - 1
-                ? std::numeric_limits<int32_t>::max()
-                : m_last_block_processed_height + 1;
         CAmount fee = shielded::RoundShieldedFeeToCanonicalBucket(
             /*fee=*/10000,
-            Params().GetConsensus(),
+            consensus,
             build_height);
         std::optional<CMutableTransaction> mtx;
         for (int attempt = 0; attempt < 3; ++attempt) {
@@ -2224,7 +2242,7 @@ void CWallet::MaybeAutoShieldCoinbase()
                             FormatMoney(required_fee));
             fee = shielded::RoundShieldedFeeToCanonicalBucket(
                 required_fee,
-                Params().GetConsensus(),
+                consensus,
                 build_height);
             mtx.reset();
         }
@@ -2979,8 +2997,7 @@ bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint,
     // the verifier (GetBlockScriptFlags) uses, so the whole C-002 upgrade is
     // atomic. (Spends authored within one block of the boundary should be mined
     // promptly; a tx signed in one regime is rejected once the other activates.)
-    const int next_height = chain().getHeight().value_or(-1) + 1;
-    const bool slhdsa_fips205 = next_height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+    const bool slhdsa_fips205 = SlhdsaFips205ForNextBlock();
 
     // Try to sign with all ScriptPubKeyMans
     for (ScriptPubKeyMan* spk_man : GetAllScriptPubKeyMans()) {
@@ -3089,10 +3106,12 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
         spk_mans = GetAllScriptPubKeyMans();
     }
 
+    const bool slhdsa_fips205 = SlhdsaFips205ForNextBlock();
+
     const PrecomputedTransactionData probe_txdata = PrecomputePSBTData(psbtx);
 
     for (ScriptPubKeyMan* spk_man : spk_mans) {
-        const auto error{spk_man->FillPSBT(psbtx, probe_txdata, sighash_type, /*sign=*/false, bip32derivs, /*n_signed=*/nullptr, /*finalize=*/false)};
+        const auto error{spk_man->FillPSBT(psbtx, probe_txdata, sighash_type, /*sign=*/false, bip32derivs, /*n_signed=*/nullptr, /*finalize=*/false, slhdsa_fips205)};
         if (error) {
             return error;
         }
@@ -3121,7 +3140,7 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
     // serializing expensive signing operations across concurrent RPC calls.
     for (ScriptPubKeyMan* spk_man : spk_mans) {
         int n_signed_this_spkm = 0;
-        const auto error{spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize)};
+        const auto error{spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize, slhdsa_fips205)};
         if (error) {
             return error;
         }
@@ -3136,7 +3155,7 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
     // Complete if every input is now signed
     complete = true;
     for (size_t i = 0; i < psbtx.inputs.size(); ++i) {
-        complete &= PSBTInputSignedAndVerified(psbtx, i, &txdata);
+        complete &= PSBTInputSignedAndVerified(psbtx, i, &txdata, slhdsa_fips205);
     }
 
     return {};
@@ -3784,6 +3803,21 @@ std::vector<BridgePendingRecoveryResult> CWallet::RecoverPendingBridgeOperations
         }
 
         const int32_t build_height = PendingBridgeBuildHeight(snapshot.current_height);
+        if (!refund_path &&
+            operation.plan.kind == shielded::BridgeTemplateKind::SHIELD &&
+            Params().GetConsensus().IsShieldedPoolCreditDisabled(build_height)) {
+            if (operation.last_error != BRIDGE_SHIELD_POOL_CREDIT_DISABLED_ERROR) {
+                operation.last_error = BRIDGE_SHIELD_POOL_CREDIT_DISABLED_ERROR;
+                SavePendingBridgeOperation(operation);
+            }
+            result.operation = operation;
+            result.action = "manual_action_required";
+            result.error = operation.last_error;
+            result.status_after = "manual_action_required";
+            results.push_back(std::move(result));
+            continue;
+        }
+
         std::optional<PartiallySignedTransaction> psbt;
         if (refund_path) {
             const CTxDestination destination = DecodeDestination(operation.refund_destination);
@@ -3938,6 +3972,7 @@ void CWallet::MaybeRecoverPendingBridgeOperations()
                    result.action != "wallet_locked" &&
                    result.action != "already_attempted_this_height" &&
                    result.action != "waiting_mempool" &&
+                   result.action != "manual_action_required" &&
                    result.action != "spent_elsewhere") {
             WalletLogPrintf("MaybeRecoverPendingBridgeOperations: action=%s outpoint=%s:%u error=%s\n",
                             result.action,

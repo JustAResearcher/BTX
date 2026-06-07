@@ -786,7 +786,8 @@ template <typename T>
     std::string& reject_reason,
     bool reject_rice_codec,
     bool bind_anonset_context,
-    int64_t validation_height)
+    int64_t validation_height,
+    int64_t c002_activation_height)
 {
     if (!NativeBatchBackendMatchesSmile(backend) ||
         shared_ring_members.empty() ||
@@ -820,7 +821,8 @@ template <typename T>
             fee,
             reject_rice_codec,
             bind_anonset_context,
-            validation_height);
+            validation_height,
+            c002_activation_height);
         verify_err.has_value()) {
         reject_reason = *verify_err;
         return false;
@@ -2073,9 +2075,10 @@ bool VerifyV2IngressProof(const TransactionBundle& bundle,
                           const V2IngressContext& context,
                           const std::vector<std::vector<std::vector<uint256>>>& ring_members,
                           std::string& reject_reason,
-                          int64_t validation_height)
+                          int64_t validation_height,
+                          int64_t c002_activation_height)
 {
-    const bool slhdsa_fips205 = BridgeAttestorUsesFips205AtHeight(validation_height);
+    const bool slhdsa_fips205 = BridgeAttestorUsesFips205AtHeight(validation_height, c002_activation_height);
     if (NativeBatchBackendMatchesSmile(context.backend)) {
         reject_reason = "bad-shielded-v2-ingress-backend";
         return false;
@@ -2414,9 +2417,10 @@ bool VerifyV2IngressProof(
     std::string& reject_reason,
     bool reject_rice_codec,
     bool bind_anonset_context,
-    int64_t validation_height)
+    int64_t validation_height,
+    int64_t c002_activation_height)
 {
-    const bool slhdsa_fips205 = BridgeAttestorUsesFips205AtHeight(validation_height);
+    const bool slhdsa_fips205 = BridgeAttestorUsesFips205AtHeight(validation_height, c002_activation_height);
     if (!NativeBatchBackendMatchesSmile(context.backend)) {
         reject_reason = "bad-shielded-v2-ingress-backend";
         return false;
@@ -2685,7 +2689,8 @@ bool VerifyV2IngressProof(
                 reject_reason,
                 reject_rice_codec,
                 bind_anonset_context,
-                validation_height)) {
+                validation_height,
+                c002_activation_height)) {
             return false;
         }
 
@@ -2714,6 +2719,9 @@ std::optional<V2IngressBuildResult> BuildV2IngressBatchTransaction(const CMutabl
     reject_reason.clear();
     const bool bind_smile_anonset_context =
         consensus != nullptr && consensus->IsShieldedMatRiCTDisabled(validation_height);
+    const int64_t c002_activation_height = consensus != nullptr
+        ? consensus->nShieldedC002ActivationHeight
+        : smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
 
     if (tx_template.HasShieldedBundle()) {
         reject_reason = "bad-shielded-v2-ingress-builder-existing-bundle";
@@ -2998,7 +3006,8 @@ std::optional<V2IngressBuildResult> BuildV2IngressBatchTransaction(const CMutabl
             smile2::SmileProofCodecPolicy::CANONICAL_NO_RICE,
             bind_smile_anonset_context,
             /*error=*/nullptr,
-            validation_height);
+            validation_height,
+            c002_activation_height);
         if (!smile_result.has_value()) {
             reject_reason = "bad-shielded-v2-ingress-smile-proof";
             return std::nullopt;

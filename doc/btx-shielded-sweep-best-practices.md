@@ -1,12 +1,12 @@
 # BTX Shielded Sweep Best Practices
 
-This guide covers the supported transparent-to-shielded sweep flows in BTX,
-with a focus on wallet UX, gateway/app integration, and recovery when a
+This historical/pre-sunset guide covers transparent-to-shielded sweep flows in
+BTX, with a focus on wallet UX, gateway/app integration, and recovery when a
 shielding attempt is rejected or otherwise gets stuck.
 
-After the post-`61000` privacy fork, the wallet-side sweep RPCs are limited to
-mature coinbase compatibility flows. General transparent deposits should use the
-bridge-ingress surface instead.
+After the v0.32 sunset, new shielded credits are disabled by consensus. Do not
+use `z_planshieldfunds`, `z_shieldfunds`, or bridge ingress as current
+production shielded ingress.
 
 This guide is specifically about:
 
@@ -76,8 +76,9 @@ The `policy` object exposes the daemon's local chunking policy:
 
 ### `z_shieldfunds`
 
-This now executes a shielding sweep using the same policy-aware planner.
-After `61000`, it is limited to mature coinbase compatibility inputs.
+This executed a shielding sweep using the same policy-aware planner before the
+v0.32 sunset. Between `61000` and the sunset, it was limited to mature coinbase
+compatibility inputs.
 
 Example:
 
@@ -223,7 +224,7 @@ Do not assume one shielding request equals one tx.
 
 | Situation | Recommended action |
 |---|---|
-| Normal wallet sweep | Use `z_planshieldfunds`, then `z_shieldfunds` with default policy |
+| Historical/pre-sunset wallet sweep | Use `z_planshieldfunds`, then `z_shieldfunds` with default policy |
 | Huge UTXO set, latency-sensitive app | Preview plan, consider lowering `max_inputs_per_chunk` |
 | Need lowest possible total fee | Prefer default or a higher chunk cap, then re-plan |
 | RPC failed after mempool rejection | Re-run `z_planshieldfunds`; rejected candidates are auto-abandoned |
@@ -231,13 +232,13 @@ Do not assume one shielding request equals one tx.
 
 ## What This Does Not Change
 
-This work improves the supported wallet-side shielding compatibility flow. It
+This work improved the historical wallet-side shielding compatibility flow. It
 does not:
 
 - change the shielded note model itself
 - change MatRiCT proof semantics
-- reopen general post-`61000` public-flow transparent deposits on `V2_SEND`
-- replace `z_mergenotes` for shielded-note consolidation
+- reopen post-sunset shielded ingress or private shielded-output appends
+- replace historical/pre-sunset `z_mergenotes` for shielded-note consolidation
 
-Once funds are shielded, later `z -> z` transfers remain the preferred path for
-private movement inside the pool.
+After the v0.32 sunset, current production movement is transparent exit/recovery
+of existing shielded value rather than new `z -> z` private movement.

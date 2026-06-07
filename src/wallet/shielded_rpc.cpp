@@ -37,6 +37,8 @@
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
 #include <shielded/bundle.h>
+#include <shielded/recovery_exit.h>
+#include <shielded/smile2/ct_proof.h>
 #include <shielded/smile2/params.h>
 #include <shielded/v2_egress.h>
 #include <shielded/v2_ingress.h>
@@ -47,7 +49,9 @@
 #include <limits>
 #include <set>
 #include <string>
+#include <string_view>
 #include <tuple>
+#include <variant>
 #include <vector>
 
 namespace wallet {
@@ -111,6 +115,32 @@ static constexpr const char* TAG_REBALANCE_MANIFEST_AUTH{"BTX_RPC_Rebalance_Mani
 [[nodiscard]] int32_t NextShieldingRpcBuildHeight(const CWallet& wallet)
 {
     return NextBridgeLeafBuildHeight(wallet);
+}
+
+void RequireShieldedPoolCreditsEnabledOrThrow(const CWallet& wallet, std::string_view rpc_name)
+{
+    const int32_t build_height = NextShieldingRpcBuildHeight(wallet);
+    if (!Params().GetConsensus().IsShieldedPoolCreditDisabled(build_height)) {
+        return;
+    }
+    throw JSONRPCError(
+        RPC_WALLET_ERROR,
+        strprintf("%s is disabled at height %d because shielded pool credits are disabled by consensus",
+                  std::string{rpc_name},
+                  build_height));
+}
+
+void RequirePostSunsetShieldedAppendAllowedOrThrow(const CWallet& wallet, std::string_view rpc_name)
+{
+    const int32_t build_height = NextShieldingRpcBuildHeight(wallet);
+    if (!Params().GetConsensus().IsShieldedSunsetActive(build_height)) {
+        return;
+    }
+    throw JSONRPCError(
+        RPC_WALLET_ERROR,
+        strprintf("%s is disabled at height %d because the shielded sunset only permits transparent exits",
+                  std::string{rpc_name},
+                  build_height));
 }
 
 [[nodiscard]] bool UseCoinbaseOnlyShieldingCompatibility(const CWallet& wallet)
@@ -532,6 +562,47 @@ UniValue ShieldedTxViewOutputChunkToJSON(const ShieldedTxViewOutputChunk& chunk,
     out.pushKV("owned_output_count", static_cast<uint64_t>(chunk.owned_output_count));
     out.pushKV("owned_amount", ValueFromAmount(chunk.owned_amount));
     return out;
+}
+
+struct RecoveryExitRpcSpend
+{
+    ShieldedTxViewSpend spend;
+    uint256 commitment;
+};
+
+[[nodiscard]] std::optional<RecoveryExitRpcSpend> TryBuildRecoveryExitSpendView(const CShieldedBundle& bundle)
+{
+    if (!bundle.HasV2Bundle()) return std::nullopt;
+    const auto* v2_bundle = bundle.GetV2Bundle();
+    if (v2_bundle == nullptr ||
+        shielded::v2::GetBundleSemanticFamily(*v2_bundle) != shielded::v2::TransactionFamily::V2_RECOVERY_EXIT ||
+        !std::holds_alternative<shielded::v2::RecoveryExitPayload>(v2_bundle->payload)) {
+        return std::nullopt;
+    }
+
+    const auto& payload = std::get<shielded::v2::RecoveryExitPayload>(v2_bundle->payload);
+    shielded::recovery::RecoveryExitClaim claim;
+    claim.value = payload.value;
+    claim.note_commitment = payload.note_commitment;
+    claim.recipient_pk_hash = payload.recipient_pk_hash;
+    claim.rho = payload.rho;
+    claim.rcm = payload.rcm;
+    claim.spend_pubkey = payload.spend_pubkey;
+    claim.ownership_sig = payload.ownership_sig;
+    claim.membership_proof = payload.membership_proof;
+
+    shielded::recovery::RecoveryExitIdentifiers ids;
+    std::string reject_reason;
+    if (!shielded::recovery::DeriveRecoveryExitIdentifiers(claim, ids, reject_reason)) {
+        return std::nullopt;
+    }
+    return RecoveryExitRpcSpend{ShieldedTxViewSpend{ids.nullifier, claim.value, false}, ids.commitment};
+}
+
+[[nodiscard]] int64_t GetRpcShieldedSpendCount(const CShieldedBundle& bundle)
+{
+    const int64_t spend_count = static_cast<int64_t>(bundle.GetShieldedInputCount());
+    return spend_count + (TryBuildRecoveryExitSpendView(bundle).has_value() ? 1 : 0);
 }
 
 [[nodiscard]] const UniValue& FindValue(const UniValue& obj, std::string_view key)
@@ -2447,7 +2518,7 @@ void CheckBridgeViewGrantComponentMatches(const UniValue& value,
     }
 
     CMutableTransaction mtx;
-    if (!FinalizeAndExtractPSBT(psbt, mtx)) {
+    if (!FinalizeAndExtractPSBT(psbt, mtx, pwallet->SlhdsaFips205ForNextBlock())) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to finalize %s", context));
     }
 
@@ -5856,7 +5927,10 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
                  authorization.ids.operation_id != expected_ids->operation_id)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("leaves[%u].authorization_hex ids do not match bridge_id/operation_id", i));
             }
-            const auto leaf = shielded::BuildBridgeBatchLeafFromAuthorization(authorization, build_height);
+            const auto leaf = shielded::BuildBridgeBatchLeafFromAuthorization(
+                authorization,
+                build_height,
+                Params().GetConsensus().nShieldedC002ActivationHeight);
             if (!leaf.has_value()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("leaves[%u].authorization_hex does not derive a valid bridge batch leaf", i));
             }
@@ -7123,12 +7197,14 @@ void CommitBridgeTransactionOrThrow(const std::shared_ptr<CWallet>& pwallet,
 
     UniValue out(UniValue::VOBJ);
     out.pushKV("txid", tx->GetHash().GetHex());
-    PushShieldedBundleFamily(out, tx->GetShieldedBundle(), redact_sensitive);
-    if (redact_sensitive) {
+    const CShieldedBundle& bundle = tx->GetShieldedBundle();
+    PushShieldedBundleFamily(out, bundle, redact_sensitive);
+    const bool recovery_exit = TryBuildRecoveryExitSpendView(bundle).has_value();
+    if (redact_sensitive && !recovery_exit) {
         out.pushKV("io_counts_redacted", true);
     } else {
-        out.pushKV("spends", static_cast<int64_t>(tx->GetShieldedBundle().GetShieldedInputCount()));
-        out.pushKV("outputs", static_cast<int64_t>(tx->GetShieldedBundle().GetShieldedOutputCount()));
+        out.pushKV("spends", GetRpcShieldedSpendCount(bundle));
+        out.pushKV("outputs", static_cast<int64_t>(bundle.GetShieldedOutputCount()));
     }
     out.pushKV("fee", ValueFromAmount(fee));
     return out;
@@ -8039,7 +8115,8 @@ RPCHelpMan z_sendtoaddress()
     return RPCHelpMan{
         "z_sendtoaddress",
         "\nSend value from the shielded pool to one shielded address using a v2 private send transaction.\n"
-        "Unlike z_sendmany, this RPC does not fall back to transparent-input shielding when shielded funds are insufficient.\n",
+        "Unlike z_sendmany, this RPC does not fall back to transparent-input shielding when shielded funds are insufficient.\n"
+        "Historical/pre-sunset compatibility only; disabled after the v0.32 shielded sunset.\n",
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "Shielded recipient address"},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount to send"},
@@ -8076,6 +8153,7 @@ RPCHelpMan z_sendtoaddress()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequirePostSunsetShieldedAppendAllowedOrThrow(*pwallet, "z_sendtoaddress");
             EnsureWalletIsUnlocked(*pwallet);
 
             const auto dest = ParseShieldedAddr(request.params[0].get_str());
@@ -8411,7 +8489,8 @@ RPCHelpMan z_sendmany()
         "direct deposit path.\n"
         "After the post-61000 privacy fork, mixed direct sends to transparent recipients are disabled;\n"
         "use the bridge unshield flow for transparent settlement instead. Transparent-input fallback\n"
-        "is also disabled on this RPC after the fork.\n",
+        "is also disabled on this RPC after the fork. After the v0.32 shielded sunset, shielded\n"
+        "recipients and shielded change are disabled; only strict transparent exits can be accepted.\n",
         {
             {"amounts", RPCArg::Type::ARR, RPCArg::Optional::NO, "Recipients",
                 {
@@ -8512,6 +8591,9 @@ RPCHelpMan z_sendmany()
                     strprintf("Too many shielded recipients (%u > %u)",
                               static_cast<unsigned int>(shielded_recipient_count),
                               static_cast<unsigned int>(MAX_SHIELDED_OUTPUTS_PER_TX)));
+            }
+            if (shielded_recipient_count > 0) {
+                RequirePostSunsetShieldedAppendAllowedOrThrow(*pwallet, "z_sendmany with shielded recipients");
             }
 
             bool explicit_fee{false};
@@ -8653,16 +8735,51 @@ RPCHelpMan z_sendmany()
                             std::string create_error;
                             {
                                 LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
-                                mtx = pwallet->m_shielded_wallet->CreateShieldedSpend(
-                                    shielded_recipients,
-                                    transparent_recipients,
-                                    fee,
-                                    /*allow_transparent_fallback=*/true,
-                                    &create_error,
-                                    conflict_selection.has_value() ? &*conflict_selection : nullptr);
-                                if (mtx.has_value()) {
-                                    reserved_nullifiers = CollectShieldedNullifiers(mtx->shielded_bundle);
-                                    pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                                const int32_t build_height = NextShieldingRpcBuildHeight(*pwallet);
+                                const bool try_recovery_exit =
+                                    Params().GetConsensus().IsShieldedRecoveryExitActive(build_height) &&
+                                    shielded_recipients.empty() &&
+                                    transparent_recipients.size() == 1 &&
+                                    !conflict_selection.has_value();
+                                if (try_recovery_exit) {
+                                    const auto target_note_value = CheckedAdd(transparent_recipients.front().second, fee);
+                                    if (!target_note_value || !MoneyRange(*target_note_value)) {
+                                        create_error = "recovery exit target overflow";
+                                    } else {
+                                        const auto spendable_notes = pwallet->m_shielded_wallet->GetSpendableNotes(/*min_depth=*/1);
+                                        const auto selected_it = std::find_if(
+                                            spendable_notes.begin(),
+                                            spendable_notes.end(),
+                                            [&](const ShieldedCoin& coin) {
+                                                return coin.is_mine_spend && coin.note.value == *target_note_value;
+                                            });
+                                        if (selected_it == spendable_notes.end()) {
+                                            create_error = "no exact shielded note available for transparent recovery exit";
+                                        } else {
+                                            mtx = pwallet->m_shielded_wallet->BuildRecoveryExitTransaction(
+                                                *selected_it,
+                                                transparent_recipients.front().first,
+                                                fee,
+                                                &create_error);
+                                            if (mtx.has_value()) {
+                                                reserved_nullifiers = {selected_it->nullifier};
+                                                pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                                            }
+                                        }
+                                    }
+                                }
+                                if (!mtx.has_value()) {
+                                    mtx = pwallet->m_shielded_wallet->CreateShieldedSpend(
+                                        shielded_recipients,
+                                        transparent_recipients,
+                                        fee,
+                                        /*allow_transparent_fallback=*/true,
+                                        &create_error,
+                                        conflict_selection.has_value() ? &*conflict_selection : nullptr);
+                                    if (mtx.has_value()) {
+                                        reserved_nullifiers = CollectShieldedNullifiers(mtx->shielded_bundle);
+                                        pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                                    }
                                 }
                             }
                             if (!mtx.has_value()) {
@@ -8672,6 +8789,12 @@ RPCHelpMan z_sendmany()
                             }
 
                             CTransactionRef candidate = MakeTransactionRef(std::move(*mtx));
+                            if (Params().GetConsensus().IsShieldedSunsetActive(NextShieldingRpcBuildHeight(*pwallet)) &&
+                                candidate->GetShieldedBundle().GetShieldedOutputCount() != 0) {
+                                throw JSONRPCError(
+                                    RPC_WALLET_ERROR,
+                                    "z_sendmany would create shielded outputs after the shielded sunset; send exact exits to transparent recipients only");
+                            }
                             const CAmount required_fee = RequiredMempoolFee(*pwallet, *candidate);
                             if (explicit_fee) {
                                 if (fee >= required_fee) {
@@ -8724,8 +8847,8 @@ RPCHelpMan z_shieldcoinbase()
     return RPCHelpMan{
         "z_shieldcoinbase",
         "\nShield mature coinbase outputs into one shielded note.\n"
-        "This remains the supported wallet-compatible transparent deposit path after the post-61000\n"
-        "privacy fork.\n",
+        "Historical/pre-sunset compatibility only. After the v0.32 shielded sunset, new\n"
+        "shielded pool credits are disabled by consensus and this RPC fails before building.\n",
         {
             {"destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Destination shielded address"},
             {"fee", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"wallet shielded fee estimation"}, "Fee"},
@@ -8747,6 +8870,7 @@ RPCHelpMan z_shieldcoinbase()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequireShieldedPoolCreditsEnabledOrThrow(*pwallet, "z_shieldcoinbase");
             EnsureWalletIsUnlocked(*pwallet);
 
             std::optional<ShieldedAddress> dest;
@@ -8881,9 +9005,8 @@ RPCHelpMan z_shieldfunds()
     return RPCHelpMan{
         "z_shieldfunds",
         "\nShield transparent wallet funds into one or more shielded notes using policy-aware chunking.\n"
-        "After the post-61000 privacy fork, this RPC is limited to mature coinbase outputs; use\n"
-        "bridge ingress for general transparent deposits. The examples below assume the wallet's\n"
-        "compatible transparent set consists of mature coinbase outputs.\n",
+        "Historical/pre-sunset compatibility only. After the v0.32 shielded sunset, new\n"
+        "shielded pool credits are disabled by consensus and this RPC fails before building.\n",
         {
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Requested minimum amount"},
             {"destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Destination shielded address"},
@@ -8932,6 +9055,7 @@ RPCHelpMan z_shieldfunds()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequireShieldedPoolCreditsEnabledOrThrow(*pwallet, "z_shieldfunds");
             EnsureWalletIsUnlocked(*pwallet);
 
             const CAmount requested = AmountFromValue(request.params[0]);
@@ -9080,9 +9204,8 @@ RPCHelpMan z_fundpsbt()
         "\nCreate an unsigned PSBT that shields transparent funds into shielded notes.\n"
         "Use walletprocesspsbt to add signatures (repeat for each multisig signer),\n"
         "then z_finalizepsbt to finalize and broadcast.\n"
-        "After the post-61000 privacy fork, this RPC is limited to mature coinbase inputs;\n"
-        "use bridge ingress tooling for general transparent deposits. The examples below assume\n"
-        "the wallet's compatible transparent set consists of mature coinbase outputs.\n",
+        "Historical/pre-sunset compatibility only. After the v0.32 shielded sunset, new\n"
+        "shielded pool credits are disabled by consensus and this RPC fails before building.\n",
         {
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Amount to shield"},
             {"destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Destination shielded address (default: wallet's own)"},
@@ -9149,6 +9272,7 @@ RPCHelpMan z_fundpsbt()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequireShieldedPoolCreditsEnabledOrThrow(*pwallet, "z_fundpsbt");
             EnsureWalletIsUnlocked(*pwallet);
 
             const CAmount requested = AmountFromValue(request.params[0]);
@@ -9314,7 +9438,7 @@ RPCHelpMan z_finalizepsbt()
 
             // Try to finalize
             CMutableTransaction mtx;
-            bool complete = FinalizeAndExtractPSBT(psbtx, mtx);
+            bool complete = FinalizeAndExtractPSBT(psbtx, mtx, pwallet->SlhdsaFips205ForNextBlock());
 
             UniValue out(UniValue::VOBJ);
 
@@ -9356,9 +9480,8 @@ RPCHelpMan z_planshieldfunds()
     return RPCHelpMan{
         "z_planshieldfunds",
         "\nPlan a policy-aware transparent-to-shielded sweep without broadcasting it.\n"
-        "After the post-61000 privacy fork, this planner only covers mature-coinbase compatibility\n"
-        "sweeps; use bridge ingress for general transparent deposits. The examples below assume\n"
-        "the wallet's compatible transparent set consists of mature coinbase outputs.\n",
+        "Historical/pre-sunset compatibility only. After the v0.32 shielded sunset, new\n"
+        "shielded pool credits are disabled by consensus and this RPC fails before planning.\n",
         {
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Requested minimum shielded amount"},
             {"destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Destination shielded address"},
@@ -9406,6 +9529,7 @@ RPCHelpMan z_planshieldfunds()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequireShieldedPoolCreditsEnabledOrThrow(*pwallet, "z_planshieldfunds");
 
             const CAmount requested = AmountFromValue(request.params[0]);
             if (requested <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount must be positive");
@@ -9468,9 +9592,8 @@ RPCHelpMan z_mergenotes()
     return RPCHelpMan{
         "z_mergenotes",
         "\nMerge several small shielded notes into one.\n"
-        "The merge path stays inside the live direct-spend envelope,\n"
-        "so repeated calls may still be required when a wallet holds many small notes.\n"
-        "This is the supported wallet-level consolidation path for high-note-count miner wallets.\n",
+        "Historical/pre-sunset compatibility only. After the v0.32 shielded sunset, private\n"
+        "shielded-output appends are disabled and this RPC fails before building.\n",
         {
             {"max_notes", RPCArg::Type::NUM, RPCArg::Default{10}, "Maximum notes requested for merge (the current live merge path uses up to 8 notes per tx)"},
             {"fee", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(10000)}, "Fee"},
@@ -9486,6 +9609,7 @@ RPCHelpMan z_mergenotes()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequirePostSunsetShieldedAppendAllowedOrThrow(*pwallet, "z_mergenotes");
             EnsureWalletIsUnlocked(*pwallet);
 
             size_t max_notes{10};
@@ -9589,9 +9713,8 @@ RPCHelpMan z_recoverstrandednote()
     return RPCHelpMan{
         "z_recoverstrandednote",
         "\nRecover one stranded shielded note into a fresh ordinary shielded note.\n"
-        "This uses the post-disable spend-path recovery family and intentionally reveals\n"
-        "the specific recovered input note on-chain. If no destination is provided,\n"
-        "the wallet creates a fresh local shielded address and self-transfers the value.\n",
+        "Historical/pre-sunset compatibility only. This creates a fresh shielded output;\n"
+        "after the v0.32 shielded sunset, use transparent exit/recovery paths instead.\n",
         {
             {"commitment", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Recovered note commitment"},
             {"destination", RPCArg::Type::STR, RPCArg::Default{""}, "Optional shielded destination address"},
@@ -9620,6 +9743,7 @@ RPCHelpMan z_recoverstrandednote()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequirePostSunsetShieldedAppendAllowedOrThrow(*pwallet, "z_recoverstrandednote");
             EnsureWalletIsUnlocked(*pwallet);
 
             const uint256 note_commitment = ParseHashV(request.params[0], "commitment");
@@ -9858,6 +9982,26 @@ RPCHelpMan z_viewtransaction()
                         e.pushKV("is_ours", true);
                     } else {
                         e.pushKV("amount", ValueFromAmount(0));
+                        e.pushKV("is_ours", false);
+                    }
+                    spends.push_back(std::move(e));
+                }
+                if (auto recovery_spend = TryBuildRecoveryExitSpendView(bundle)) {
+                    UniValue e(UniValue::VOBJ);
+                    if (redact_sensitive) {
+                        PushRedactedShieldedSpend(e);
+                    } else {
+                        e.pushKV("nullifier", recovery_spend->spend.nullifier.GetHex());
+                    }
+                    auto owned = pwallet->m_shielded_wallet->GetCoinByNullifier(recovery_spend->spend.nullifier);
+                    if (!owned.has_value()) {
+                        owned = pwallet->m_shielded_wallet->GetCoinByCommitment(recovery_spend->commitment);
+                    }
+                    if (owned.has_value()) {
+                        e.pushKV("amount", ValueFromAmount(owned->note.value));
+                        e.pushKV("is_ours", true);
+                    } else {
+                        e.pushKV("amount", ValueFromAmount(recovery_spend->spend.amount));
                         e.pushKV("is_ours", false);
                     }
                     spends.push_back(std::move(e));
@@ -10339,7 +10483,8 @@ RPCHelpMan z_rotateaddress()
 {
     return RPCHelpMan{
         "z_rotateaddress",
-        "\nRotate a local shielded address to a fresh successor after the post-fork privacy boundary.\n",
+        "\nRotate a local shielded address to a fresh successor after the post-fork privacy boundary.\n"
+        "Historical/pre-sunset compatibility only; disabled after the v0.32 shielded sunset.\n",
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "Local shielded address to rotate"},
             {"fee", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(10000)}, "Lifecycle-control transaction fee"},
@@ -10356,6 +10501,7 @@ RPCHelpMan z_rotateaddress()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequirePostSunsetShieldedAppendAllowedOrThrow(*pwallet, "z_rotateaddress");
             EnsureWalletIsUnlocked(*pwallet);
 
             const auto addr = ParseShieldedAddr(request.params[0].get_str());
@@ -10420,7 +10566,8 @@ RPCHelpMan z_revokeaddress()
 {
     return RPCHelpMan{
         "z_revokeaddress",
-        "\nRevoke a local shielded address after the post-fork privacy boundary.\n",
+        "\nRevoke a local shielded address after the post-fork privacy boundary.\n"
+        "Historical/pre-sunset compatibility only; disabled after the v0.32 shielded sunset.\n",
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "Local shielded address to revoke"},
             {"fee", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(10000)}, "Lifecycle-control transaction fee"},
@@ -10436,6 +10583,7 @@ RPCHelpMan z_revokeaddress()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequirePostSunsetShieldedAppendAllowedOrThrow(*pwallet, "z_revokeaddress");
             EnsureWalletIsUnlocked(*pwallet);
 
             const auto addr = ParseShieldedAddr(request.params[0].get_str());
@@ -13488,7 +13636,10 @@ RPCHelpMan bridge_signbatchreceipt()
             }
             // C-002: sign SLH-DSA receipts under FIPS-205 once the activation height is reached, so
             // the signature matches what consensus verification expects at that height (no-op for ML-DSA).
-            const bool receipt_fips205 = shielded::BridgeAttestorUsesFips205AtHeight(NextBridgeLeafBuildHeight(*pwallet));
+            const auto& consensus = Params().GetConsensus();
+            const bool receipt_fips205 = shielded::BridgeAttestorUsesFips205AtHeight(
+                NextBridgeLeafBuildHeight(*pwallet),
+                consensus.nShieldedC002ActivationHeight);
             if (!signing_key.key.Sign(receipt_hash, receipt.signature, receipt_fips205) || !receipt.IsValid()) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to sign bridge batch receipt");
             }
@@ -13715,7 +13866,8 @@ RPCHelpMan bridge_buildingressbatchtx()
 {
     return RPCHelpMan{
         "bridge_buildingressbatchtx",
-        "\nBuild a deterministic wallet-side `v2_ingress_batch` transaction from shield-credit intents plus reserve outputs.\n",
+        "\nBuild a deterministic wallet-side `v2_ingress_batch` transaction from shield-credit intents plus reserve outputs.\n"
+        "Historical/pre-sunset compatibility only; disabled once shielded pool credits are disabled.\n",
         {
             {"statement_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded canonical bridge batch statement"},
             {"intents", RPCArg::Type::ARR, RPCArg::Optional::NO, "Ingress intents",
@@ -13812,6 +13964,7 @@ RPCHelpMan bridge_buildingressbatchtx()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequireShieldedPoolCreditsEnabledOrThrow(*pwallet, "bridge_buildingressbatchtx");
 
             const auto statement = DecodeBridgeBatchStatementOrThrow(request.params[0]);
             if (statement.direction != shielded::BridgeDirection::BRIDGE_IN) {
@@ -14026,7 +14179,8 @@ RPCHelpMan bridge_buildegressbatchtx()
 {
     return RPCHelpMan{
         "bridge_buildegressbatchtx",
-        "\nBuild a deterministic wallet-side `v2_egress_batch` transaction from a receipt-backed statement.\n",
+        "\nBuild a deterministic wallet-side `v2_egress_batch` transaction from a receipt-backed statement.\n"
+        "Historical/pre-sunset compatibility only; disabled after the v0.32 shielded sunset.\n",
         {
             {"statement_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded canonical bridge batch statement"},
             {"descriptors", RPCArg::Type::ARR, RPCArg::Optional::NO, "Allowed proof descriptors",
@@ -14074,6 +14228,7 @@ RPCHelpMan bridge_buildegressbatchtx()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForShielded(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequirePostSunsetShieldedAppendAllowedOrThrow(*pwallet, "bridge_buildegressbatchtx");
 
             const auto statement = DecodeBridgeBatchStatementOrThrow(request.params[0]);
             if (statement.direction != shielded::BridgeDirection::BRIDGE_OUT) {
@@ -14619,13 +14774,17 @@ RPCHelpMan bridge_signbatchauthorization()
             }
             // C-002: sign SLH-DSA authorizations under FIPS-205 at/after activation, matching the
             // height the resulting leaf is built/verified for below (no-op for ML-DSA).
-            const bool authorization_fips205 = shielded::BridgeAttestorUsesFips205AtHeight(NextBridgeLeafBuildHeight(*pwallet));
+            const auto& consensus = Params().GetConsensus();
+            const bool authorization_fips205 = shielded::BridgeAttestorUsesFips205AtHeight(
+                NextBridgeLeafBuildHeight(*pwallet),
+                consensus.nShieldedC002ActivationHeight);
             if (!signing_key.key.Sign(authorization_hash, authorization.signature, authorization_fips205) || !authorization.IsValid()) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to sign bridge batch authorization");
             }
             const auto leaf = shielded::BuildBridgeBatchLeafFromAuthorization(
                 authorization,
-                NextBridgeLeafBuildHeight(*pwallet));
+                NextBridgeLeafBuildHeight(*pwallet),
+                consensus.nShieldedC002ActivationHeight);
             if (!leaf.has_value()) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to derive bridge batch leaf from signed authorization");
             }
@@ -14663,7 +14822,8 @@ RPCHelpMan bridge_decodebatchauthorization()
             const auto authorization = DecodeBridgeBatchAuthorizationOrThrow(request.params[0]);
             const auto leaf = shielded::BuildBridgeBatchLeafFromAuthorization(
                 authorization,
-                NextBridgeLeafBuildHeight(*pwallet));
+                NextBridgeLeafBuildHeight(*pwallet),
+                Params().GetConsensus().nShieldedC002ActivationHeight);
             if (!leaf.has_value()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "authorization_hex does not derive a valid bridge batch leaf");
             }
@@ -14789,7 +14949,8 @@ RPCHelpMan bridge_buildshieldtx()
 {
     return RPCHelpMan{
         "bridge_buildshieldtx",
-        "\nBuild a PSBT that settles a funded bridge-in output into the shielded pool using the plan's normal path.\n",
+        "\nBuild a PSBT that settles a funded bridge-in output into the shielded pool using the plan's normal path.\n"
+        "Historical/pre-sunset compatibility only; disabled once shielded pool credits are disabled.\n",
         {
             {"plan_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded bridge plan"},
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
@@ -14812,6 +14973,7 @@ RPCHelpMan bridge_buildshieldtx()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForBridge(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequireShieldedPoolCreditsEnabledOrThrow(*pwallet, "bridge_buildshieldtx");
 
             BridgePlan plan = DecodeBridgePlanOrThrow(request.params[0]);
             if (plan.kind != shielded::BridgeTemplateKind::SHIELD) {
@@ -14915,7 +15077,8 @@ RPCHelpMan bridge_submitrebalancetx()
 {
     return RPCHelpMan{
         "bridge_submitrebalancetx",
-        "\nBuild, sign, and broadcast a wallet-funded `v2_rebalance` transaction from canonical reserve deltas plus reserve note outputs.\n",
+        "\nBuild, sign, and broadcast a wallet-funded `v2_rebalance` transaction from canonical reserve deltas plus reserve note outputs.\n"
+        "Historical/pre-sunset compatibility only; disabled after the v0.32 shielded sunset.\n",
         {
             {"reserve_deltas", RPCArg::Type::ARR, RPCArg::Optional::NO, "Canonical reserve deltas; the set is sorted by l2_id and must sum to zero",
                 {
@@ -14964,6 +15127,7 @@ RPCHelpMan bridge_submitrebalancetx()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForBridge(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequirePostSunsetShieldedAppendAllowedOrThrow(*pwallet, "bridge_submitrebalancetx");
             EnsureWalletIsUnlocked(*pwallet);
 
             const auto reserve_deltas =
@@ -15043,7 +15207,8 @@ RPCHelpMan bridge_submitshieldtx()
     return RPCHelpMan{
         "bridge_submitshieldtx",
         "\nSign, finalize, and broadcast a funded bridge-in settlement using the plan's normal path.\n"
-        "Use bridge_buildshieldtx instead when an external signer or manual PSBT review is required.\n",
+        "Use bridge_buildshieldtx instead when an external signer or manual PSBT review is required.\n"
+        "Historical/pre-sunset compatibility only; disabled once shielded pool credits are disabled.\n",
         {
             {"plan_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded bridge plan"},
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
@@ -15069,6 +15234,7 @@ RPCHelpMan bridge_submitshieldtx()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             auto pwallet = EnsureWalletForBridge(request);
             pwallet->BlockUntilSyncedToCurrentChain();
+            RequireShieldedPoolCreditsEnabledOrThrow(*pwallet, "bridge_submitshieldtx");
 
             BridgePlan plan = DecodeBridgePlanOrThrow(request.params[0]);
             if (plan.kind != shielded::BridgeTemplateKind::SHIELD) {
@@ -15778,9 +15944,12 @@ struct HtlcDescriptorLeaves {
 
     const FlatSigningProvider provider = LeafKeyProviderOrThrow(*pwallet, leaf_pubkey, role);
 
+    const int next_height = pwallet->chain().getHeight().value_or(-1) + 1;
+    const bool slhdsa_fips205 = Params().GetConsensus().IsShieldedC002Active(next_height);
+
     const PrecomputedTransactionData txdata = PrecomputePSBTData(psbt);
     const bool complete = SignPSBTInput(provider, psbt, /*index=*/0, &txdata, SIGHASH_DEFAULT,
-                                        /*out_sigdata=*/nullptr, /*finalize=*/true);
+                                        /*out_sigdata=*/nullptr, /*finalize=*/true, slhdsa_fips205);
     complete_out = complete;
     if (!complete) {
         throw JSONRPCError(RPC_WALLET_ERROR,
@@ -15788,7 +15957,7 @@ struct HtlcDescriptorLeaves {
     }
 
     CMutableTransaction mtx;
-    if (!FinalizeAndExtractPSBT(psbt, mtx)) {
+    if (!FinalizeAndExtractPSBT(psbt, mtx, slhdsa_fips205)) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to extract finalized transaction for %s", context));
     }
     return MakeTransactionRef(std::move(mtx));

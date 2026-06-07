@@ -34,6 +34,7 @@ class WalletShieldedVelocityCapTest(BitcoinTestFramework):
             # Activate the velocity cap from genesis so ConnectBlock/DisconnectBlock exercise it.
             "-regtestshieldedunshieldvelocityactivationheight=0",
             "-autoshieldcoinbase=1",
+            "-autoshieldcoinbaseminheight=0",
         ]]
         self.rpc_timeout = 1200
 

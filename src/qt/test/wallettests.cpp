@@ -500,7 +500,7 @@ void TestGUI(interfaces::Node& node)
     // Set up wallet and chain with 105 blocks (5 mature blocks for spending).
     TestChain100Setup test;
     for (int i = 0; i < 5; ++i) {
-        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+        test.CreateAndProcessBlock({}, GetScriptForDestination(PKHash(test.coinbaseKey.GetPubKey())));
     }
     auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
     test.m_node.wallet_loader = wallet_loader.get();

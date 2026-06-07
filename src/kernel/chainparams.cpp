@@ -1055,6 +1055,8 @@ public:
             opts.shielded_matrict_disable_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedSpendPathRecoveryActivationHeight =
             opts.shielded_spend_path_recovery_activation_height.value_or(0);  // Activate at genesis for instant regtest
+        consensus.nShieldedC002ActivationHeight =
+            opts.shielded_c002_activation_height.value_or(consensus.nShieldedC002ActivationHeight);
         // v0.32.0 velocity cap: inert on regtest by default (so existing shielded tests are unaffected);
         // a functional test lowers it via -regtestshieldedunshieldvelocityactivationheight to exercise it.
         consensus.nShieldedUnshieldVelocityActivationHeight =

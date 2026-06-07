@@ -57,6 +57,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <variant>
 
 namespace wallet {
 namespace {
@@ -201,6 +202,53 @@ struct ResolvedV2ShieldedRecipient
     hw << std::string{"BTX_Shielded_ViewOnlyNullifier_V1"};
     hw << commitment;
     return hw.GetSHA256();
+}
+
+struct RecoveryExitWalletSpend
+{
+    Nullifier nullifier;
+    uint256 commitment;
+    CAmount amount{0};
+};
+
+[[nodiscard]] std::optional<RecoveryExitWalletSpend> TryDeriveRecoveryExitWalletSpend(const CShieldedBundle& bundle)
+{
+    if (!bundle.HasV2Bundle()) return std::nullopt;
+    const auto* v2_bundle = bundle.GetV2Bundle();
+    if (v2_bundle == nullptr ||
+        shielded::v2::GetBundleSemanticFamily(*v2_bundle) != shielded::v2::TransactionFamily::V2_RECOVERY_EXIT ||
+        !std::holds_alternative<shielded::v2::RecoveryExitPayload>(v2_bundle->payload)) {
+        return std::nullopt;
+    }
+
+    const auto& payload = std::get<shielded::v2::RecoveryExitPayload>(v2_bundle->payload);
+    shielded::recovery::RecoveryExitClaim claim;
+    claim.value = payload.value;
+    claim.note_commitment = payload.note_commitment;
+    claim.recipient_pk_hash = payload.recipient_pk_hash;
+    claim.rho = payload.rho;
+    claim.rcm = payload.rcm;
+    claim.spend_pubkey = payload.spend_pubkey;
+    claim.ownership_sig = payload.ownership_sig;
+    claim.membership_proof = payload.membership_proof;
+
+    shielded::recovery::RecoveryExitIdentifiers ids;
+    std::string reject_reason;
+    if (!shielded::recovery::DeriveRecoveryExitIdentifiers(claim, ids, reject_reason)) {
+        return std::nullopt;
+    }
+    return RecoveryExitWalletSpend{ids.nullifier, ids.commitment, claim.value};
+}
+
+template <typename Notes>
+[[nodiscard]] auto FindNoteByRecoveryExitSpend(Notes& notes, const RecoveryExitWalletSpend& spend)
+    -> decltype(notes.begin())
+{
+    auto note_it = notes.find(spend.nullifier);
+    if (note_it != notes.end()) return note_it;
+    return std::find_if(notes.begin(), notes.end(), [&](const auto& entry) {
+        return entry.second.commitment == spend.commitment;
+    });
 }
 
 [[nodiscard]] std::optional<shielded::v2::LifecycleAddress> BuildLifecycleAddress(
@@ -2314,6 +2362,24 @@ void CShieldedWallet::ScanBlock(const CBlock& block, int height)
             }
             tx_view.spends.push_back(std::move(spend_view));
         }
+        if (const auto recovery_spend = TryDeriveRecoveryExitWalletSpend(bundle)) {
+            auto note_it = FindNoteByRecoveryExitSpend(m_notes, *recovery_spend);
+            ShieldedTxViewSpend spend_view;
+            spend_view.nullifier = recovery_spend->nullifier;
+            spend_view.amount = recovery_spend->amount;
+            if (note_it != m_notes.end() && !note_it->second.is_spent) {
+                spend_view.amount = note_it->second.note.value;
+                spend_view.is_ours = true;
+                tx_has_local_visibility = true;
+                note_it->second.is_spent = true;
+                note_it->second.spent_height = height;
+                m_spent_nullifiers.insert(recovery_spend->nullifier);
+                m_spent_nullifiers.insert(note_it->first);
+                m_pending_spends.erase(recovery_spend->nullifier);
+                m_pending_spends.erase(note_it->first);
+            }
+            tx_view.spends.push_back(std::move(spend_view));
+        }
 
         if (bundle.HasV2Bundle()) {
             const auto* v2_bundle = bundle.GetV2Bundle();
@@ -2489,6 +2555,7 @@ void CShieldedWallet::UndoBlock(const CBlock& block, int height)
     }
 
     std::vector<Nullifier> spend_nullifiers;
+    std::vector<RecoveryExitWalletSpend> recovery_exit_spends;
     std::set<uint256> removed_commitments;
     uint64_t removed_output_count{0};
 
@@ -2500,6 +2567,9 @@ void CShieldedWallet::UndoBlock(const CBlock& block, int height)
 
         const auto bundle_nullifiers = CollectShieldedNullifiers(bundle);
         spend_nullifiers.insert(spend_nullifiers.end(), bundle_nullifiers.begin(), bundle_nullifiers.end());
+        if (const auto recovery_spend = TryDeriveRecoveryExitWalletSpend(bundle)) {
+            recovery_exit_spends.push_back(*recovery_spend);
+        }
         const auto bundle_commitments = CollectShieldedOutputCommitments(bundle);
         removed_commitments.insert(bundle_commitments.begin(), bundle_commitments.end());
         if (removed_output_count > std::numeric_limits<uint64_t>::max() - bundle.GetShieldedOutputCount()) {
@@ -2541,6 +2611,17 @@ void CShieldedWallet::UndoBlock(const CBlock& block, int height)
             note_it->second.spent_height = -1;
         }
         m_spent_nullifiers.erase(nf);
+    }
+    for (const auto& recovery_spend : recovery_exit_spends) {
+        auto note_it = FindNoteByRecoveryExitSpend(m_notes, recovery_spend);
+        if (note_it != m_notes.end() &&
+            note_it->second.is_spent &&
+            note_it->second.spent_height == height) {
+            note_it->second.is_spent = false;
+            note_it->second.spent_height = -1;
+            m_spent_nullifiers.erase(note_it->first);
+        }
+        m_spent_nullifiers.erase(recovery_spend.nullifier);
     }
 
     for (auto it = m_notes.begin(); it != m_notes.end();) {
@@ -2609,6 +2690,20 @@ void CShieldedWallet::TransactionAddedToMempool(const CTransaction& tx)
             // transaction leaves the mempool or confirms in a block.
             m_pending_spends.insert(nullifier);
             spend_view.amount = it->second.note.value;
+            spend_view.is_ours = true;
+            tx_has_local_visibility = true;
+        }
+        tx_view.spends.push_back(std::move(spend_view));
+    }
+    if (const auto recovery_spend = TryDeriveRecoveryExitWalletSpend(bundle)) {
+        ShieldedTxViewSpend spend_view;
+        spend_view.nullifier = recovery_spend->nullifier;
+        spend_view.amount = recovery_spend->amount;
+        auto note_it = FindNoteByRecoveryExitSpend(m_notes, *recovery_spend);
+        if (note_it != m_notes.end()) {
+            m_pending_spends.insert(recovery_spend->nullifier);
+            m_pending_spends.insert(note_it->first);
+            spend_view.amount = note_it->second.note.value;
             spend_view.is_ours = true;
             tx_has_local_visibility = true;
         }
@@ -2775,6 +2870,16 @@ void CShieldedWallet::TransactionRemovedFromMempool(const CTransaction& tx)
     for (const Nullifier& nullifier : CollectShieldedNullifiers(bundle)) {
         if (!NullifierReservedByAnotherMempoolTx(nullifier, txid)) {
             m_pending_spends.erase(nullifier);
+        }
+    }
+    if (const auto recovery_spend = TryDeriveRecoveryExitWalletSpend(bundle)) {
+        auto note_it = FindNoteByRecoveryExitSpend(m_notes, *recovery_spend);
+        if (!NullifierReservedByAnotherMempoolTx(recovery_spend->nullifier, txid)) {
+            m_pending_spends.erase(recovery_spend->nullifier);
+        }
+        if (note_it != m_notes.end() &&
+            !NullifierReservedByAnotherMempoolTx(note_it->first, txid)) {
+            m_pending_spends.erase(note_it->first);
         }
     }
 }
@@ -2990,13 +3095,19 @@ std::optional<ShieldedSpendSelectionEstimate> CShieldedWallet::EstimateDirectSpe
     if (total_input < total_needed) return fail("selected input below total needed");
 
     CAmount change = total_input - total_needed;
+    const int32_t validation_height = NextShieldedBuildValidationHeight(m_parent_wallet.chain());
+    const bool shielded_sunset_active = Params().GetConsensus().IsShieldedSunsetActive(validation_height);
     const bool prefer_shielded_change_reserve =
+        !shielded_sunset_active &&
         PreferExactBalanceShieldedChangeReserve(change,
                                                 selected.size(),
                                                 shielded_recipients.size(),
                                                 transparent_recipients.size());
     const bool require_change_reserve =
-        change == 0 && shielded_recipients.empty() && !transparent_recipients.empty();
+        !shielded_sunset_active &&
+        change == 0 &&
+        shielded_recipients.empty() &&
+        !transparent_recipients.empty();
     if (selected_override == nullptr &&
         (require_change_reserve || prefer_shielded_change_reserve)) {
         const auto reserved_target = CheckedAdd(total_needed, CAmount{1});
@@ -3216,7 +3327,9 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
 
     CAmount total_input = selection.total_input;
     const bool prefer_minimal_inputs = !transparent_recipients.empty();
+    const bool shielded_sunset_active = Params().GetConsensus().IsShieldedSunsetActive(validation_height);
     const bool prefer_shielded_change_reserve =
+        !shielded_sunset_active &&
         PreferExactBalanceShieldedChangeReserve(change,
                                                 selected.size(),
                                                 shielded_recipients.size(),
@@ -3226,7 +3339,10 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
         change > 0 &&
         change < minimum_change_reserve;
     const bool require_change_reserve =
-        (change == 0 && shielded_recipients.empty() && !transparent_recipients.empty()) ||
+        (!shielded_sunset_active &&
+         change == 0 &&
+         shielded_recipients.empty() &&
+         !transparent_recipients.empty()) ||
         dust_change_needs_reserve;
     if (selected_override == nullptr &&
         (require_change_reserve || prefer_shielded_change_reserve)) {
@@ -4218,7 +4334,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2IngressBatch(
                                                                  immutable_reject,
                                                                  /*reject_rice_codec=*/false,
                                                                  bind_smile_anonset_context,
-                                                                 validation_height);
+                                                                 validation_height,
+                                                                 consensus.nShieldedC002ActivationHeight);
     if (!immutable_ok) {
         LogPrintf("CShieldedWallet::CreateV2IngressBatch immutable self-check failed txid=%s reject=%s proof_bytes=%u\n",
                   immutable_tx.GetHash().ToString(),
@@ -4525,7 +4642,7 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateTransparentToShieldedS
     if (fee < 0 || !MoneyRange(fee)) return fail("invalid fee");
     const int32_t validation_height = NextShieldedBuildValidationHeight(m_parent_wallet.chain());
     if (!AllowTransparentShieldingInDirectSendAtHeight(validation_height)) {
-        return fail("post-fork direct transparent shielding is disabled; use bridge ingress");
+        return fail("post-fork direct transparent shielding is disabled; after the v0.32 sunset, new shielded credits are disabled by consensus");
     }
     fee = shielded::RoundShieldedFeeToCanonicalBucket(
         fee,
@@ -5228,6 +5345,7 @@ std::optional<CMutableTransaction> CShieldedWallet::BuildRecoveryExitTransaction
     // 2. Build the claim and derive the canonical commitment + SMILE2 nullifier.
     shielded::recovery::RecoveryExitClaim claim;
     claim.value = value;
+    claim.note_commitment = stranded_coin.commitment;
     claim.recipient_pk_hash = note.recipient_pk_hash;
     claim.rho = note.rho;
     claim.rcm = note.rcm;
@@ -5238,9 +5356,9 @@ std::optional<CMutableTransaction> CShieldedWallet::BuildRecoveryExitTransaction
     if (!shielded::recovery::DeriveRecoveryExitIdentifiers(claim, ids, derive_error)) {
         return fail(derive_error.empty() ? "failed to derive recovery exit identifiers" : derive_error);
     }
-    // Sanity: the derived commitment must match the coin's recorded commitment.
+    // Sanity: the consensus-bound recovery commitment must be the wallet's tree leaf.
     if (ids.commitment != stranded_coin.commitment) {
-        return fail("derived commitment does not match stranded coin commitment");
+        return fail("recovery exit commitment does not match stranded coin commitment");
     }
 
     // 3. Build the single transparent output and compute the transparent binding.
@@ -5291,6 +5409,7 @@ std::optional<CMutableTransaction> CShieldedWallet::BuildRecoveryExitTransaction
     // 6. Assemble the RecoveryExitPayload and wrap it in a V2_RECOVERY_EXIT bundle.
     shielded::v2::RecoveryExitPayload payload;
     payload.value = value;
+    payload.note_commitment = stranded_coin.commitment;
     payload.recipient_pk_hash = note.recipient_pk_hash;
     payload.rho = note.rho;
     payload.rcm = note.rcm;
@@ -5960,6 +6079,16 @@ std::optional<ShieldedCoin> CShieldedWallet::GetCoinByNullifier(const Nullifier&
     return it->second;
 }
 
+std::optional<ShieldedCoin> CShieldedWallet::GetCoinByCommitment(const uint256& commitment) const
+{
+    AssertLockHeld(cs_shielded);
+    const auto it = std::find_if(m_notes.begin(), m_notes.end(), [&](const auto& entry) {
+        return entry.second.commitment == commitment;
+    });
+    if (it == m_notes.end()) return std::nullopt;
+    return it->second;
+}
+
 std::optional<std::vector<ShieldedCoin>> CShieldedWallet::GetConflictSpendSelection(
     const uint256& txid,
     std::string* error) const
@@ -6002,6 +6131,18 @@ std::optional<std::vector<ShieldedCoin>> CShieldedWallet::GetConflictSpendSelect
         }
         selected.push_back(coin_it->second);
     }
+    if (const auto recovery_spend = TryDeriveRecoveryExitWalletSpend(bundle)) {
+        const auto coin_it = FindNoteByRecoveryExitSpend(m_notes, *recovery_spend);
+        if (coin_it == m_notes.end()) {
+            if (error != nullptr) *error = "conflict_txid includes a recovery-exit note that is no longer spendable";
+            return std::nullopt;
+        }
+        if (!coin_it->second.is_mine_spend) {
+            if (error != nullptr) *error = "conflict_txid includes a non-spendable recovery-exit wallet note";
+            return std::nullopt;
+        }
+        selected.push_back(coin_it->second);
+    }
     if (selected.empty()) {
         if (error != nullptr) *error = "conflict_txid does not spend any wallet shielded notes";
         return std::nullopt;
@@ -6035,8 +6176,14 @@ bool CShieldedWallet::NullifierReservedByAnotherMempoolTx(const Nullifier& nf,
         if (txid == excluding_txid) continue;
         if (!wtx.InMempool()) continue;
         if (!wtx.tx->HasShieldedBundle()) continue;
-        for (const auto& spend_nf : CollectShieldedNullifiers(wtx.tx->GetShieldedBundle())) {
+        const CShieldedBundle& bundle = wtx.tx->GetShieldedBundle();
+        for (const auto& spend_nf : CollectShieldedNullifiers(bundle)) {
             if (spend_nf == nf) return true;
+        }
+        if (const auto recovery_spend = TryDeriveRecoveryExitWalletSpend(bundle)) {
+            if (recovery_spend->nullifier == nf) return true;
+            auto note_it = FindNoteByRecoveryExitSpend(m_notes, *recovery_spend);
+            if (note_it != m_notes.end() && note_it->first == nf) return true;
         }
     }
     return false;

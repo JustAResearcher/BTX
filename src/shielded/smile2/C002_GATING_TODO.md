@@ -9,8 +9,9 @@ spend path:
                     VerifyIngressSmileProofForBackend → VerifySmile2CTFromBytes
 - verifier-set:     v2_proof.cpp (inside VerifyV2SendProof)
 - builder self-check: v2_send.cpp:654
-At/after C002_ACTIVATION_HEIGHT (123000), anonset-bound spends MUST be wire v3;
-v2 is rejected (`bad-smile2-proof-wire-version`). The legacy uint256/native
+At/after the configured C-002 activation height (123000 on mainnet),
+anonset-bound spends MUST be wire v3; v2 is rejected
+(`bad-smile2-proof-wire-version`). The legacy uint256/native
 (MatRiCT) ingress overload is a DIFFERENT proof system and is intentionally NOT
 gated by C-002.
 
@@ -31,7 +32,7 @@ batch (audit #2), and the verifier-set path simultaneously.
 ### Step 1 — `ValidateSmile2Proof` / `VerifySmile2CTFromBytes`: add `int64_t validation_height`
 
 ```cpp
-static constexpr int64_t C002_ACTIVATION_HEIGHT = 123000;
+static constexpr int64_t C002_ACTIVATION_HEIGHT = 123000; // default; node callers use consensus params
 
 // in ValidateSmile2Proof(...)  (add validation_height param, thread from VerifySmile2CTFromBytes)
 const bool require_c002 = validation_height >= C002_ACTIVATION_HEIGHT;

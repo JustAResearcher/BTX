@@ -186,6 +186,7 @@ public:
         std::optional<int32_t> shielded_smile_rice_codec_disable_height{};
         std::optional<int32_t> shielded_matrict_disable_height{};
         std::optional<int32_t> shielded_spend_path_recovery_activation_height{};
+        std::optional<int32_t> shielded_c002_activation_height{};
         std::optional<int32_t> shielded_unshield_velocity_activation_height{};
         std::optional<int32_t> shielded_pq128_upgrade_height{};
         std::optional<int32_t> shielded_pool_credit_disable_height{};

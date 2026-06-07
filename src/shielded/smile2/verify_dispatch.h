@@ -95,7 +95,8 @@ static constexpr size_t MIN_SMILE2_PROOF_BYTES{8 * 1024};
     // The default is FAIL-CLOSED (require v3) and matches ProveCT's default, so
     // non-consensus/test callers that produce v3 validate consistently. NOT a
     // bypass: the default requires the hardened format, never disables the gate.
-    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
+    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT,
+    int64_t c002_activation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
 
 /**
  * Combined parse + validate in one call (convenience for consensus).
@@ -118,7 +119,8 @@ static constexpr size_t MIN_SMILE2_PROOF_BYTES{8 * 1024};
     bool bind_anonset_context = false,
     // C-002: see ValidateSmile2Proof. CONSENSUS callers MUST pass real height.
     // Default is fail-closed (require v3), matching ProveCT.
-    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
+    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT,
+    int64_t c002_activation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
 
 /**
  * Extract serial numbers from a parsed SMILE v2 proof.

@@ -534,7 +534,8 @@ struct SettlementWitness
     const std::vector<std::vector<smile2::wallet::SmileRingMember>>& ring_members,
     bool reject_rice_codec = false,
     bool bind_anonset_context = false,
-    int64_t validation_height = 0);  // C-002: consensus callers MUST pass real height
+    int64_t validation_height = 123'000,
+    int64_t c002_activation_height = 123'000);
 [[nodiscard]] bool VerifySpendPathRecoveryProof(
     const shielded::v2::TransactionBundle& bundle,
     const SpendPathRecoveryContext& context,

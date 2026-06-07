@@ -286,7 +286,7 @@ namespace {
                 payload.output_encoding == shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK;
             const bool is_self_serve_unshield =
                 payload.output_encoding == shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD &&
-                validation_height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+                consensus->IsShieldedC002Active(validation_height);
             if (!is_shielded_only && !is_self_serve_unshield) {
                 reject_reason = "bad-shielded-v2-send-encoding";
                 return false;
@@ -467,6 +467,7 @@ namespace {
                                                        const shielded::v2::proof::SettlementContext& context,
                                                        const shielded::v2::proof::SettlementWitness& witness,
                                                        int64_t validation_height,
+                                                       int64_t c002_activation_height,
                                                        std::string& reject_reason)
 {
     const auto& payload = std::get<shielded::v2::EgressBatchPayload>(bundle.payload);
@@ -504,7 +505,8 @@ namespace {
         // the receipts to verify under the scheme fixed by the height, matching bridge-IN.
         if (!shielded::VerifyBridgeBatchReceiptsModeExact(
                 Span<const shielded::BridgeBatchReceipt>{witness.signed_receipts.data(), witness.signed_receipts.size()},
-                validation_height)) {
+                validation_height,
+                c002_activation_height)) {
             reject_reason = "bad-shielded-v2-egress-signed-receipt-mode";
             return false;
         }
@@ -717,6 +719,7 @@ namespace {
     const shielded::v2::proof::SettlementContext& context,
     const shielded::v2::proof::SettlementWitness& witness,
     int64_t validation_height,
+    int64_t c002_activation_height,
     uint256& settlement_anchor_digest,
     std::string& reject_reason)
 {
@@ -763,7 +766,8 @@ namespace {
         // Height-exact attestor-signature enforcement (see VerifyV2EgressImportedReceiptBundle).
         if (!shielded::VerifyBridgeBatchReceiptsModeExact(
                 Span<const shielded::BridgeBatchReceipt>{witness.signed_receipts.data(), witness.signed_receipts.size()},
-                validation_height)) {
+                validation_height,
+                c002_activation_height)) {
             reject_reason = "bad-shielded-v2-settlement-anchor-signed-receipt-mode";
             return false;
         }
@@ -1099,6 +1103,7 @@ std::optional<std::vector<uint256>> ExtractCreatedShieldedSettlementAnchors(
                                                                *context,
                                                                *witness,
                                                                validation_height,
+                                                               Params().GetConsensus().nShieldedC002ActivationHeight,
                                                                settlement_anchor_digest,
                                                                reject_reason)) {
                 return std::nullopt;
@@ -1519,7 +1524,8 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
                                                             *smile_ring_members,
                                                             reject_rice_codec,
                                                             bind_smile_anonset_context,
-                                                            m_validation_height)) {
+                                                            m_validation_height,
+                                                            m_consensus->nShieldedC002ActivationHeight)) {
                     LogPrintf("CShieldedProofCheck v2_send SMILE verify failed txid=%s statement=%s anchor=%s fee=%lld tree_root=%s tree_size=%u\n",
                               m_tx->GetHash().ToString(),
                               statement.envelope.statement_digest.ToString(),
@@ -1617,7 +1623,8 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
                                                         proof_reject,
                                                         reject_rice_codec,
                                                         bind_smile_anonset_context,
-                                                        m_validation_height)) {
+                                                        m_validation_height,
+                                                        m_consensus->nShieldedC002ActivationHeight)) {
                     return proof_reject;
                 }
             } else {
@@ -1627,7 +1634,12 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
                 if (!ring_members.has_value()) {
                     return proof_reject;
                 }
-                if (!shielded::v2::VerifyV2IngressProof(*v2_bundle, *context, *ring_members, proof_reject, m_validation_height)) {
+                if (!shielded::v2::VerifyV2IngressProof(*v2_bundle,
+                                                        *context,
+                                                        *ring_members,
+                                                        proof_reject,
+                                                        m_validation_height,
+                                                        m_consensus->nShieldedC002ActivationHeight)) {
                     return proof_reject;
                 }
             }
@@ -1662,7 +1674,12 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
             if (!shielded::v2::proof::VerifySettlementContext(*context, *witness, proof_reject)) {
                 return proof_reject;
             }
-            if (!VerifyV2EgressImportedReceiptBundle(*v2_bundle, *context, *witness, m_validation_height, proof_reject)) {
+            if (!VerifyV2EgressImportedReceiptBundle(*v2_bundle,
+                                                     *context,
+                                                     *witness,
+                                                     m_validation_height,
+                                                     m_consensus->nShieldedC002ActivationHeight,
+                                                     proof_reject)) {
                 return proof_reject;
             }
             return std::nullopt;

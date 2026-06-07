@@ -239,6 +239,38 @@ BOOST_AUTO_TEST_CASE(regtest_shielded_spend_path_recovery_activation_height_reje
     BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
 }
 
+BOOST_AUTO_TEST_CASE(regtest_shielded_c002_activation_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedc002activationheight", "110");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedC002ActivationHeight, 110);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedC002Active(109));
+    BOOST_CHECK(params->GetConsensus().IsShieldedC002Active(110));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_c002_activation_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedc002activationheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(slh_dsa_fips205_mempool_policy_uses_next_block_height)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedc002activationheight", "110");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    const auto& consensus = params->GetConsensus();
+    BOOST_CHECK(!IsSLHDSAFips205RequiredForMempool(consensus, 109));
+    BOOST_CHECK(IsSLHDSAFips205RequiredForMempool(consensus, 110));
+    BOOST_CHECK(IsSLHDSAFips205RequiredForMempool(consensus, 111));
+}
+
 BOOST_AUTO_TEST_CASE(regtest_shielded_pq128_upgrade_height_override)
 {
     ArgsManager args;

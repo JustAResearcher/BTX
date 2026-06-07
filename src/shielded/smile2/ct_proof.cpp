@@ -2101,7 +2101,8 @@ std::optional<SmileCTProof> TryProveCT(
     int64_t public_fee,
     bool bind_anonset_context,
     std::string* error,
-    int64_t validation_height)
+    int64_t validation_height,
+    int64_t c002_activation_height)
 {
     size_t m_in = inputs.size();
     size_t n_out = outputs.size();
@@ -2115,7 +2116,7 @@ std::optional<SmileCTProof> TryProveCT(
     // at/after the activation height; before it they are v2 (legacy format, no
     // balance_w/Γ/w_sn/range slots). is_v3 keys every C-002/R5 prover addition.
     const bool is_v3 = use_postfork_tuple_hardening &&
-                       (validation_height >= SmileCTProof::C002_ACTIVATION_HEIGHT);
+                       (validation_height >= c002_activation_height);
     const auto coin_ck = GetPublicCoinCommitmentKey();
     int64_t sum_in = 0;
     int64_t sum_out = 0;
@@ -3097,10 +3098,11 @@ SmileCTProof ProveCT(
     uint64_t rng_seed,
     int64_t public_fee,
     bool bind_anonset_context,
-    int64_t validation_height)
+    int64_t validation_height,
+    int64_t c002_activation_height)
 {
     auto proof = TryProveCT(inputs, outputs, pub, rng_seed, public_fee,
-                            bind_anonset_context, /*error=*/nullptr, validation_height);
+                            bind_anonset_context, /*error=*/nullptr, validation_height, c002_activation_height);
     return proof.value_or(SmileCTProof{});
 }
 

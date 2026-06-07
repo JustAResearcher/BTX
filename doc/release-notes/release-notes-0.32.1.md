@@ -1,12 +1,12 @@
-BTX version 0.32.2 is now available from:
+BTX version 0.32.1 is now available from:
 
-  <https://github.com/btxchain/btx/releases/tag/v0.32.2>
+  <https://github.com/btxchain/btx/releases/tag/v0.32.1>
 
-This v0.32.2 release is the block-125,000 activation release. It includes the
-shielded sunset, transparent recovery exits, MatMul nonce-seed v2, shielded
-unshield velocity-cap enforcement, shielded restart improvements, updated
-wallet coinbase shielding defaults, developer verification artifacts, and
-release tooling updates.
+This v0.32.1 quick follow-up release is the block-125,000 activation release.
+It includes the shielded sunset, transparent recovery exits, MatMul nonce-seed
+v2, shielded unshield velocity-cap enforcement, shielded restart improvements,
+updated wallet coinbase shielding defaults, developer verification artifacts,
+and release tooling updates.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -20,9 +20,9 @@ To receive release and update notifications, please subscribe to:
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down, then install the new binaries or replace the existing `btxd`,
-`btx-cli`, and GUI binaries with the 0.32.2 release artifacts.
+`btx-cli`, and GUI binaries with the 0.32.1 release artifacts.
 
-BTX 0.32.2 is required ahead of block 125,000 for nodes, miners, pools,
+BTX 0.32.1 is required ahead of block 125,000 for nodes, miners, pools,
 exchanges, services, and explorers that follow the upgraded chain.
 
 # Compatibility
@@ -43,9 +43,8 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
 - Coinbase auto-shielding is now opt-in. Mined rewards remain transparent by
   default unless the wallet is started with `-autoshieldcoinbase=1`. Even when
   enabled, automatic coinbase shielding waits until the C-002 shielded-pool
-  activation height by default (block 123,000 on mainnet, 0 on regtest), and
-  v0.32.2 makes the path inert once shielded pool credits are disabled by
-  consensus at the shielded sunset.
+  activation height by default (block 123,000 on mainnet, 0 on regtest). Test
+  networks can override this floor with `-autoshieldcoinbaseminheight=<n>`.
 
 - The shielded sunset activates at block 125,000. From that height, shielded
   activity is outflow-only: legacy shielded value can exit through V2_SEND
@@ -87,7 +86,7 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
   obligations.
 
 - The auto-update installer cleanup handling was updated, and release automation
-  examples now point at the 0.32.2 artifacts.
+  examples now point at the 0.32.1 artifacts.
 
 # Credits
 

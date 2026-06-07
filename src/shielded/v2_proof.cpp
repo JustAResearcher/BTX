@@ -2416,7 +2416,8 @@ bool VerifyV2SendProof(
     const std::vector<std::vector<smile2::wallet::SmileRingMember>>& ring_members,
     bool reject_rice_codec,
     bool bind_anonset_context,
-    int64_t validation_height)
+    int64_t validation_height,
+    int64_t c002_activation_height)
 {
     if (!BundleHasSemanticFamily(bundle, TransactionFamily::V2_SEND) ||
         !std::holds_alternative<SendPayload>(bundle.payload)) {
@@ -2522,7 +2523,8 @@ bool VerifyV2SendProof(
                                             payload.value_balance,
                                             reject_rice_codec,
                                             bind_anonset_context,
-                                            validation_height)
+                                            validation_height,
+                                            c002_activation_height)
                 .has_value();
 }
 

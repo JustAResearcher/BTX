@@ -34,6 +34,7 @@
 #include <script/sign.h>
 #include <script/signingprovider.h>
 #include <script/solver.h>
+#include <shielded/smile2/ct_proof.h>
 #include <uint256.h>
 #include <undo.h>
 #include <util/bip32.h>
@@ -61,6 +62,14 @@ struct PQMultisigScriptInfo {
     int64_t threshold{0};
     std::vector<std::string> algorithms;
 };
+
+bool SlhdsaFips205ForNextBlock(const std::any& context)
+{
+    const NodeContext& node_context = EnsureAnyNodeContext(context);
+    ChainstateManager& chainman = EnsureChainman(node_context);
+    const int next_height = WITH_LOCK(::cs_main, return chainman.ActiveChain().Height() + 1);
+    return chainman.GetConsensus().IsShieldedC002Active(next_height);
+}
 
 bool DecodePQMultisigLeafScript(const CScript& script, PQMultisigScriptInfo& out)
 {
@@ -241,6 +250,8 @@ static std::vector<RPCArg> CreateTxDoc()
 // Optionally, sign the inputs that we can using information from the descriptors.
 PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std::any& context, const HidingSigningProvider& provider, int sighash_type, const std::optional<std::vector<CTransactionRef>>& prev_txs, bool finalize)
 {
+    const NodeContext& node_context = EnsureAnyNodeContext(context);
+
     // Unserialize the transactions
     PartiallySignedTransaction psbtx;
     std::string error;
@@ -249,7 +260,7 @@ PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std
     }
 
     if (g_txindex) g_txindex->BlockUntilSyncedToCurrentChain();
-    const NodeContext& node = EnsureAnyNodeContext(context);
+    const bool slhdsa_fips205 = SlhdsaFips205ForNextBlock(context);
 
     // If we can't find the corresponding full transaction for all of our inputs,
     // this will be used to find just the utxos for the segwit inputs for which
@@ -295,7 +306,7 @@ PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std
         }
         // If we still don't have it look in the mempool
         if (!tx) {
-            tx = node.mempool->get(tx_in.prevout.hash);
+            tx = node_context.mempool->get(tx_in.prevout.hash);
         }
         if (tx) {
             psbt_input.non_witness_utxo = tx;
@@ -306,7 +317,7 @@ PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std
 
     // If we still haven't found all of the inputs, look for the missing ones in the utxo set
     if (!coins.empty()) {
-        FindCoins(node, coins);
+        FindCoins(node_context, coins);
         for (unsigned int i = 0; i < psbtx.tx->vin.size(); ++i) {
             PSBTInput& input = psbtx.inputs.at(i);
 
@@ -332,7 +343,7 @@ PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std
         // Note that SignPSBTInput does a lot more than just constructing ECDSA signatures.
         // We only actually care about those if our signing provider doesn't hide private
         // information, as is the case with `descriptorprocesspsbt`
-        SignPSBTInput(provider, psbtx, /*index=*/i, &txdata, sighash_type, /*out_sigdata=*/nullptr, finalize);
+        SignPSBTInput(provider, psbtx, /*index=*/i, &txdata, sighash_type, /*out_sigdata=*/nullptr, finalize, slhdsa_fips205);
     }
 
     // Update script/keypath information using descriptor data.
@@ -1755,7 +1766,8 @@ static RPCHelpMan finalizepsbt()
     bool extract = request.params[1].isNull() || (!request.params[1].isNull() && request.params[1].get_bool());
 
     CMutableTransaction mtx;
-    bool complete = FinalizeAndExtractPSBT(psbtx, mtx);
+    const bool slhdsa_fips205 = SlhdsaFips205ForNextBlock(request.context);
+    bool complete = FinalizeAndExtractPSBT(psbtx, mtx, slhdsa_fips205);
 
     UniValue result(UniValue::VOBJ);
     DataStream ssTx{};
@@ -2093,7 +2105,7 @@ static RPCHelpMan analyzepsbt()
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("TX decode failed %s", error));
     }
 
-    PSBTAnalysis psbta = AnalyzePSBT(psbtx);
+    PSBTAnalysis psbta = AnalyzePSBT(psbtx, SlhdsaFips205ForNextBlock(request.context));
 
     UniValue result(UniValue::VOBJ);
     UniValue inputs_result(UniValue::VARR);
@@ -2255,26 +2267,37 @@ RPCHelpMan descriptorprocesspsbt()
         /*prev_txs=*/prev_txns,
         finalize);
 
-    // Check whether or not all of the inputs are now signed
+    const bool slhdsa_fips205 = SlhdsaFips205ForNextBlock(request.context);
+
+    // Check whether or not all of the inputs are now signed and valid under the
+    // script flags that will apply to the next block.
+    const PrecomputedTransactionData txdata = PrecomputePSBTData(psbtx);
     bool complete = true;
-    for (const auto& input : psbtx.inputs) {
-        complete &= PSBTInputSigned(input);
+    for (unsigned int i = 0; i < psbtx.inputs.size(); ++i) {
+        complete &= PSBTInputSignedAndVerified(psbtx, i, &txdata, slhdsa_fips205);
     }
 
     DataStream ssTx{};
     ssTx << psbtx;
 
     UniValue result(UniValue::VOBJ);
+    std::string final_hex;
 
     result.pushKV("psbt", EncodeBase64(ssTx));
-    result.pushKV("complete", complete);
     if (complete) {
         CMutableTransaction mtx;
         PartiallySignedTransaction psbtx_copy = psbtx;
-        CHECK_NONFATAL(FinalizeAndExtractPSBT(psbtx_copy, mtx));
-        DataStream ssTx_final;
-        ssTx_final << TX_WITH_WITNESS(mtx);
-        result.pushKV("hex", HexStr(ssTx_final));
+        if (FinalizeAndExtractPSBT(psbtx_copy, mtx, slhdsa_fips205)) {
+            DataStream ssTx_final;
+            ssTx_final << TX_WITH_WITNESS(mtx);
+            final_hex = HexStr(ssTx_final);
+        } else {
+            complete = false;
+        }
+    }
+    result.pushKV("complete", complete);
+    if (!final_hex.empty()) {
+        result.pushKV("hex", final_hex);
     }
     return result;
 },

@@ -37,8 +37,9 @@ that activates at block `61000`.
 - retired MatRiCT envelopes and legacy post-fork SMILE wire families are
   rejected
 - post-fork V2 bundle wire families collapse to the generic post-fork surface
-- direct public-flow `V2_SEND` is disabled after the fork, with a narrow
-  mature-coinbase compatibility lane retained for miner shielding flows
+- direct public-flow `V2_SEND` is disabled after the fork; the remaining
+  mature-coinbase compatibility lane is historical/pre-sunset only, and new
+  shielded credits are disabled at the v0.32 sunset
 - post-fork lifecycle controls move onto a distinct zero-shielded-state
   `V2_LIFECYCLE` bundle bound to the transparent transaction skeleton, while
   legacy send-lifecycle controls are rejected

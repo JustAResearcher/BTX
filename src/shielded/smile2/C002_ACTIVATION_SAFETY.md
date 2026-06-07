@@ -32,8 +32,10 @@ activation height and v3 (full C-002/R5) at/after it; the verifier, serializer,
 and decoder all branch on the wire version (~20 coordinated gating sites keyed on
 `is_v3`). The wallet/builder threads the real target block height
 (`CreateSmileProof → TryProveCT`), so legacy notes spend in the correct format with
-NO user action. `SmileCTProof::C002_ACTIVATION_HEIGHT` (=123000) is the single
-source of truth shared by prover, verifier (verify_dispatch), and serialization.
+NO user action. Mainnet remains fixed at height 123000. Runtime callers use
+`consensus.nShieldedC002ActivationHeight`, which defaults to
+`SmileCTProof::C002_ACTIVATION_HEIGHT` and can only be lowered on regtest for
+focused activation tests.
 
 VERIFIED (btx-work forge harness + btxd build): v3 honest accepts, v3 forges
 (balance/Γ/range) reject, AND a v2 (pre-activation) proof builds, verifies, and
@@ -90,26 +92,19 @@ bearing consensus.
 - [ ] reorg across H; tx in mempool across H (mempool re-eval picks correct format).
 - [ ] no funds-stuck: every honest balance present pre-H is spendable post-H.
 
-## 3b. Remaining: make activation a consensus param + E2E regtest (#10)
+## 3b. Consensus-param activation and E2E regtest (#10)
 
-The activation height is currently the compile-time constant
-`SmileCTProof::C002_ACTIVATION_HEIGHT = 123000`. To follow the existing pattern
-(`nShielded*ActivationHeight` in `consensus/params.h`, set per network in
-chainparams) AND to make the cross-activation E2E runnable in regtest without
-mining 122,500 blocks, lift it to a consensus param:
+The activation height is now exposed as
+`consensus.nShieldedC002ActivationHeight`, defaulting to
+`SmileCTProof::C002_ACTIVATION_HEIGHT = 123000`. Mainnet/testnet values remain at
+123000. Regtest can lower the height with
+`-regtestshieldedc002activationheight=<n>` so activation-boundary scenarios run
+without mining 122,500 blocks.
 
-1. `consensus/params.h`: add `int32_t nShieldedC002ActivationHeight{123000};`.
-2. `kernel/chainparams.cpp`: mainnet=123000; testnet=<tbd>; **regtest=<low, e.g.
-   100, or -con-overridable>** so functional tests can cross it cheaply.
-3. Thread the activation height (default `SmileCTProof::C002_ACTIVATION_HEIGHT`) as
-   one extra param alongside the already-threaded `validation_height`:
-   - prover: `TryProveCT/ProveCT/CreateSmileProof` → `is_v3 = use_postfork &&
-     validation_height >= activation_height`. Wallet/builder passes
-     `consensus.nShieldedC002ActivationHeight`.
-   - verifier: `ValidateSmile2Proof/VerifySmile2CTFromBytes` → `require_c002 =
-     validation_height >= activation_height`. `validation.cpp` passes
-     `consensus.nShieldedC002ActivationHeight`.
-   (Defaults keep current behaviour; only consensus/wallet callers pass the param.)
+Wallet/prover and verifier paths thread both the target validation height and
+the consensus C-002 activation height. Defaults keep current behavior for
+offline/test helpers, while node and wallet consensus callers pass the configured
+network value.
 
 ### E2E regtest script (#10) — runnable once step 3 lands with regtest activation low
 ```

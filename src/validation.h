@@ -152,6 +152,13 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams);
  */
 bool IsMLDSADisallowedForMempool(const Consensus::Params& consensusParams, int next_block_height);
 
+/**
+ * Policy-only C-002 SLH-DSA/FIPS-205 cutoff check for mempool admission.
+ * Returns true when mempool script checks should verify SLH-DSA signatures in
+ * FIPS-205 mode for the given next-block height.
+ */
+bool IsSLHDSAFips205RequiredForMempool(const Consensus::Params& consensusParams, int next_block_height);
+
 bool FatalError(kernel::Notifications& notifications, BlockValidationState& state, const bilingual_str& message);
 
 /** Prune block files up to a given height */
@@ -333,7 +340,8 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
                                              const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
                                                   CChain& chain,
-                                                  ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs);
+                                                  ChainstateManager& chainman,
+                                                  Chainstate* active_chainstate = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs);
 
 static inline MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTransactionRef& tx, int64_t accept_time, bool bypass_limits, bool test_accept) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
     static const ignore_rejects_type ignore_rejects_legacy{

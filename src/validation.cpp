@@ -254,6 +254,7 @@ std::atomic<int64_t> g_reorg_protection_last_rejected_unix{0};
     if (!std::holds_alternative<shielded::v2::RecoveryExitPayload>(v2b->payload)) return false;
     const auto& p = std::get<shielded::v2::RecoveryExitPayload>(v2b->payload);
     out_claim.value = p.value;
+    out_claim.note_commitment = p.note_commitment;
     out_claim.recipient_pk_hash = p.recipient_pk_hash;
     out_claim.rho = p.rho;
     out_claim.rcm = p.rcm;
@@ -2700,6 +2701,30 @@ bool IsMLDSADisallowedForMempool(const Consensus::Params& consensusParams, int n
     return static_cast<int64_t>(next_block_height) >= emergency_start;
 }
 
+bool IsSLHDSAFips205RequiredForMempool(const Consensus::Params& consensusParams, int next_block_height)
+{
+    return consensusParams.IsShieldedC002Active(next_block_height);
+}
+
+// Returns the script flags which should be checked for a given block
+static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const ChainstateManager& chainman);
+
+[[nodiscard]] unsigned int GetNextBlockMempoolConsensusScriptFlags(
+    const CBlockIndex& tip,
+    const ChainstateManager& chainman,
+    int next_block_height)
+{
+    unsigned int flags{GetBlockScriptFlags(tip, chainman)};
+    const auto& consensus{chainman.GetConsensus()};
+    if (IsMLDSADisallowedForMempool(consensus, next_block_height)) {
+        flags |= SCRIPT_VERIFY_DISALLOW_MLDSA;
+    }
+    if (IsSLHDSAFips205RequiredForMempool(consensus, next_block_height)) {
+        flags |= SCRIPT_VERIFY_SLHDSA_FIPS205;
+    }
+    return flags;
+}
+
 std::optional<LockPoints> CalculateLockPointsAtTip(
     CBlockIndex* tip,
     const CCoinsView& coins_view,
@@ -2762,9 +2787,6 @@ bool CheckSequenceLocksAtTip(CBlockIndex* tip,
 
     return EvaluateSequenceLocks(index, {lock_points.height, lock_points.time});
 }
-
-// Returns the script flags which should be checked for a given block
-static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const ChainstateManager& chainman);
 
 /** Compute accurate total signature operation cost of a transaction.
  *  Not consensus-critical, since legacy sigops counting is always used in the protocol.
@@ -2853,25 +2875,57 @@ bool HasInvalidShieldedAnchors(const CTransaction& tx, const ChainstateManager& 
     return false;
 }
 
-void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool, CChain& chain, ChainstateManager& chainman)
+void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
+                                                  CChain& chain,
+                                                  ChainstateManager& chainman,
+                                                  Chainstate* active_chainstate)
 {
     AssertLockHeld(::cs_main);
     AssertLockHeld(pool.cs);
 
     const bool shielded_state_ready = chainman.EnsureShieldedStateInitialized();
+    const int32_t validation_height = chainman.ActiveChain().Height() + 1;
     const auto stale_anchor_filter = [&](CTxMemPool::txiter it) EXCLUSIVE_LOCKS_REQUIRED(pool.cs, ::cs_main) {
         const CTransaction& tx = it->GetTx();
-        if (!tx.HasShieldedBundle()) return false;
-        std::string height_gate_reject;
-        const int32_t validation_height = chainman.ActiveChain().Height() + 1;
-        if (!RejectShieldedHeightGateViolation(tx,
-                                               chainman.GetConsensus(),
-                                               validation_height,
-                                               height_gate_reject)) {
-            return true;
+        if (tx.HasShieldedBundle()) {
+            std::string height_gate_reject;
+            if (!RejectShieldedHeightGateViolation(tx,
+                                                   chainman.GetConsensus(),
+                                                   validation_height,
+                                                   height_gate_reject)) {
+                return true;
+            }
+            if (!shielded_state_ready) return true;
+            if (HasInvalidShieldedAnchors(tx, chainman)) return true;
         }
-        if (!shielded_state_ready) return true;
-        return HasInvalidShieldedAnchors(tx, chainman);
+
+        if (active_chainstate != nullptr && !tx.IsCoinBase()) {
+            const CBlockIndex* tip = active_chainstate->m_chain.Tip();
+            if (tip == nullptr) return true;
+            const unsigned int next_block_flags =
+                GetNextBlockMempoolConsensusScriptFlags(*tip, chainman, validation_height);
+            CCoinsViewMemPool view_mempool{&active_chainstate->CoinsTip(), pool};
+            CCoinsViewCache view{&view_mempool};
+            if (!view.HaveInputs(tx)) return true;
+            TxValidationState script_state;
+            PrecomputedTransactionData txdata;
+            if (!CheckInputScripts(tx,
+                                   script_state,
+                                   view,
+                                   next_block_flags,
+                                   /*cacheSigStore=*/true,
+                                   /*cacheFullScriptStore=*/true,
+                                   txdata,
+                                   active_chainstate->m_chainman.m_validation_cache)) {
+                LogDebug(BCLog::MEMPOOL,
+                         "removing mempool tx %s: stale next-block script flags at height %d (%s)\n",
+                         tx.GetHash().ToString(),
+                         validation_height,
+                         script_state.ToString());
+                return true;
+            }
+        }
+        return false;
     };
     pool.removeForReorg(chain, stale_anchor_filter);
 }
@@ -2991,7 +3045,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
     // We also need to remove any now-immature transactions
     m_mempool->removeForReorg(m_chain, filter_final_and_mature);
-    RemoveStaleShieldedAnchorMempoolTransactions(*m_mempool, m_chain, m_chainman);
+    RemoveStaleShieldedAnchorMempoolTransactions(*m_mempool, m_chain, m_chainman, this);
     // Re-limit mempool size, in case we added any transactions
     LimitMempoolSize(*m_mempool, this->CoinsTip());
 }
@@ -4554,6 +4608,9 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
     if (IsMLDSADisallowedForMempool(m_active_chainstate.m_chainman.GetConsensus(), next_block_height)) {
         scriptVerifyFlags |= SCRIPT_VERIFY_DISALLOW_MLDSA;
     }
+    if (IsSLHDSAFips205RequiredForMempool(m_active_chainstate.m_chainman.GetConsensus(), next_block_height)) {
+        scriptVerifyFlags |= SCRIPT_VERIFY_SLHDSA_FIPS205;
+    }
 
     // Check input scripts and signatures.
     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
@@ -4577,12 +4634,12 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
     const uint256& hash = ws.m_hash;
     TxValidationState& state = ws.m_state;
 
-    // Check again against the current block tip's script verification
-    // flags to cache our script execution flags. This is, of course,
-    // useless if the next block has different script flags from the
-    // previous one, but because the cache tracks script flags for us it
-    // will auto-invalidate and we'll just have a few blocks of extra
-    // misses on soft-fork activation.
+    // Check again against the current block tip's script verification flags,
+    // plus monotonic next-block PQ flags, to cache our script execution flags.
+    // A mempool transaction can only be mined in the next block, so C-002
+    // SLH-DSA/FIPS and ML-DSA disable policy must be evaluated at next height,
+    // not the current tip. The cache tracks script flags for us and
+    // auto-invalidates when the flag set changes.
     //
     // This is also useful in case of bugs in the standard flags that cause
     // transactions to pass as valid when they're actually invalid. For
@@ -4592,8 +4649,12 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
     // There is a similar check in CreateNewBlock() to prevent creating
     // invalid blocks (using TestBlockValidity), however allowing such
     // transactions into the mempool can be exploited as a DoS attack.
-    unsigned int currentBlockScriptVerifyFlags{GetBlockScriptFlags(*m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman)};
-    if (!CheckInputsFromMempoolAndCache(tx, state, m_view, m_pool, currentBlockScriptVerifyFlags,
+    const int next_block_height = NextBlockHeightOrLimit(m_active_chainstate.m_chain.Height());
+    const unsigned int nextBlockScriptVerifyFlags{
+        GetNextBlockMempoolConsensusScriptFlags(*m_active_chainstate.m_chain.Tip(),
+                                                m_active_chainstate.m_chainman,
+                                                next_block_height)};
+    if (!CheckInputsFromMempoolAndCache(tx, state, m_view, m_pool, nextBlockScriptVerifyFlags,
                                         ws.m_precomputed_txdata, m_active_chainstate.CoinsTip(), GetValidationCache())) {
         LogPrintf("BUG! PLEASE REPORT THIS! CheckInputScripts failed against latest-block but not STANDARD flags %s, %s\n", hash.ToString(), state.ToString());
         return Assume(false);
@@ -6038,7 +6099,7 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
     // FIPS-205 (pure mode) rather than the legacy round-3.x SPHINCS+ reference.
     // Keyed off the same height the C-002 prover/verifier branch on so the whole
     // C-002 upgrade activates atomically.
-    if (block_index.nHeight >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT) {
+    if (consensusparams.IsShieldedC002Active(block_index.nHeight)) {
         flags |= SCRIPT_VERIFY_SLHDSA_FIPS205;
     }
 
@@ -7775,7 +7836,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     // Keep the shielded prune-retention window pinned to the new tip (no-op unless pruning + shielded).
     UpdateShieldedPruneRetentionLock(*this);
     if (m_mempool) {
-        RemoveStaleShieldedAnchorMempoolTransactions(*m_mempool, m_chain, m_chainman);
+        RemoveStaleShieldedAnchorMempoolTransactions(*m_mempool, m_chain, m_chainman, this);
     }
 
     if (m_mempool) {
@@ -12767,10 +12828,11 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             restored_index = restore_rebuilt_commitment_index();
         }
 
-        // issue #35: under the default externalized profile (retain_shielded_commitment_index=false)
-        // a tree loaded from its persisted frontier has no in-memory commitment index, and the index
-        // cannot be reconstructed without reading (pruned) blocks. Still enter the recovery block in
-        // that case so the node comes up on its validated persisted frontier. This is consensus-safe:
+        // issue #35: if the commitment index is not retained (for example when
+        // -retainshieldedcommitmentindex=0), a tree loaded from its persisted frontier has no in-memory
+        // commitment index, and the index cannot be reconstructed without reading (pruned) blocks.
+        // Still enter the recovery block in that case so the node comes up on its validated persisted
+        // frontier. This is consensus-safe:
         // a frontier-only node is a correct VALIDATOR -- every shielded-spend verification that needs
         // a leaf-position lookup fails closed (CommitmentAt -> nullopt -> bad-shielded-ring-member-
         // position) when the index is absent; it simply cannot itself PRODUCE witnesses until it can

@@ -4,6 +4,7 @@
 
 #include <qt/psbtoperationsdialog.h>
 
+#include <chainparams.h>
 #include <common/messages.h>
 #include <core_io.h>
 #include <interfaces/node.h>
@@ -56,7 +57,7 @@ void PSBTOperationsDialog::openWithPSBT(PartiallySignedTransaction psbtx)
 {
     m_transaction_data = psbtx;
 
-    bool complete = FinalizePSBT(psbtx); // Make sure all existing signatures are fully combined before checking for completeness.
+    bool complete = FinalizePSBT(psbtx, slhdsaFips205ForNextBlock()); // Make sure all existing signatures are fully combined before checking for completeness.
     if (m_wallet_model) {
         size_t n_could_sign;
         const auto err{m_wallet_model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, &n_could_sign, m_transaction_data, complete)};
@@ -110,7 +111,7 @@ void PSBTOperationsDialog::signTransaction()
 void PSBTOperationsDialog::broadcastTransaction()
 {
     CMutableTransaction mtx;
-    if (!FinalizeAndExtractPSBT(m_transaction_data, mtx)) {
+    if (!FinalizeAndExtractPSBT(m_transaction_data, mtx, slhdsaFips205ForNextBlock())) {
         // This is never expected to fail unless we were given a malformed PSBT
         // (e.g. with an invalid signature.)
         showStatus(tr("Unknown error processing transaction."), StatusLevel::ERR);
@@ -129,6 +130,18 @@ void PSBTOperationsDialog::broadcastTransaction()
         showStatus(tr("Transaction broadcast failed: %1")
             .arg(QString::fromStdString(TransactionErrorString(error).translated)), StatusLevel::ERR);
     }
+}
+
+bool PSBTOperationsDialog::slhdsaFips205ForNextBlock() const
+{
+    if (m_wallet_model != nullptr) {
+        return m_wallet_model->wallet().slhdsaFips205ForNextBlock();
+    }
+    if (m_client_model == nullptr) {
+        return false;
+    }
+    const int next_height = m_client_model->node().getNumBlocks() + 1;
+    return Params().GetConsensus().IsShieldedC002Active(next_height);
 }
 
 void PSBTOperationsDialog::copyToClipboard() {
@@ -195,7 +208,7 @@ QString PSBTOperationsDialog::renderTransaction(const PartiallySignedTransaction
         tx_description.append("<br>");
     }
 
-    PSBTAnalysis analysis = AnalyzePSBT(psbtx);
+    PSBTAnalysis analysis = AnalyzePSBT(psbtx, slhdsaFips205ForNextBlock());
     tx_description.append(bullet_point);
     if (!*analysis.fee) {
         // This happens if the transaction is missing input UTXO information.
@@ -266,7 +279,7 @@ size_t PSBTOperationsDialog::couldSignInputs(const PartiallySignedTransaction &p
 }
 
 void PSBTOperationsDialog::showTransactionStatus(const PartiallySignedTransaction &psbtx) {
-    PSBTAnalysis analysis = AnalyzePSBT(psbtx);
+    PSBTAnalysis analysis = AnalyzePSBT(psbtx, slhdsaFips205ForNextBlock());
     size_t n_could_sign = couldSignInputs(psbtx);
 
     switch (analysis.next) {

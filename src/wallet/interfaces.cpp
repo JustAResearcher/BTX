@@ -442,6 +442,7 @@ public:
     {
         return m_wallet->FillPSBT(psbtx, complete, sighash_type, sign, bip32derivs, n_signed);
     }
+    bool slhdsaFips205ForNextBlock() override { return m_wallet->SlhdsaFips205ForNextBlock(); }
     WalletBalances getBalances() override
     {
         const auto bal = GetBalance(*m_wallet);

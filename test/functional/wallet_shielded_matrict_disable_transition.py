@@ -113,7 +113,7 @@ class WalletShieldedMatRiCTDisableTransitionTest(BitcoinTestFramework):
         redesign_dest = deposit_wallet.z_getnewaddress()
         compatibility_error = (
             "post-fork direct transparent shielding is limited to mature coinbase outputs; "
-            "use bridge ingress for general transparent deposits"
+            "after the v0.32 sunset"
         )
         assert_raises_rpc_error(
             -4,

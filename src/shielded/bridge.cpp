@@ -4,8 +4,6 @@
 
 #include <shielded/bridge.h>
 
-#include <shielded/smile2/ct_proof.h>  // SmileCTProof::C002_ACTIVATION_HEIGHT (attestor SLH-DSA gate)
-
 #include <addresstype.h>
 #include <chainparams.h>
 #include <hash.h>
@@ -3051,10 +3049,10 @@ uint256 ComputeBridgeBatchReceiptHash(const BridgeBatchReceipt& receipt)
     return hw.GetSHA256();
 }
 
-bool BridgeAttestorUsesFips205AtHeight(int64_t validation_height)
+bool BridgeAttestorUsesFips205AtHeight(int64_t validation_height, int64_t c002_activation_height)
 {
     // Same activation boundary as the rest of the C-002 SLH-DSA / shielded migration.
-    return validation_height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+    return validation_height >= c002_activation_height;
 }
 
 bool VerifyBridgeBatchReceipt(const BridgeBatchReceipt& receipt, bool slhdsa_fips205)
@@ -3075,9 +3073,12 @@ bool VerifyBridgeBatchReceiptAnyMode(const BridgeBatchReceipt& receipt)
            VerifyBridgeBatchReceipt(receipt, /*slhdsa_fips205=*/true);
 }
 
-bool VerifyBridgeBatchReceiptsModeExact(Span<const BridgeBatchReceipt> receipts, int64_t validation_height)
+bool VerifyBridgeBatchReceiptsModeExact(
+    Span<const BridgeBatchReceipt> receipts,
+    int64_t validation_height,
+    int64_t c002_activation_height)
 {
-    const bool slhdsa_fips205 = BridgeAttestorUsesFips205AtHeight(validation_height);
+    const bool slhdsa_fips205 = BridgeAttestorUsesFips205AtHeight(validation_height, c002_activation_height);
     for (const auto& receipt : receipts) {
         if (!VerifyBridgeBatchReceipt(receipt, slhdsa_fips205)) return false;
     }
@@ -3586,9 +3587,10 @@ uint256 ComputeBridgeBatchLeafDestinationTag(const BridgeBatchAuthorization& aut
 }
 
 std::optional<BridgeBatchLeaf> BuildBridgeBatchLeafFromAuthorization(const BridgeBatchAuthorization& authorization,
-                                                                     int32_t height)
+                                                                     int32_t height,
+                                                                     int64_t c002_activation_height)
 {
-    if (!VerifyBridgeBatchAuthorization(authorization, BridgeAttestorUsesFips205AtHeight(height))) return std::nullopt;
+    if (!VerifyBridgeBatchAuthorization(authorization, BridgeAttestorUsesFips205AtHeight(height, c002_activation_height))) return std::nullopt;
     const uint256 authorization_hash = ComputeBridgeBatchAuthorizationHash(authorization);
     if (authorization_hash.IsNull()) return std::nullopt;
     BridgeBatchLeaf leaf;

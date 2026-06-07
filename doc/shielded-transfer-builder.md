@@ -1,8 +1,8 @@
 # Deterministic Shielded Transfer Builder
 
-`contrib/shielded_transfer_builder.py` is an operator tool for building,
-reviewing, simulating, and executing deterministic multisig-to-shielded
-transfer bundles.
+`contrib/shielded_transfer_builder.py` is a historical/pre-sunset operator tool
+for building, reviewing, simulating, and executing deterministic
+multisig-to-shielded transfer bundles.
 
 It is designed for large important transfers where the operator wants:
 
@@ -12,9 +12,8 @@ It is designed for large important transfers where the operator wants:
 - exact mempool preflight before execution
 - optional persistent input locks while a bundle is pending review
 
-After the post-`61000` privacy fork, `z_fundpsbt` remains suitable for
-mature-coinbase compatibility deposits but not for arbitrary transparent
-ingress; general transparent deposits should use the bridge-ingress surface.
+After the v0.32 sunset, new shielded credits are disabled by consensus. Do not
+use `z_fundpsbt` or bridge ingress as current production shielded ingress.
 
 The tool is intentionally thin. It drives existing wallet/node RPCs instead of
 re-implementing transaction logic outside the daemon.

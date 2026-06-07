@@ -224,6 +224,9 @@ public:
         PartiallySignedTransaction& psbtx,
         bool& complete) = 0;
 
+    //! Return whether wallet-authored transactions for the next block require FIPS-205 SLH-DSA signatures.
+    virtual bool slhdsaFips205ForNextBlock() = 0;
+
     //! Get balances.
     virtual WalletBalances getBalances() = 0;
 
