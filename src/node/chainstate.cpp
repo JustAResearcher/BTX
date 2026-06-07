@@ -137,6 +137,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // disk, rebalance the coins caches to desired levels based
     // on the condition of each chainstate.
     chainman.MaybeRebalanceCaches();
+    chainman.AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune();
 
     return {ChainstateLoadStatus::SUCCESS, {}};
 }

@@ -23,8 +23,10 @@ class ValidationSignals;
 
 static constexpr bool DEFAULT_CHECKPOINTS_ENABLED{true};
 static constexpr auto DEFAULT_MAX_TIP_AGE{24h};
-//! DS-3: production nodes fail-closed on assumeutxo shielded sections with no consensus pin.
-static constexpr bool DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT{false};
+//! DS-3 compatibility default: current shipped assumeutxo snapshots do not yet carry shielded pins.
+//! Keep bootstrap usable by default, while allowing strict operators to opt out with
+//! -allowunpinnedshieldedsnapshot=0 until pinned snapshots are shipped.
+static constexpr bool DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT{true};
 
 namespace kernel {
 
@@ -62,12 +64,11 @@ struct ChainstateManagerOpts {
     //! to the active tip and its commitment index/anchor windows validated, so the skipped audit is
     //! fail-closed (it can only reject, never accept). Set to 0 to force the thorough sync + audit.
     bool fast_shielded_startup{true};
-    //! DS-3 fail-closed: refuse to load an assumeutxo snapshot whose shielded section has no
+    //! DS-3 compatibility gate: optionally refuse to load an assumeutxo snapshot whose shielded section has no
     //! consensus pin (AssumeutxoData.shielded_state_commitment) for its height. The shielded section
     //! (pool balance + nullifier set + commitment tree) is attacker-supplied and otherwise unvalidated,
-    //! so an unpinned shielded snapshot can seed a double-spend. Default off = reject unpinned shielded
-    //! snapshots; set true (-allowunpinnedshieldedsnapshot) only to bootstrap from a snapshot you trust
-    //! out-of-band before its pin is filled in.
+    //! so an unpinned shielded snapshot can seed a double-spend. Default true preserves shipped snapshot
+    //! bootstrap compatibility; set false (-allowunpinnedshieldedsnapshot=0) to require pinned snapshots.
     bool allow_unpinned_shielded_snapshot{DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT};
     DBOptions coins_db{};
     CoinsViewOptions coins_view{};

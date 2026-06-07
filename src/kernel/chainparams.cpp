@@ -39,8 +39,8 @@ auto consteval_ctor(auto&& input) { return input; }
 #define consteval_ctor(input) (input)
 #endif
 
-static constexpr int32_t BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT{123'000};
 static constexpr int32_t BTX_SHIELDED_SUNSET_HEIGHT{125'000};
+static constexpr int32_t BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT{BTX_SHIELDED_SUNSET_HEIGHT};
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
                                  const CScript& genesisOutputScript,
