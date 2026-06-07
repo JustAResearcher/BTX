@@ -9,7 +9,6 @@
 #include <hash.h>
 #include <random.h>
 #include <shielded/ringct/ring_selection.h>
-#include <shielded/smile2/ct_proof.h>
 #include <shielded/v2_send.h>
 #include <util/strencodings.h>
 #include <wallet/shielded_coins.h>
@@ -26,7 +25,7 @@ static constexpr size_t SHIELDED_HISTORICAL_RING_EXCLUSION_WINDOWS{16};
 static constexpr size_t SHIELDED_HISTORICAL_RING_EXCLUSION_MIN{64};
 static constexpr const char* POSTFORK_COINBASE_SHIELDING_COMPATIBILITY_MESSAGE{
     "post-fork direct transparent shielding is limited to mature coinbase outputs; "
-    "use bridge ingress for general transparent deposits"};
+    "after the v0.32 sunset, new shielded credits are disabled by consensus"};
 
 [[nodiscard]] int32_t GetShieldedPrivacyRedesignActivationHeight()
 {
@@ -75,9 +74,8 @@ bool AllowSelfServeUnshieldAtHeight(int32_t height)
     // (tx_verify.cpp) ties the same value_balance to the actual tx vout. Before
     // C-002 the v2 proof did not bind the public amount, so permitting z->t
     // there would reopen the x1c exit-inflation surface. The boundary is the
-    // C-002 activation height (same constant the prover/verifier branch on),
-    // independent of the privacy-redesign height.
-    return height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+    // C-002 activation height, independent of the privacy-redesign height.
+    return Params().GetConsensus().IsShieldedC002Active(height);
 }
 
 bool AllowTransparentShieldingInDirectSendAtHeight(int32_t height)

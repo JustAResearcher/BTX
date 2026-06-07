@@ -434,7 +434,7 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
                     [](const CTxOut& txout) { return txout.nValue > 0; });
     const bool use_unshield_send_encoding =
         use_postfork_compact_send_encoding && has_transparent_outflow &&
-        validation_height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+        consensus != nullptr && consensus->IsShieldedC002Active(validation_height);
     if (has_lifecycle_controls) {
         if (postfork || has_shielded_spends || output_inputs.size() != 1) {
             reject_reason = "bad-shielded-v2-builder-lifecycle-control";
@@ -558,6 +558,9 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
     if (use_smile) {
         const bool bind_smile_anonset_context =
             consensus != nullptr && consensus->IsShieldedMatRiCTDisabled(validation_height);
+        const int64_t c002_activation_height = consensus != nullptr
+            ? consensus->nShieldedC002ActivationHeight
+            : smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
         std::vector<smile2::wallet::SmileInputMaterial> smile_inputs;
         smile_inputs.reserve(spend_inputs.size());
         for (const auto& spend_input : spend_inputs) {
@@ -582,7 +585,8 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
             smile2::SmileProofCodecPolicy::CANONICAL_NO_RICE,
             bind_smile_anonset_context,
             &smile_error,
-            validation_height);
+            validation_height,
+            c002_activation_height);
         if (!smile_result.has_value()) {
             reject_reason = smile_error.empty()
                 ? "bad-shielded-v2-builder-proof-create"
@@ -674,7 +678,8 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
                                                               payload.value_balance,
                                                               /*reject_rice_codec=*/false,
                                                               bind_smile_anonset_context,
-                                                              validation_height);
+                                                              validation_height,
+                                                              c002_activation_height);
             verify_err.has_value()) {
             reject_reason = "bad-shielded-v2-builder-proof-verify";
             return std::nullopt;

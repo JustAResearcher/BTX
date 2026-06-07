@@ -13,17 +13,18 @@ active from genesis, enforces reduced-data transaction constraints (BIP
 This repository contains the full node implementation, wallet, mining
 infrastructure, and test suites.
 
-Shielded launch status: the reset-chain Smile-only launch surface is live and
-production ready on `main`. `DIRECT_SMILE` is the default
-direct shielded spend backend, shared-ring `BATCH_SMILE` ingress is the live
-bridge-in path, registry state now commits full shielded account-leaf payloads,
-and consumed-leaf tx witnesses are lean on wire while full nodes recover
-`CompactPublicAccount` state from authenticated consensus data. The supported
-direct CT protocol remains intentionally limited to the audited single-round
-SMILE surface `anon_set <= NUM_NTT_SLOTS` (`32`), and the live chain launch
-wallet default ring size is `RING_SIZE = 8`, with larger configured rings
-already supported on the same wire surface up to
-`nMaxShieldedRingSize = 32`.
+Pre-sunset shielded launch status: the reset-chain Smile-only surface was live
+on `main` before the v0.32 sunset. `DIRECT_SMILE` was the default direct
+shielded spend backend, shared-ring `BATCH_SMILE` ingress was the bridge-in
+path, registry state committed full shielded account-leaf payloads, and
+consumed-leaf tx witnesses were lean on wire while full nodes recovered
+`CompactPublicAccount` state from authenticated consensus data.
+
+Current v0.32.2 production behavior: after block `125000`, consensus disables
+new shielded credits, private shielded-output appends, bridge ingress/control
+rollover, and re-shielding. Retained production surfaces are balance/viewing,
+legacy recovery accounting, and permitted transparent exits of existing
+shielded value.
 
 Current measured launch-surface figures on the pre-`61000` baseline surface:
 
@@ -130,7 +131,7 @@ Current ring-size roadmap:
 | **Consensus Outputs** | P2MR-only witness v2 `OP_2 <32>` + `OP_RETURN` (mainnet/testnet/testnet4) |
 | **Consensus Features** | Reduced-data limits from genesis (BIP 110-style) |
 | **PQ Signatures** | ML-DSA-44 (primary) + SLH-DSA-SHAKE-128s (backup) via witness v2 P2MR |
-| **Shielded Pool** | Lattice-based confidential transactions, active from genesis |
+| **Shielded Pool** | Lattice-based confidential transactions, active from genesis; new shielded credits disabled at block 125000 |
 | **Default Shielded Ring Size** | 8 |
 | **Supported Shielded Ring Sizes** | 8..32 on the current wire / consensus surface |
 | **Dandelion++ Relay** | Stem-then-fluff privacy relay, activates at block 250 000 |
@@ -304,7 +305,7 @@ For the full PQ specification and tutorials, see:
 
 BTX includes a **shielded transaction pool** active from genesis on all
 networks. Shielded transactions hide sender, receiver, and amount using
-lattice-based zero-knowledge proofs. As of v0.32.0, coinbase auto-shielding is
+lattice-based zero-knowledge proofs. As of v0.32.2, coinbase auto-shielding is
 opt-in (default off; `-autoshieldcoinbase=1`) so mined rewards stay as
 post-quantum transparent outputs unless an operator chooses to shield.
 
@@ -318,7 +319,7 @@ formal-verification/run_all.py`).
 
 ### Production Status
 
-As of `2026-03-23`, the production reset-chain launch architecture is:
+As of `2026-03-23`, the pre-sunset reset-chain launch architecture was:
 
 - `DIRECT_SMILE` as the default direct `z_sendmany` backend,
 - default direct ring size `8`, configurable up to `32` on the current wire
@@ -327,12 +328,18 @@ As of `2026-03-23`, the production reset-chain launch architecture is:
   coinbase-only `z_shieldfunds` sweeps after `61000`),
   fully shielded direct send, note merge, and mixed shielded-to-transparent
   unshield all running on the `v2_send` transaction family,
-- shared-ring `BATCH_SMILE` ingress on the live bridge-in path,
+- shared-ring `BATCH_SMILE` ingress on the pre-sunset bridge-in path,
 - full account-leaf payloads committed in registry state so future spend
   reconstruction comes from authenticated consensus data,
 - lean consumed-leaf transaction witnesses on wire
   (`leaf_index + account_leaf_commitment + sibling_path`),
 - egress, rebalance, and settlement flows aligned with the same shielded state
+
+As of v0.32.2, current production nodes enforce the block-`125000` sunset:
+new shielded credits, private shielded-output appends, bridge ingress/control
+transactions, rollover/rebalance, and re-shielding are disabled by consensus.
+Existing shielded balances remain visible/accounted, and strict transparent
+exit/recovery paths remain the supported direction.
   model,
 - legacy MatRiCT and receipt-backed ingress retained only as non-launch
   residual tooling.
@@ -413,20 +420,24 @@ providing:
 
 | Type | Description |
 |---|---|
-| **Shield** (transparent -> shielded) | Prefork compatibility deposit on proofless `v2_send`; post-`61000` general public-flow `V2_SEND` is retired, with mature-coinbase compatibility retained for miner shielding |
+| **Shield** (transparent -> shielded) | Prefork compatibility deposit on proofless `v2_send`; post-`61000` general public-flow `V2_SEND` is retired, and all new shielded credits are disabled at the `125000` shielded sunset |
 | **Unshield** (shielded -> transparent) | Prefork compatibility unshield on mixed `v2_send`; post-`61000` transparent settlement moves to explicit bridge/egress surfaces |
 | **Fully shielded** (shielded -> shielded) | Transfer within the pool on post-fork `DIRECT_SMILE` `v2_send` |
 
 ### Auto-Shield Coinbase
 
-When enabled (default: **on**), the wallet automatically shields mature
-coinbase outputs into the shielded pool on each new block.
+Automatic coinbase shielding is disabled by default. If an operator explicitly
+starts a pre-sunset test or compatibility node with `-autoshieldcoinbase=1`,
+the wallet may sweep mature coinbase outputs before shielded pool credits are
+disabled. At and after the configured pool-credit disable height (`125000` on
+mainnet), the wallet auto-shield path is inert to avoid building transactions
+consensus will reject.
 
 ```bash
-# Disable auto-shielding (opt-out)
-btxd -autoshieldcoinbase=0
+# Default production behavior: leave auto-shield off.
+btxd
 
-# Manual shielding
+# Historical/pre-sunset compatibility only.
 btx-cli z_shieldcoinbase
 ```
 
@@ -439,10 +450,10 @@ btx-cli z_shieldcoinbase
 | `z_getbalance` | Shielded balance with optional minimum confirmations |
 | `z_gettotalbalance` | Combined transparent + shielded balance |
 | `z_listunspent` | List unspent shielded notes |
-| `z_sendmany` | Send to shielded recipients and, before `61000`, optionally transparent recipients |
-| `z_shieldcoinbase` | Shield mature coinbase outputs into the pool |
-| `z_shieldfunds` | Shield transparent UTXOs with automatic chunking; after `61000`, limited to mature coinbase compatibility sweeps |
-| `z_mergenotes` | Consolidate many small notes into one |
+| `z_sendmany` | Historical/pre-sunset shielded-recipient sends; after sunset, only strict transparent exits can be accepted |
+| `z_shieldcoinbase` | Historical/pre-sunset mature coinbase shielding compatibility |
+| `z_shieldfunds` | Historical/pre-sunset transparent shielding compatibility; after `61000`, limited to mature coinbase compatibility sweeps and disabled once new pool credits are disabled |
+| `z_mergenotes` | Historical/pre-sunset note consolidation; disabled after the shielded sunset |
 | `z_viewtransaction` | Decode shielded transaction details (with viewing keys) |
 | `z_exportviewingkey` | Export KEM viewing key for auditors |
 | `z_importviewingkey` | Import viewing key for watch-only monitoring |
@@ -623,7 +634,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.32.1 \
+  --release-tag v0.32.2 \
   --preset service \
   --datadir="$HOME/.btx"
 ```
@@ -844,9 +855,9 @@ want:
 - exact finalized mempool preflight before broadcast
 - controlled input locking during review and execution
 
-After the post-`61000` privacy fork, `z_fundpsbt` remains suitable for
-mature-coinbase compatibility deposits but not for arbitrary transparent
-ingress; general transparent deposits should use the bridge-ingress surface.
+This flow is historical/pre-sunset only. After the v0.32 sunset, new shielded
+credits are disabled by consensus; do not use `z_fundpsbt` or bridge ingress as
+current production shielded ingress.
 
 Example:
 
@@ -1070,7 +1081,7 @@ BTX exposes a JSON-RPC interface compatible with Bitcoin Core. Connect using
 | Blockchain | Block queries, chain state, UTXO info |
 | Mining | Block templates, generation, submission |
 | Wallet | Address management, sending, receiving, backup |
-| Shielded | z_sendmany, z_shieldcoinbase, z_getbalance, viewing keys |
+| Shielded | z_sendmany, z_getbalance, viewing keys, recovery/egress surfaces |
 | Network | Peer management, banning, network info |
 | Raw Transactions | Transaction creation, signing, decoding |
 
@@ -1181,7 +1192,8 @@ doc/
 2. **Post-quantum signatures**: Witness v2 P2MR outputs with ML-DSA-44 and
    SLH-DSA via `OP_CHECKSIG_MLDSA` / `OP_CHECKSIG_SLHDSA`.
 3. **Shielded pool**: Lattice-based confidential transactions active from
-   genesis. Coinbase auto-shield, z_* RPCs, ML-KEM note encryption.
+   genesis, with new shielded credits disabled at the v0.32 sunset. Auto-shield
+   is default-off and inert after the pool-credit disable height.
 4. **Block time**: 90 s (vs. Bitcoin's 600 s).
 5. **Difficulty**: ASERT per-block adjustment from block 0.
 6. **Data limits**: BIP 110-style constraints restrict OP_RETURN to 83 bytes

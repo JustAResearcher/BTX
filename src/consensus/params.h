@@ -269,6 +269,12 @@ struct Params {
     int32_t nShieldedSmileRiceCodecDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedMatRiCTDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSpendPathRecoveryActivationHeight{std::numeric_limits<int32_t>::max()};
+    /** C-002 shielded proof + SLH-DSA/FIPS-205 activation height. Mainnet default
+     *  remains 123,000; regtest may lower this to exercise boundary behavior
+     *  without mining 123k blocks. Keep the default in sync with
+     *  smile2::SmileCTProof::C002_ACTIVATION_HEIGHT, which low-level proof
+     *  helpers use when consensus params are unavailable. */
+    int32_t nShieldedC002ActivationHeight{123'000};
     int32_t nShieldedPQ128UpgradeHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedPoolCreditDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSunsetHeight{std::numeric_limits<int32_t>::max()};
@@ -433,6 +439,12 @@ struct Params {
         return height >= 0 &&
             nShieldedSpendPathRecoveryActivationHeight != std::numeric_limits<int32_t>::max() &&
             height >= nShieldedSpendPathRecoveryActivationHeight;
+    }
+    bool IsShieldedC002Active(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedC002ActivationHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedC002ActivationHeight;
     }
     bool IsShieldedPQ128UpgradeActive(int32_t height) const
     {

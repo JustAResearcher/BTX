@@ -597,7 +597,8 @@ BuildV2IngressSmileRingMembers(
                                         const V2IngressContext& context,
                                         const std::vector<std::vector<std::vector<uint256>>>& ring_members,
                                         std::string& reject_reason,
-                                        int64_t validation_height = 0);  // C-002: consensus callers MUST pass real height
+                                        int64_t validation_height = 123'000,
+                                        int64_t c002_activation_height = 123'000);
 [[nodiscard]] bool VerifyV2IngressProof(
     const TransactionBundle& bundle,
     const V2IngressContext& context,
@@ -605,7 +606,8 @@ BuildV2IngressSmileRingMembers(
     std::string& reject_reason,
     bool reject_rice_codec = false,
     bool bind_anonset_context = false,
-    int64_t validation_height = 0);  // C-002: consensus callers MUST pass real height
+    int64_t validation_height = 123'000,
+    int64_t c002_activation_height = 123'000);
 
 [[nodiscard]] std::optional<V2IngressBuildResult> BuildV2IngressBatchTransaction(
     const CMutableTransaction& tx_template,

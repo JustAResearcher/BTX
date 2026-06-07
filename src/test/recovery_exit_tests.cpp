@@ -17,6 +17,7 @@
 #include <shielded/note.h>
 #include <shielded/nullifier.h>
 #include <shielded/recovery_exit.h>
+#include <shielded/smile2/public_account.h>
 #include <shielded/smile2/wallet_bridge.h>
 #include <span.h>
 #include <streams.h>
@@ -77,6 +78,7 @@ std::optional<Fixture> TryMakeValid(CAmount value, CAmount fee)
     note.rho = f.claim.rho;
     note.rcm = f.claim.rcm;
     f.expected_cm = note.GetCommitment();
+    f.claim.note_commitment = f.expected_cm;
     const auto nf = smile2::wallet::ComputeSmileNullifierFromNote(
         smile2::wallet::SMILE_GLOBAL_SEED, note);
     if (!nf.has_value() || nf->IsNull()) return std::nullopt;
@@ -110,8 +112,9 @@ Fixture MakeValid(CAmount value, CAmount fee)
 
 BOOST_FIXTURE_TEST_SUITE(recovery_exit_tests, BasicTestingSetup)
 
-// The crux: consensus derives EXACTLY the normal-path SMILE2 nullifier and the note commitment, from the
-// revealed note alone (no key). This is what makes shared-set cross-path dedup possible.
+// The crux: consensus derives EXACTLY the normal-path SMILE2 nullifier from the revealed note (no key)
+// and only accepts a tree commitment deterministically bound to that note. This is what makes shared-set
+// cross-path dedup possible while still proving membership of the actual tree leaf.
 BOOST_AUTO_TEST_CASE(derives_exact_normal_path_smile_nullifier_and_commitment)
 {
     const Fixture f = MakeValid(50 * COIN, 1000);
@@ -122,6 +125,28 @@ BOOST_AUTO_TEST_CASE(derives_exact_normal_path_smile_nullifier_and_commitment)
     BOOST_CHECK(ids.commitment == f.expected_cm);
 }
 
+BOOST_AUTO_TEST_CASE(accepts_smile_compact_account_tree_commitment)
+{
+    Fixture f = MakeValid(50 * COIN, 1000);
+    ShieldedNote note;
+    note.value = f.claim.value;
+    note.recipient_pk_hash = f.claim.recipient_pk_hash;
+    note.rho = f.claim.rho;
+    note.rcm = f.claim.rcm;
+    const auto account = smile2::wallet::BuildCompactPublicAccountFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        note);
+    BOOST_REQUIRE(account.has_value());
+    f.claim.note_commitment = smile2::ComputeCompactPublicAccountHash(*account);
+
+    RecoveryExitIdentifiers ids;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(DeriveRecoveryExitIdentifiers(f.claim, ids, err), err);
+    BOOST_CHECK(ids.nullifier == f.expected_nf);
+    BOOST_CHECK(ids.commitment == f.claim.note_commitment);
+    BOOST_CHECK(ids.commitment != f.expected_cm);
+}
+
 BOOST_AUTO_TEST_CASE(rejects_pubkey_not_binding_to_note)
 {
     Fixture f = MakeValid(50 * COIN, 1000);
@@ -130,6 +155,16 @@ BOOST_AUTO_TEST_CASE(rejects_pubkey_not_binding_to_note)
     std::string err;
     BOOST_CHECK(!DeriveRecoveryExitIdentifiers(f.claim, ids, err));
     BOOST_CHECK_EQUAL(err, "bad-recovery-exit-pubkey-binding");
+}
+
+BOOST_AUTO_TEST_CASE(rejects_commitment_not_bound_to_note)
+{
+    Fixture f = MakeValid(50 * COIN, 1000);
+    f.claim.note_commitment = GetRandHash();
+    RecoveryExitIdentifiers ids;
+    std::string err;
+    BOOST_CHECK(!DeriveRecoveryExitIdentifiers(f.claim, ids, err));
+    BOOST_CHECK_EQUAL(err, "bad-recovery-exit-commitment-binding");
 }
 
 BOOST_AUTO_TEST_CASE(rejects_recovery_value_out_of_money_range)
@@ -383,6 +418,7 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_full_consensus_flow, BasicTestingSetup)
 
     RecoveryExitClaim claim;
     claim.value = note.value;
+    claim.note_commitment = cm;
     claim.recipient_pk_hash = note.recipient_pk_hash;
     claim.rho = note.rho;
     claim.rcm = note.rcm;

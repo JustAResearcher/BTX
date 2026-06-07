@@ -853,6 +853,7 @@ bool RecoveryExitPayload::IsValid() const
 {
     return version == WIRE_VERSION &&
            MoneyRange(value) && value > 0 &&
+           !note_commitment.IsNull() &&
            !recipient_pk_hash.IsNull() &&
            !rho.IsNull() &&
            !rcm.IsNull() &&

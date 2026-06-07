@@ -36,6 +36,7 @@ namespace shielded::recovery {
 /** The revealed claim a RECOVERY_EXIT carries. Everything here is public on the wire. */
 struct RecoveryExitClaim {
     CAmount value{0};
+    uint256 note_commitment;                  //!< actual shielded tree leaf being recovered
     uint256 recipient_pk_hash;                 //!< SHA256(spend_pubkey); commits the note to its key
     uint256 rho;
     uint256 rcm;
@@ -82,11 +83,13 @@ struct RecoveryExitIdentifiers {
     uint256 nullifier;    //!< retired in the SHARED nullifier set (blocks cross-path / pre-spent re-claim)
 };
 
-/** Reconstruct the note from the claim, verify the pubkey binds to recipient_pk_hash, and derive BOTH
+/** Reconstruct the note from the claim, verify the pubkey binds to recipient_pk_hash, verify that the
+ *  claimed tree commitment is a deterministic commitment for that revealed note, and derive BOTH
  *  the commitment and the EXACT canonical normal-exit nullifier
  *  (= ComputeSmileNullifierFromNote(SMILE_GLOBAL_SEED, note), the same one a post-sunset V2_SEND unshield
  *  of this note reveals). Returns false (with reason) if the revealed pubkey does not hash to
- *  recipient_pk_hash, or if the note is not eligible for a consensus-derivable SMILE2 nullifier. */
+ *  recipient_pk_hash, if the claimed tree commitment is not bound to the note, or if the note is not
+ *  eligible for a consensus-derivable SMILE2 nullifier. */
 [[nodiscard]] bool DeriveRecoveryExitIdentifiers(const RecoveryExitClaim& claim,
                                                  RecoveryExitIdentifiers& out,
                                                  std::string& reject_reason);

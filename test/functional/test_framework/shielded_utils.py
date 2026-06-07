@@ -64,7 +64,7 @@ def ensure_ring_diversity(test, node, wallet, mine_addr, zaddr, min_notes=16, to
         except JSONRPCException as e:
             if (
                 e.error.get("code") == -4
-                and "post-fork direct transparent shielding is disabled; use bridge ingress"
+                and "post-fork direct transparent shielding is disabled; after the v0.32 sunset"
                 in e.error.get("message", "")
             ):
                 tx = wallet.z_sendmany([{"address": zaddr, "amount": topup_amount}])

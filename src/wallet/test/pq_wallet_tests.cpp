@@ -11,11 +11,14 @@
 #include <key_io.h>
 #include <outputtype.h>
 #include <pqkey.h>
+#include <psbt.h>
 #include <script/descriptor.h>
 #include <script/interpreter.h>
 #include <script/pqm.h>
 #include <script/script.h>
+#include <script/sign.h>
 #include <script/solver.h>
+#include <shielded/smile2/ct_proof.h>
 #include <test/util/shielded_v2_egress_fixture.h>
 #include <test/util/setup_common.h>
 #include <tinyformat.h>
@@ -38,6 +41,7 @@ namespace wallet {
 namespace {
 
 static constexpr int64_t P2MR_TEST_RANGE_END{2};
+static constexpr unsigned int SLHDSA_FIPS205_SCRIPT_VERIFY_FLAGS{STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_SLHDSA_FIPS205};
 
 std::array<unsigned char, 32> MakePQSeed(unsigned char seed)
 {
@@ -156,6 +160,82 @@ bool SignAndCheckP2MRTransaction(const std::shared_ptr<CWallet>& wallet, CMutabl
     return serror == SCRIPT_ERR_OK;
 }
 
+struct DirectP2MRSpendFixture {
+    FlatSigningProvider provider;
+    Coin prev_coin;
+    CMutableTransaction tx;
+    std::map<COutPoint, Coin> coins;
+};
+
+DirectP2MRSpendFixture MakeDirectP2MRSpendFixture(const std::string& desc_str, unsigned char prev_txid_seed)
+{
+    FlatSigningProvider descriptor_keys;
+    std::string error;
+    auto parsed = Parse(desc_str, descriptor_keys, error, /*require_checksum=*/true);
+    BOOST_REQUIRE_MESSAGE(!parsed.empty(), "descriptor parse failed: " + error + " desc=" + desc_str);
+    BOOST_REQUIRE_EQUAL(parsed.size(), 1U);
+
+    FlatSigningProvider provider;
+    std::vector<CScript> scripts;
+    BOOST_REQUIRE(parsed[0]->Expand(0, descriptor_keys, scripts, provider));
+    parsed[0]->ExpandPrivate(0, descriptor_keys, provider);
+    BOOST_REQUIRE_EQUAL(scripts.size(), 1U);
+
+    const COutPoint prevout{Txid::FromUint256(uint256{prev_txid_seed}), 0};
+    const CAmount input_value{25 * COIN};
+    Coin prev_coin{CTxOut{input_value, scripts[0]}, /*nHeight=*/1, /*fCoinBase=*/false};
+
+    CMutableTransaction tx;
+    tx.vin.emplace_back(prevout);
+    tx.vout.emplace_back(input_value - 1000, scripts[0]);
+
+    std::map<COutPoint, Coin> coins;
+    coins.emplace(prevout, prev_coin);
+
+    return {std::move(provider), std::move(prev_coin), std::move(tx), std::move(coins)};
+}
+
+bool SignDirectP2MRSpend(DirectP2MRSpendFixture& fixture,
+                         bool slhdsa_fips205,
+                         std::optional<PQAlgorithm> preferred_pq_signing_algo = std::nullopt)
+{
+    std::map<int, bilingual_str> input_errors;
+    const bool signed_ok = ::SignTransaction(fixture.tx,
+                                             &fixture.provider,
+                                             fixture.coins,
+                                             SIGHASH_DEFAULT,
+                                             input_errors,
+                                             /*inputs_amount_sum=*/nullptr,
+                                             preferred_pq_signing_algo,
+                                             slhdsa_fips205);
+    return signed_ok && input_errors.empty();
+}
+
+bool VerifyDirectP2MRSpend(const CMutableTransaction& tx, const Coin& prev_coin, unsigned int flags, ScriptError* serror_out = nullptr)
+{
+    const CTransaction tx_const{tx};
+    PrecomputedTransactionData txdata;
+    txdata.Init(tx_const, {prev_coin.out}, /*force=*/true);
+    ScriptError serror = SCRIPT_ERR_OK;
+    const bool ok = VerifyScript(tx.vin[0].scriptSig,
+                                 prev_coin.out.scriptPubKey,
+                                 &tx.vin[0].scriptWitness,
+                                 flags,
+                                 TransactionSignatureChecker(&tx_const, 0, prev_coin.out.nValue, txdata, MissingDataBehavior::FAIL),
+                                 &serror);
+    if (serror_out) *serror_out = serror;
+    return ok;
+}
+
+unsigned char SignedP2MRLeafOpcode(const CMutableTransaction& tx)
+{
+    BOOST_REQUIRE(tx.vin[0].scriptSig.empty());
+    BOOST_REQUIRE_EQUAL(tx.vin[0].scriptWitness.stack.size(), 3U);
+    const auto& leaf_script = tx.vin[0].scriptWitness.stack[1];
+    BOOST_REQUIRE(!leaf_script.empty());
+    return leaf_script.back();
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(pq_wallet_tests, WalletTestingSetup)
@@ -259,6 +339,86 @@ BOOST_AUTO_TEST_CASE(sign_p2mr_transaction_slhdsa_backup)
     BOOST_CHECK_EQUAL(leaf_script.back(), static_cast<unsigned char>(OP_CHECKSIG_SLHDSA));
     BOOST_CHECK_EQUAL(leaf_script.size(), SLHDSA128S_PUBKEY_SIZE + 2U);
     BOOST_CHECK_EQUAL(control.size(), 33U);
+}
+
+BOOST_AUTO_TEST_CASE(sign_p2mr_slhdsa_uses_matching_c002_signature_mode)
+{
+    BOOST_CHECK(!((smile2::SmileCTProof::C002_ACTIVATION_HEIGHT - 1) >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT));
+    BOOST_CHECK(123000 >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT);
+    BOOST_CHECK(123001 >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT);
+
+    const auto seed = MakePQSeed(0x24);
+    const std::vector<unsigned char> fixed_mldsa = MakePattern(MLDSA44_PUBKEY_SIZE, 0x64);
+    const std::string desc = AddChecksum("mr(" + HexStr(fixed_mldsa) + ",pk_slh(" + MakeP2MRKeyPathExpr(seed, /*internal=*/false) + "))");
+
+    auto legacy_fixture = MakeDirectP2MRSpendFixture(desc, /*prev_txid_seed=*/40);
+    BOOST_REQUIRE(SignDirectP2MRSpend(legacy_fixture, /*slhdsa_fips205=*/false));
+    BOOST_CHECK_EQUAL(SignedP2MRLeafOpcode(legacy_fixture.tx), static_cast<unsigned char>(OP_CHECKSIG_SLHDSA));
+    BOOST_CHECK_EQUAL(legacy_fixture.tx.vin[0].scriptWitness.stack[0].size(), SLHDSA128S_SIGNATURE_SIZE);
+    BOOST_CHECK(VerifyDirectP2MRSpend(legacy_fixture.tx, legacy_fixture.prev_coin, STANDARD_SCRIPT_VERIFY_FLAGS));
+    BOOST_CHECK(!VerifyDirectP2MRSpend(legacy_fixture.tx, legacy_fixture.prev_coin, SLHDSA_FIPS205_SCRIPT_VERIFY_FLAGS));
+
+    auto fips_fixture = MakeDirectP2MRSpendFixture(desc, /*prev_txid_seed=*/41);
+    BOOST_REQUIRE(SignDirectP2MRSpend(fips_fixture, /*slhdsa_fips205=*/true));
+    BOOST_CHECK_EQUAL(SignedP2MRLeafOpcode(fips_fixture.tx), static_cast<unsigned char>(OP_CHECKSIG_SLHDSA));
+    BOOST_CHECK_EQUAL(fips_fixture.tx.vin[0].scriptWitness.stack[0].size(), SLHDSA128S_SIGNATURE_SIZE);
+    BOOST_CHECK(VerifyDirectP2MRSpend(fips_fixture.tx, fips_fixture.prev_coin, SLHDSA_FIPS205_SCRIPT_VERIFY_FLAGS));
+    BOOST_CHECK(!VerifyDirectP2MRSpend(fips_fixture.tx, fips_fixture.prev_coin, STANDARD_SCRIPT_VERIFY_FLAGS));
+
+    BOOST_CHECK(!VerifyDirectP2MRSpend(legacy_fixture.tx, legacy_fixture.prev_coin, SLHDSA_FIPS205_SCRIPT_VERIFY_FLAGS));
+    BOOST_CHECK(VerifyDirectP2MRSpend(fips_fixture.tx, fips_fixture.prev_coin, SLHDSA_FIPS205_SCRIPT_VERIFY_FLAGS));
+}
+
+BOOST_AUTO_TEST_CASE(psbt_sign_p2mr_slhdsa_uses_c002_signature_mode)
+{
+    const auto seed = MakePQSeed(0x25);
+    const std::vector<unsigned char> fixed_mldsa = MakePattern(MLDSA44_PUBKEY_SIZE, 0x65);
+    const std::string desc = AddChecksum("mr(" + HexStr(fixed_mldsa) + ",pk_slh(" + MakeP2MRKeyPathExpr(seed, /*internal=*/false) + "))");
+    auto fixture = MakeDirectP2MRSpendFixture(desc, /*prev_txid_seed=*/42);
+
+    PartiallySignedTransaction psbt{fixture.tx};
+    psbt.inputs.at(0).witness_utxo = fixture.prev_coin.out;
+    const PrecomputedTransactionData txdata = PrecomputePSBTData(psbt);
+
+    BOOST_REQUIRE(SignPSBTInput(fixture.provider,
+                                psbt,
+                                /*index=*/0,
+                                &txdata,
+                                SIGHASH_DEFAULT,
+                                /*out_sigdata=*/nullptr,
+                                /*finalize=*/true,
+                                /*slhdsa_fips205=*/true));
+    BOOST_CHECK(PSBTInputSignedAndVerified(psbt, /*input_index=*/0, &txdata, /*slhdsa_fips205=*/true));
+    BOOST_CHECK(!PSBTInputSignedAndVerified(psbt, /*input_index=*/0, &txdata, /*slhdsa_fips205=*/false));
+
+    CMutableTransaction extracted;
+    BOOST_REQUIRE(FinalizeAndExtractPSBT(psbt, extracted, /*slhdsa_fips205=*/true));
+    BOOST_CHECK_EQUAL(SignedP2MRLeafOpcode(extracted), static_cast<unsigned char>(OP_CHECKSIG_SLHDSA));
+    BOOST_CHECK(VerifyDirectP2MRSpend(extracted, fixture.prev_coin, SLHDSA_FIPS205_SCRIPT_VERIFY_FLAGS));
+    BOOST_CHECK(!VerifyDirectP2MRSpend(extracted, fixture.prev_coin, STANDARD_SCRIPT_VERIFY_FLAGS));
+}
+
+BOOST_AUTO_TEST_CASE(sign_p2mr_prefers_mldsa_when_available_and_slhdsa_fallback_when_needed)
+{
+    const auto dual_seed = MakePQSeed(0x26);
+    WalletDescriptor dual_desc = GeneratePQWalletDescriptor(dual_seed, /*internal=*/false);
+    std::string dual_desc_str;
+    BOOST_REQUIRE(dual_desc.descriptor->ToPrivateString(DUMMY_SIGNING_PROVIDER, dual_desc_str));
+
+    auto dual_fixture = MakeDirectP2MRSpendFixture(dual_desc_str, /*prev_txid_seed=*/43);
+    BOOST_REQUIRE(SignDirectP2MRSpend(dual_fixture, /*slhdsa_fips205=*/true, PQAlgorithm::ML_DSA_44));
+    BOOST_CHECK_EQUAL(SignedP2MRLeafOpcode(dual_fixture.tx), static_cast<unsigned char>(OP_CHECKSIG_MLDSA));
+    BOOST_CHECK_EQUAL(dual_fixture.tx.vin[0].scriptWitness.stack[0].size(), MLDSA44_SIGNATURE_SIZE);
+    BOOST_CHECK(VerifyDirectP2MRSpend(dual_fixture.tx, dual_fixture.prev_coin, SLHDSA_FIPS205_SCRIPT_VERIFY_FLAGS));
+
+    const auto slh_seed = MakePQSeed(0x27);
+    const std::vector<unsigned char> fixed_mldsa = MakePattern(MLDSA44_PUBKEY_SIZE, 0x67);
+    const std::string slh_fallback_desc = AddChecksum("mr(" + HexStr(fixed_mldsa) + ",pk_slh(" + MakeP2MRKeyPathExpr(slh_seed, /*internal=*/false) + "))");
+    auto slh_fixture = MakeDirectP2MRSpendFixture(slh_fallback_desc, /*prev_txid_seed=*/44);
+    BOOST_REQUIRE(SignDirectP2MRSpend(slh_fixture, /*slhdsa_fips205=*/true, PQAlgorithm::ML_DSA_44));
+    BOOST_CHECK_EQUAL(SignedP2MRLeafOpcode(slh_fixture.tx), static_cast<unsigned char>(OP_CHECKSIG_SLHDSA));
+    BOOST_CHECK_EQUAL(slh_fixture.tx.vin[0].scriptWitness.stack[0].size(), SLHDSA128S_SIGNATURE_SIZE);
+    BOOST_CHECK(VerifyDirectP2MRSpend(slh_fixture.tx, slh_fixture.prev_coin, SLHDSA_FIPS205_SCRIPT_VERIFY_FLAGS));
 }
 
 BOOST_AUTO_TEST_CASE(sign_p2mr_transaction_multisig_leaf)

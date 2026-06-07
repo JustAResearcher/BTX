@@ -360,7 +360,8 @@ std::optional<SmileProofResult> CreateSmileProof(
     SmileProofCodecPolicy codec_policy,
     bool bind_anonset_context,
     std::string* error,
-    int64_t validation_height)
+    int64_t validation_height,
+    int64_t c002_activation_height)
 {
     static_assert(shielded::lattice::MAX_RING_SIZE <= NUM_NTT_SLOTS,
                   "DIRECT_SMILE supported ring size ceiling must fit in one SMILE recursion round");
@@ -473,7 +474,8 @@ std::optional<SmileProofResult> CreateSmileProof(
                                 public_fee,
                                 bind_anonset_context,
                                 &prove_error,
-                                validation_height);
+                                validation_height,
+                                c002_activation_height);
         if (!proof.has_value()) {
             LogDebug(BCLog::VALIDATION, "CreateSmileProof: ProveCT exhausted or rejected attempt=%u\n", attempt);
             continue;

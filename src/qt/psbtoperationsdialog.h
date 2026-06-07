@@ -46,6 +46,7 @@ private:
     };
 
     size_t couldSignInputs(const PartiallySignedTransaction &psbtx);
+    bool slhdsaFips205ForNextBlock() const;
     void updateTransactionDisplay();
     QString renderTransaction(const PartiallySignedTransaction &psbtx);
     void showStatus(const QString &msg, StatusLevel level);

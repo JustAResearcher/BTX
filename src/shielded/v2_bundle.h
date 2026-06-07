@@ -873,6 +873,7 @@ struct RecoveryExitPayload
 {
     uint8_t version{WIRE_VERSION};
     CAmount value{0};
+    uint256 note_commitment;
     uint256 recipient_pk_hash;
     uint256 rho;
     uint256 rcm;
@@ -889,6 +890,7 @@ struct RecoveryExitPayload
                                  version,
                                  "RecoveryExitPayload::Serialize invalid version");
         ::Serialize(s, value);
+        ::Serialize(s, note_commitment);
         ::Serialize(s, recipient_pk_hash);
         ::Serialize(s, rho);
         ::Serialize(s, rcm);
@@ -913,6 +915,7 @@ struct RecoveryExitPayload
                                    version,
                                    "RecoveryExitPayload::Unserialize invalid version");
         ::Unserialize(s, value);
+        ::Unserialize(s, note_commitment);
         ::Unserialize(s, recipient_pk_hash);
         ::Unserialize(s, rho);
         ::Unserialize(s, rcm);

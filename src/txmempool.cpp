@@ -633,7 +633,7 @@ namespace {
     if (!std::holds_alternative<shielded::v2::RecoveryExitPayload>(v2b->payload)) return false;
     const auto& p = std::get<shielded::v2::RecoveryExitPayload>(v2b->payload);
     shielded::recovery::RecoveryExitClaim claim;
-    claim.value = p.value; claim.recipient_pk_hash = p.recipient_pk_hash; claim.rho = p.rho; claim.rcm = p.rcm;
+    claim.value = p.value; claim.note_commitment = p.note_commitment; claim.recipient_pk_hash = p.recipient_pk_hash; claim.rho = p.rho; claim.rcm = p.rcm;
     claim.spend_pubkey = p.spend_pubkey; claim.ownership_sig = p.ownership_sig; claim.membership_proof = p.membership_proof;
     shielded::recovery::RecoveryExitIdentifiers ids; std::string rr;
     if (!shielded::recovery::DeriveRecoveryExitIdentifiers(claim, ids, rr)) return false;

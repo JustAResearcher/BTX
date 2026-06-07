@@ -24,7 +24,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.32.1 \
+  --release-tag v0.32.2 \
   --preset miner \
   --datadir="$HOME/.btx"
 ```
@@ -53,7 +53,7 @@ progress on stderr and prints a clean JSON summary on stdout:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.32.1 \
+  --release-tag v0.32.2 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"
@@ -158,17 +158,17 @@ btx-cli getbalances
 btx-cli z_gettotalbalance
 ```
 
-Shielding mature coinbase rewards or prefork-compatible transparent ingress safely:
+Historical/pre-sunset transparent-to-shielded compatibility flows:
 
 ```bash
 btx-cli -rpcwallet=mywallet z_planshieldfunds 25.0 "btxs1..."
 btx-cli -rpcwallet=mywallet z_shieldfunds 25.0 "btxs1..."
 ```
 
-See [btx-shielded-sweep-best-practices.md](btx-shielded-sweep-best-practices.md)
-for chunking, fees, and stuck-transaction recovery. After `61000`, those RPCs
-are limited to mature coinbase compatibility sweeps; use bridge ingress for
-general transparent deposits.
+Do not use these as current production ingress after the v0.32 sunset: new
+shielded credits are disabled by consensus. See
+[btx-shielded-sweep-best-practices.md](btx-shielded-sweep-best-practices.md)
+for historical chunking, fees, and stuck-transaction recovery.
 
 ## 3. Self-custody mining and useful-work APIs
 

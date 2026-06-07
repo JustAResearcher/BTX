@@ -164,10 +164,9 @@ struct SmileCTProof {
     // Post-activation spends MUST be v3; v2 is historical/pre-fork only.
     static constexpr uint8_t WIRE_VERSION_C002_HARDENED{3};
     // C-002 staged activation height. Anonset-bound spends are v2 (legacy) before
-    // this height and v3 (C-002/R5 hardened) at/after it. Single source of truth
-    // shared by prover, verifier (verify_dispatch), serialization, the SLH-DSA
-    // FIPS-205 script flags, the bridge attestor verification, and the self-serve
-    // z->t unshield gate. (regtest builds may lower this for cross-activation tests.)
+    // this height and v3 (C-002/R5 hardened) at/after it. Keep this default in
+    // sync with Consensus::Params::nShieldedC002ActivationHeight; node runtime
+    // paths use the consensus param, while low-level helpers may fall back here.
     static constexpr int64_t C002_ACTIVATION_HEIGHT{123000};
 
     // Legacy proofs are versionless on the wire. Post-61000 hardened proofs
@@ -324,7 +323,8 @@ std::optional<SmileCTProof> TryProveCT(
     std::string* error = nullptr,
     // Default = activation height ⇒ existing callers produce v3. Consensus/wallet
     // callers MUST pass the real target block height (see C002_ACTIVATION_SAFETY).
-    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
+    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT,
+    int64_t c002_activation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
 
 // Legacy wrapper used by existing tests and helper call sites that still
 // treat failure as an empty/default proof object.
@@ -335,7 +335,8 @@ SmileCTProof ProveCT(
     uint64_t rng_seed,
     int64_t public_fee = 0,
     bool bind_anonset_context = false,
-    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
+    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT,
+    int64_t c002_activation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
 
 [[nodiscard]] size_t GetCtRejectionRetryBudget();
 [[nodiscard]] size_t GetCtTimingPaddingAttemptLimit();

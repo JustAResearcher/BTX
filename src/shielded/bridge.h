@@ -1660,7 +1660,9 @@ struct BridgeAttestationMessage
 // used only for non-authoritative structural checks (IsValid()/deserialize/operator tooling), where
 // the block height that fixes the scheme is not available; the authoritative, height-exact check is
 // performed in the consensus verification path.
-[[nodiscard]] bool BridgeAttestorUsesFips205AtHeight(int64_t validation_height);
+[[nodiscard]] bool BridgeAttestorUsesFips205AtHeight(
+    int64_t validation_height,
+    int64_t c002_activation_height = 123'000);
 [[nodiscard]] bool VerifyBridgeBatchReceipt(const BridgeBatchReceipt& receipt, bool slhdsa_fips205 = false);
 [[nodiscard]] bool VerifyBridgeBatchReceiptAnyMode(const BridgeBatchReceipt& receipt);
 // Authoritative, height-exact verification of a set of attestor batch receipts: every receipt's
@@ -1668,7 +1670,8 @@ struct BridgeAttestationMessage
 // C-002, round-3 before). Use on consensus bridge-OUT paths so a wrong-scheme (e.g. downgraded
 // round-3) receipt cannot be accepted post-activation the way VerifyBridgeBatchReceiptAnyMode allows.
 [[nodiscard]] bool VerifyBridgeBatchReceiptsModeExact(Span<const BridgeBatchReceipt> receipts,
-                                                      int64_t validation_height);
+                                                      int64_t validation_height,
+                                                      int64_t c002_activation_height = 123'000);
 [[nodiscard]] uint256 ComputeBridgeBatchReceiptLeafHash(const BridgeBatchReceipt& receipt);
 [[nodiscard]] size_t CountDistinctBridgeBatchReceiptAttestors(Span<const BridgeBatchReceipt> receipts);
 [[nodiscard]] uint256 ComputeBridgeBatchReceiptRoot(Span<const BridgeBatchReceipt> receipts);
@@ -1717,7 +1720,8 @@ struct BridgeAttestationMessage
 [[nodiscard]] uint256 ComputeBridgeBatchLeafDestinationTag(const BridgeBatchAuthorization& authorization,
                                                            int32_t height);
 [[nodiscard]] std::optional<BridgeBatchLeaf> BuildBridgeBatchLeafFromAuthorization(const BridgeBatchAuthorization& authorization,
-                                                                                   int32_t height);
+                                                                                   int32_t height,
+                                                                                   int64_t c002_activation_height = 123'000);
 [[nodiscard]] std::optional<BridgeBatchLeaf> BuildBridgeBatchLeafFromAuthorization(const BridgeBatchAuthorization& authorization);
 [[nodiscard]] std::vector<uint8_t> SerializeBridgeBatchCommitment(const BridgeBatchCommitment& commitment);
 [[nodiscard]] std::optional<BridgeBatchCommitment> DeserializeBridgeBatchCommitment(Span<const uint8_t> bytes);

@@ -468,6 +468,9 @@ public:
     /** Lookup local note record by nullifier. */
     [[nodiscard]] std::optional<ShieldedCoin> GetCoinByNullifier(const Nullifier& nf) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    /** Lookup local note record by shielded tree commitment. */
+    [[nodiscard]] std::optional<ShieldedCoin> GetCoinByCommitment(const uint256& commitment) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
     /** Resolve the exact note set spent by an in-mempool shielded wallet transaction. */
     [[nodiscard]] std::optional<std::vector<ShieldedCoin>> GetConflictSpendSelection(
         const uint256& txid,

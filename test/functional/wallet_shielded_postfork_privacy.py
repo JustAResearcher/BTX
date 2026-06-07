@@ -83,7 +83,7 @@ class WalletShieldedPostForkPrivacyTest(BitcoinTestFramework):
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
         assert_raises_rpc_error(
             -4,
-            "post-fork direct transparent shielding is limited to mature coinbase outputs; use bridge ingress for general transparent deposits",
+            "post-fork direct transparent shielding is limited to mature coinbase outputs; after the v0.32 sunset",
             deposit_wallet.z_shieldfunds,
             Decimal("0.25"),
             deposit_wallet.z_getnewaddress(),
@@ -283,7 +283,7 @@ class WalletShieldedPostForkPrivacyTest(BitcoinTestFramework):
         self.log.info("Post-fork transparent-to-shielded fallback APIs are disabled in favor of explicit ingress")
         assert_raises_rpc_error(
             -4,
-            "post-fork direct transparent shielding is disabled; use bridge ingress",
+            "post-fork direct transparent shielding is disabled; after the v0.32 sunset",
             deposit_wallet.z_sendmany,
             [{"address": wallet.z_getnewaddress(), "amount": Decimal("0.00000001")}],
         )

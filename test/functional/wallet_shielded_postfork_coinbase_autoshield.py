@@ -22,9 +22,9 @@ class WalletShieldedPostForkCoinbaseAutoshieldTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.extra_args = [[
             f"-regtestshieldedmatrictdisableheight={DISABLE_HEIGHT}",
-            # v0.32.0: auto-shield is now opt-in (default off) + gated to the C-002 height; on regtest
-            # the gate floor defaults to 0, so just enabling it exercises auto-shield as before.
+            # v0.32.2: auto-shield is opt-in (default off) + gated to the C-002 height.
             "-autoshieldcoinbase=1",
+            "-autoshieldcoinbaseminheight=0",
         ]]
         self.rpc_timeout = 1200
 
@@ -41,7 +41,7 @@ class WalletShieldedPostForkCoinbaseAutoshieldTest(BitcoinTestFramework):
         self.generatetoaddress(node, 102, mine_addr, sync_fun=self.no_op)
         assert_equal(node.getblockcount(), 102)
 
-        self.log.info("Wait for the default autoshield path to enqueue a mature-coinbase shielding transaction")
+        self.log.info("Wait for the opt-in autoshield path to enqueue a mature-coinbase shielding transaction")
         self.wait_until(lambda: len(node.getrawmempool()) >= 1, timeout=120)
         txid = node.getrawmempool()[0]
         tx_view = wallet.z_viewtransaction(txid)

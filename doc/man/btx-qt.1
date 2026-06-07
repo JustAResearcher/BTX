@@ -1,12 +1,12 @@
 .\" DO NOT MODIFY THIS FILE! It was generated from btx-qt --help output.
-.TH BTX-QT "1" "June 2026" "btx-qt v0.32.1" "User Commands"
+.TH BTX-QT "1" "June 2026" "btx-qt v0.32.2" "User Commands"
 .SH NAME
-btx-qt \- manual page for btx-qt v0.32.1
+btx-qt \- manual page for btx-qt v0.32.2
 .SH SYNOPSIS
 .B btx-qt
 [\fIoptions\fR] [\fIURI\fR]
 .SH DESCRIPTION
-BTX version v0.32.1
+BTX version v0.32.2
 .PP
 The btx\-qt application provides a graphical interface for interacting with BTX.
 .PP
@@ -515,7 +515,8 @@ What type of addresses to use (supported: "p2mr", default: "p2mr")
 \fB\-autoshieldcoinbase\fR
 .IP
 Automatically shield mature coinbase outputs into the shielded pool when
-a new block arrives (default: true)
+a new block arrives (default: false). Disabled once shielded pool credits are
+disabled by consensus.
 .HP
 \fB\-avoidpartialspends\fR
 .IP

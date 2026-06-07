@@ -659,7 +659,11 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     if (m_mempool) {
         CTxMemPool& mutable_mempool{*const_cast<CTxMemPool*>(m_mempool)};
         LOCK(mutable_mempool.cs);
-        RemoveStaleShieldedAnchorMempoolTransactions(mutable_mempool, m_chainstate.m_chain, m_chainstate.m_chainman);
+        RemoveStaleShieldedAnchorMempoolTransactions(
+            mutable_mempool,
+            m_chainstate.m_chain,
+            m_chainstate.m_chainman,
+            &m_chainstate);
         addPriorityTxs(mutable_mempool, nPackagesSelected);
         addPackageTxs(mutable_mempool, nPackagesSelected, nDescendantsUpdated);
     }

@@ -115,7 +115,7 @@ RPCHelpMan walletpassphrase()
         // (CWallet::blockConnected -> MaybeAutoShieldCoinbase) already
         // checks the same flag with the same default; this brings the two
         // entry points back into agreement.
-        if (!shielded_state_rehydrated && gArgs.GetBoolArg("-autoshieldcoinbase", true)) {
+        if (!shielded_state_rehydrated && gArgs.GetBoolArg("-autoshieldcoinbase", false)) {
             pwallet->MaybeAutoShieldCoinbase();
         }
 

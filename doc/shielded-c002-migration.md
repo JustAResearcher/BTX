@@ -1,4 +1,4 @@
-# BTX v0.31 — Shielded (SMILE2) C-002 / R5 migration guide
+# BTX v0.32.2 — Shielded (SMILE2) C-002 / R5 migration guide
 
 This release hard-forks the shielded confidential-transaction layer to close a
 value-conservation / inflation hole (C-002) and add a real amount range proof
@@ -13,7 +13,7 @@ why **no user action is required**, and that **no honest funds are lost or stuck
 - After height 123,000, when you spend any shielded note (old or new), your wallet
   automatically builds the new hardened (v3) spend proof from data it already has
   (amount, opening, spend key). You won't notice the difference.
-- Just upgrade all your nodes/wallets to v0.31 before height 123,000.
+- Just upgrade all your nodes/wallets to v0.32.2 or later.
 
 ## What actually changes
 C-002 is a **spend-proof upgrade, not a note migration**. A shielded note is a
@@ -32,7 +32,10 @@ The switch is automatic and height-driven on both sides:
 - **Verifier** (`ValidateSmile2Proof`) requires the matching version for the block
   height, on every spend path (direct send, ingress batch, verifier-set).
 
-`SmileCTProof::C002_ACTIVATION_HEIGHT = 123000` is the single source of truth.
+Mainnet keeps C-002 at height 123,000. Runtime validation uses the network
+consensus parameter `nShieldedC002ActivationHeight`, whose default is
+`SmileCTProof::C002_ACTIVATION_HEIGHT = 123000`; regtest may lower that value
+only through `-regtestshieldedc002activationheight` for focused activation tests.
 
 The same activation height co-activates the rest of the v0.31 post-quantum
 hardening, all keyed on this one constant: rejection of legacy secp256k1
@@ -52,11 +55,8 @@ shielded→transparent (z→t) unshield. There is one flag day for the whole bun
   never silently drops or loses funds.
 
 ## Operator / node-runner checklist
-1. **Upgrade all nodes to v0.31 before height 123,000.** Because the v3 proof
-   format is not parseable by v0.30, the network must be fully upgraded before the
-   cutover (standard for a mandatory hard fork). During the pre-activation window,
-   v0.31 nodes remain wire-compatible with each other and with any remaining v0.30
-   nodes (both speak v2).
+1. **Upgrade all nodes to v0.32.2 or later.** The current wallet and mempool
+   paths handle the C-002 signing and verification mode automatically.
 2. No reindex, no wallet rescan, no datadir migration is required.
 3. After height 123,000, confirm shielded sends succeed (they will emit v3).
 

@@ -117,6 +117,7 @@ CMutableTransaction BuildRecoveryExitTx()
 
     RecoveryExitPayload payload;
     payload.value = v.note.value;
+    payload.note_commitment = v.cm;
     payload.recipient_pk_hash = v.note.recipient_pk_hash;
     payload.rho = v.note.rho;
     payload.rcm = v.note.rcm;

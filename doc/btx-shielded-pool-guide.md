@@ -3,26 +3,28 @@
 This document covers the design, setup, and operational use of BTX's shielded
 transaction pool for node operators, wallet users, and application developers.
 
-For the current production architecture, verified benchmark numbers, and the
-current readiness assessment, start with
+For the pre-sunset architecture, verified benchmark numbers, and readiness
+assessment, see
 [doc/btx-shielded-production-status-2026-03-20.md](btx-shielded-production-status-2026-03-20.md).
-The older capacity analysis document is now historical context only.
+The older capacity analysis document is historical context only.
 
 ## Overview
 
 BTX's shielded pool provides **confidential transactions** where sender,
 receiver, and amount are hidden from public view. It is active from genesis
-(block 0) on all networks and is the **default destination for mining
-rewards** via auto-shield coinbase.
+(block 0) on all networks, but v0.32.2 production consensus disables new
+shielded credits and private shielded-output appends after the block-`125000`
+sunset. Mining rewards remain transparent by default.
 
 The shielded pool sits alongside BTX's transparent P2MR (post-quantum) layer.
-Users can freely move value between the transparent and shielded pools using
-shield/unshield operations.
+Before the v0.32 sunset, users could move value between the transparent and
+shielded pools using shield/unshield operations. Current production behavior is
+outflow-only for existing shielded value.
 
-### Current Production Backend
+### Pre-Sunset Backend
 
-As of `2026-03-24`, the reset-chain production surface is Smile-only and
-account-registry-backed:
+As of `2026-03-24`, the pre-sunset reset-chain production surface was
+Smile-only and account-registry-backed:
 
 - direct SMILE wallet spends are live for the shipped anonymity-set surface
   (`anon_set <= 32`, `rec_levels == 1`);
@@ -30,10 +32,9 @@ account-registry-backed:
   the configured ring size anywhere in the supported `8..32` range with
   `-shieldedringsize` without changing the transaction family or wire format;
 - proofless transparent-to-shielded wallet deposit, direct shielded send,
-  note merge, and mixed shielded-to-transparent unshield now all build on
-  `v2_send`;
-- shared-ring `BATCH_SMILE` ingress, egress, settlement, and rebalance are
-  all live and verified on `main`;
+  note merge, and mixed shielded-to-transparent unshield built on `v2_send`;
+- shared-ring `BATCH_SMILE` ingress, egress, settlement, and rebalance were
+  verified on `main` before the sunset;
 - full account-leaf payloads are committed in registry state, and future spend
   recovery comes from authenticated consensus state rather than inline output
   accounts;
@@ -48,6 +49,12 @@ account-registry-backed:
   prototype behavior;
 - MatRiCT and receipt-backed ingress remain in tree only as non-launch tooling,
   not as production backends.
+
+Current v0.32.2 production behavior is stricter: after block `125000`, the
+wallet and consensus layer disable new shielded credits, private
+shielded-output appends, bridge ingress/control rollover, and re-shielding.
+Existing shielded balances remain accounted, and supported post-sunset activity
+is strict transparent exit/recovery of legacy shielded value.
 
 Use
 [doc/btx-shielded-production-status-2026-03-20.md](btx-shielded-production-status-2026-03-20.md)
@@ -78,10 +85,11 @@ Current measured launch-surface figures are:
 - `32-output v2_egress`: `470,168` bytes, `433` proof bytes,
   `463.14 ms` full pipeline, `9.99 ms` verify.
 
-### Why Shielded by Default?
+### Historical Shielded-By-Default Goal
 
-1. **Privacy as baseline**: Mining rewards automatically enter the shielded
-   pool, establishing a privacy-first norm from the first block.
+1. **Privacy as baseline**: Early launch planning expected mining rewards to
+   enter the shielded pool. Current v0.32.2 production nodes keep mining rewards
+   transparent by default.
 2. **Fungibility**: Shielded coins cannot be distinguished by history, which
    improves fungibility across the network.
 3. **Post-quantum confidentiality**: Note encryption uses ML-KEM
@@ -218,7 +226,7 @@ No special configuration is needed. The relevant defaults are:
 
 ```ini
 # bitcoin.conf (legacy filename used by btxd) — shielded defaults (all implicit)
-# autoshieldcoinbase=1     # Auto-shield mature coinbase (default: on)
+# autoshieldcoinbase=0     # Auto-shield mature coinbase (default: off)
 # shieldedringsize=8       # Default direct ring size (supported range: 8..32)
 # NODE_SHIELDED is always advertised
 ```
@@ -312,27 +320,29 @@ btx-cli -rpcwallet=mywallet bridge_buildshieldtx "<plan_hex>" "<funding_txid>" 0
 
 ### Shielding Funds (Transparent → Shielded)
 
-There are three transparent-to-shielded entry surfaces, but only two remain
-wallet-local after the post-`61000` privacy fork:
+Before the v0.32 sunset, the wallet exposed transparent-to-shielded
+compatibility surfaces. After block `125000`, new shielded credits are disabled
+by consensus and these surfaces are not current production ingress.
 
-#### 1. Auto-Shield Coinbase (Default)
+#### 1. Auto-Shield Coinbase (Default Off)
 
-Mining rewards are automatically shielded when mature. This happens
-transparently on each new block with no user action required. After the
-post-`61000` privacy fork, this remains the supported wallet-compatible
-transparent deposit path for mining rewards.
+Mining rewards remain transparent by default. An operator can explicitly enable
+the legacy compatibility path with `-autoshieldcoinbase=1` on pre-sunset test or
+compatibility deployments, but v0.32.2 makes the path inert once shielded pool
+credits are disabled by consensus.
 
 ```bash
-# Disable auto-shielding if needed
-btxd -autoshieldcoinbase=0
+# Default production behavior: do not auto-shield mature coinbase.
+btxd
 ```
 
-Auto-shield batches up to 50 coinbase UTXOs per operation with a default
-fee of 0.0001 BTX.
+On historical/pre-sunset opt-in deployments, auto-shield batches up to 50
+coinbase UTXOs per operation with a default fee of 0.0001 BTX.
 
 #### 2. Manual Coinbase Shielding
 
-This RPC remains supported after the post-`61000` privacy fork.
+This RPC is retained for historical/pre-sunset compatibility. It should not be
+used as a production path for new shielded credits after the v0.32 sunset.
 
 ```bash
 # Shield all mature coinbase outputs
@@ -358,12 +368,13 @@ btx-cli -rpcwallet=mywallet z_shieldfunds 5.0 "btxs1..."
 btx-cli -rpcwallet=mywallet z_planshieldfunds 25.0 "btxs1..."
 ```
 
-`z_shieldfunds` now applies a conservative local batching policy for large
-transparent UTXO sets. Before `61000` it sweeps general transparent wallet
-funds `largest-first`. After `61000` it is limited to mature coinbase
-compatibility inputs and reports `coinbase-largest-first` in the returned
-policy object. General postfork transparent deposits should use the explicit
-bridge-ingress flow instead. The returned RPC object includes:
+`z_shieldfunds` applies a conservative local batching policy for large
+transparent UTXO sets on historical/pre-sunset deployments. Before `61000` it
+sweeps general transparent wallet funds `largest-first`. Between `61000` and
+the v0.32 sunset it is limited to mature coinbase compatibility inputs and
+reports `coinbase-largest-first` in the returned
+policy object. After the v0.32 sunset there is no current production
+transparent-to-shielded ingress path. The returned RPC object includes:
 
 - `txids`: all broadcast shielding transaction ids
 - `chunk_count`: number of chunks committed
@@ -437,8 +448,9 @@ Shielded spends require a **ring of 16 decoy commitments** from the global
 note commitment tree. On a new chain (e.g., regtest), the pool must accumulate
 at least 16 committed notes before shielded spends can succeed.
 
-In production, this happens naturally as mining rewards are auto-shielded. On
-regtest for testing, seed the pool first:
+On opt-in pre-sunset or test deployments this may happen as rewards are
+auto-shielded. Current production should not rely on automatic new shielded
+notes. On regtest for testing, seed the pool first:
 
 ```bash
 # Mine blocks to get mature coinbase
@@ -633,7 +645,7 @@ python3 scripts/live_regtest_realworld_validation.py
 
 | Flag | Default | Description |
 |---|---|---|
-| `-autoshieldcoinbase` | `1` | Auto-shield mature coinbase outputs |
+| `-autoshieldcoinbase` | `0` | Legacy opt-in auto-shield for mature coinbase outputs before shielded pool credits are disabled |
 | `NODE_SHIELDED` | always on | Advertise shielded relay support |
 | `nShieldedPoolActivationHeight` | `0` | Block height where shielded pool activates |
 | `MAX_SHIELDED_SPENDS_PER_TX` | `16` | Max shielded inputs per transaction |

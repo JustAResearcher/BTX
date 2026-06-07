@@ -1061,6 +1061,8 @@ public:
     bool GetBroadcastTransactions() const { return fBroadcastTransactions; }
     /** Set whether this wallet broadcasts transactions. */
     void SetBroadcastTransactions(bool broadcast) { fBroadcastTransactions = broadcast; }
+    /** Return whether wallet-authored transactions for the next block require FIPS-205 SLH-DSA signatures. */
+    bool SlhdsaFips205ForNextBlock() const;
 
     /** Return whether transaction can be abandoned */
     bool TransactionCanBeAbandoned(const uint256& hashTx) const;

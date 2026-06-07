@@ -115,7 +115,8 @@ std::optional<std::string> ValidateSmile2Proof(
     const CTPublicData& pub,
     int64_t public_fee,
     bool bind_anonset_context,
-    int64_t validation_height)
+    int64_t validation_height,
+    int64_t c002_activation_height)
 {
     // C-002 activation gate. At/after the activation height, every anonset-bound
     // SMILE spend (V2_SEND, V2_INGRESS_BATCH, verifier-set) MUST be wire v3
@@ -123,7 +124,7 @@ std::optional<std::string> ValidateSmile2Proof(
     // MANDATORY step-12 binding + balance/range relations. v2 (M4_HARDENED) is
     // historical/pre-activation only — accepting it post-H would let a prover
     // dodge the seed_z binding. Non-anonset (legacy) proofs are unaffected.
-    const bool require_c002 = validation_height >= SmileCTProof::C002_ACTIVATION_HEIGHT;
+    const bool require_c002 = validation_height >= c002_activation_height;
     const uint8_t expected_wire_version =
         !bind_anonset_context ? SmileCTProof::WIRE_VERSION_LEGACY
         : require_c002        ? SmileCTProof::WIRE_VERSION_C002_HARDENED
@@ -166,7 +167,8 @@ std::optional<std::string> VerifySmile2CTFromBytes(
     int64_t public_fee,
     bool reject_rice_codec,
     bool bind_anonset_context,
-    int64_t validation_height)
+    int64_t validation_height,
+    int64_t c002_activation_height)
 {
     SmileCTProof proof;
     auto parse_err = ParseSmile2Proof(proof_bytes,
@@ -183,7 +185,8 @@ std::optional<std::string> VerifySmile2CTFromBytes(
                                pub,
                                public_fee,
                                bind_anonset_context,
-                               validation_height);
+                               validation_height,
+                               c002_activation_height);
 }
 
 std::optional<std::string> ExtractSmile2SerialNumbers(

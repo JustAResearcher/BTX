@@ -9,6 +9,7 @@
 #include <primitives/transaction.h>
 #include <shielded/merkle_tree.h>
 #include <shielded/smile2/wallet_bridge.h>
+#include <shielded/smile2/public_account.h>
 #include <span.h>
 #include <streams.h>
 
@@ -123,8 +124,24 @@ bool DeriveRecoveryExitIdentifiers(const RecoveryExitClaim& claim,
         reject_reason = "bad-recovery-exit-value";
         return false;
     }
+    if (claim.note_commitment.IsNull()) {
+        reject_reason = "bad-recovery-exit-commitment";
+        return false;
+    }
     const ShieldedNote note = NoteFromClaim(claim);
-    out.commitment = note.GetCommitment();
+    const uint256 legacy_commitment = note.GetCommitment();
+    std::optional<uint256> smile_commitment;
+    if (const auto account = smile2::wallet::BuildCompactPublicAccountFromNote(
+            smile2::wallet::SMILE_GLOBAL_SEED,
+            note)) {
+        smile_commitment = smile2::ComputeCompactPublicAccountHash(*account);
+    }
+    if (claim.note_commitment != legacy_commitment &&
+        (!smile_commitment.has_value() || claim.note_commitment != *smile_commitment)) {
+        reject_reason = "bad-recovery-exit-commitment-binding";
+        return false;
+    }
+    out.commitment = claim.note_commitment;
     // Consensus DERIVES the exact normal-path nullifier from the NOTE itself (no claimant-supplied value,
     // no private key) — the same deterministic note->SMILE2 derivation a post-sunset V2_SEND unshield uses.
     // Byte-identical to what the normal path records => shared-set dedup closes the cross-path double-spend.

@@ -35,9 +35,11 @@ fork sense:
 
 ### Wallet / RPC Surface
 
-- Direct transparent public-flow `V2_SEND` is disabled after the fork, except
-  for the wallet's mature-coinbase shielding compatibility lane used by
-  `z_shieldcoinbase`, autoshield, and compatible coinbase-only sweep helpers.
+- Direct transparent public-flow `V2_SEND` is disabled after the fork. The
+  wallet's mature-coinbase shielding compatibility lane is not a current
+  production ingress path after the v0.32 sunset; `z_shieldcoinbase`,
+  autoshield, and compatible coinbase-only sweep helpers are kept only for
+  historical/pre-sunset compatibility.
 - Mixed direct shielded-to-transparent sends are disabled in favor of explicit
   bridge/egress settlement.
 - Default RPC responses redact sensitive note / value / family-disclosure

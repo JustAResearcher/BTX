@@ -333,6 +333,7 @@ UniValue ShieldedV2PayloadToUniv(const shielded::v2::TransactionBundle& bundle)
     case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT: {
         const auto& payload = std::get<shielded::v2::RecoveryExitPayload>(bundle.payload);
         out.pushKV("value", ValueFromAmount(payload.value));
+        out.pushKV("note_commitment", payload.note_commitment.GetHex());
         out.pushKV("recipient_pk_hash", payload.recipient_pk_hash.GetHex());
         out.pushKV("rho", payload.rho.GetHex());
         out.pushKV("rcm", payload.rcm.GetHex());

@@ -24,6 +24,7 @@ RecoveryExitPayload MakeRecoveryExitPayload()
 {
     RecoveryExitPayload payload;
     payload.value = 3 * COIN;
+    payload.note_commitment = uint256{0x10};
     payload.recipient_pk_hash = uint256{0x11};
     payload.rho = uint256{0x22};
     payload.rcm = uint256{0x33};
@@ -37,6 +38,7 @@ void CheckPayloadsEqual(const RecoveryExitPayload& a, const RecoveryExitPayload&
 {
     BOOST_CHECK_EQUAL(a.version, b.version);
     BOOST_CHECK_EQUAL(a.value, b.value);
+    BOOST_CHECK(a.note_commitment == b.note_commitment);
     BOOST_CHECK(a.recipient_pk_hash == b.recipient_pk_hash);
     BOOST_CHECK(a.rho == b.rho);
     BOOST_CHECK(a.rcm == b.rcm);
@@ -157,6 +159,7 @@ BOOST_AUTO_TEST_CASE(recovery_exit_oversize_spend_pubkey_throws_on_unserialize)
     DataStream ss{};
     shielded::v2::detail::SerializeVersion(ss, payload.version, "test version");
     ::Serialize(ss, payload.value);
+    ::Serialize(ss, payload.note_commitment);
     ::Serialize(ss, payload.recipient_pk_hash);
     ::Serialize(ss, payload.rho);
     ::Serialize(ss, payload.rcm);
@@ -172,6 +175,7 @@ BOOST_AUTO_TEST_CASE(recovery_exit_oversize_membership_proof_throws_on_unseriali
     DataStream ss{};
     shielded::v2::detail::SerializeVersion(ss, payload.version, "test version");
     ::Serialize(ss, payload.value);
+    ::Serialize(ss, payload.note_commitment);
     ::Serialize(ss, payload.recipient_pk_hash);
     ::Serialize(ss, payload.rho);
     ::Serialize(ss, payload.rcm);
