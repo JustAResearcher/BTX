@@ -918,6 +918,18 @@ struct PersistedTestChain100Setup : TestChain100Setup
     }
 };
 
+struct PoolCreditRetunePersistedTestChain100Setup : TestChain100Setup
+{
+    PoolCreditRetunePersistedTestChain100Setup()
+        : TestChain100Setup(
+              ChainType::REGTEST,
+              {.extra_args = {"-regtestshieldedpoolcreditdisableheight=125"},
+               .coins_db_in_memory = false,
+               .block_tree_db_in_memory = false})
+    {
+    }
+};
+
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_shielded_state_when_commitment_index_missing, PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -1863,7 +1875,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_limits_auto_repair_attempts_to_once_pe
     }
 }
 
-BOOST_FIXTURE_TEST_CASE(chainstatemanager_auto_repairs_stale_anchor_history_for_mempool_accept,
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_rejects_stale_anchor_history_for_mempool_accept,
                         TestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -1891,14 +1903,15 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_auto_repairs_stale_anchor_history_for_
         ::cs_main,
         return AcceptToMemoryPool(
             chainman.ActiveChainstate(), tx_ref, GetTime(), /*bypass_limits=*/true, /*test_accept=*/true));
-    BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+    BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-shielded-anchor");
 
     {
         LOCK(::cs_main);
-        BOOST_CHECK(chainman.IsShieldedAnchorValid(previous_root));
+        BOOST_CHECK(!chainman.IsShieldedAnchorValid(previous_root));
         BOOST_CHECK_EQUAL(
             chainman.GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind::ANCHOR_HISTORY),
-            1U);
+            0U);
     }
 }
 
@@ -2081,6 +2094,140 @@ BOOST_FIXTURE_TEST_CASE(
         CBlockIndex* reconsidered_index = chainman_restarted.m_blockman.LookupBlockIndex(invalid_hash);
         BOOST_REQUIRE(reconsidered_index != nullptr);
         BOOST_CHECK_EQUAL(reconsidered_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman_restarted.ActiveChainstate().ActivateBestChain(state));
+    BOOST_CHECK(state.IsValid());
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+        BOOST_CHECK_EQUAL(chainman_restarted.ActiveTip()->GetBlockHash(), invalid_hash);
+        CBlockIndex* reconsidered_index = chainman_restarted.m_blockman.LookupBlockIndex(invalid_hash);
+        BOOST_REQUIRE(reconsidered_index != nullptr);
+        BOOST_CHECK_EQUAL(reconsidered_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    chainstatemanager_startup_reconsiders_failed_pre_pool_credit_disable_shielded_block_after_consensus_retune,
+    PoolCreditRetunePersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
+
+    uint256 previous_root;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        const auto& anchor_roots = chainman.GetShieldedAnchorRoots();
+        BOOST_REQUIRE_GE(anchor_roots.size(), 2U);
+        previous_root = anchor_roots[1];
+        BOOST_REQUIRE(!previous_root.IsNull());
+    }
+
+    const CMutableTransaction shield_only_tx =
+        BuildLegacyShieldOnlyTx(*this, m_coinbase_txns[1], previous_root);
+    const CBlock invalid_block =
+        CreateBlock({shield_only_tx}, script_pub_key, chainman.ActiveChainstate(), /*use_mempool=*/false);
+    const uint256 invalid_hash = invalid_block.GetHash();
+    CBlockIndex* accepted_index{nullptr};
+
+    {
+        LOCK(::cs_main);
+        BlockValidationState accept_state;
+        bool new_block{false};
+        BOOST_REQUIRE(chainman.AcceptBlock(std::make_shared<const CBlock>(invalid_block),
+                                           accept_state,
+                                           &accepted_index,
+                                           /*fRequested=*/true,
+                                           /*dbp=*/nullptr,
+                                           &new_block,
+                                           /*min_pow_checked=*/true));
+        BOOST_REQUIRE(new_block);
+        BOOST_REQUIRE(accept_state.IsValid());
+        BOOST_REQUIRE(accepted_index != nullptr);
+        BOOST_REQUIRE_LT(accepted_index->nHeight,
+                         chainman.GetConsensus().nShieldedPoolCreditDisableHeight);
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_CHECK_NE(chainman.ActiveTip()->GetBlockHash(), invalid_hash);
+    }
+
+    BlockValidationState invalidate_state;
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(invalidate_state, accepted_index));
+    BOOST_REQUIRE(invalidate_state.IsValid());
+
+    {
+        LOCK(::cs_main);
+        CBlockIndex* invalid_index = chainman.m_blockman.LookupBlockIndex(invalid_hash);
+        BOOST_REQUIRE(invalid_index != nullptr);
+        BOOST_CHECK(invalid_index->nStatus & BLOCK_FAILED_VALID);
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_CHECK_NE(chainman.ActiveTip()->GetBlockHash(), invalid_hash);
+    }
+
+    auto restart_node = [&]() -> ChainstateManager& {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = current_chainman.m_options.datadir,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = current_chainman.m_options.datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman.reset();
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
+    };
+
+    ChainstateManager& chainman_restarted = restart_node();
+    node::ChainstateLoadOptions options;
+    options.mempool = Assert(m_node.mempool.get());
+    options.coins_db_in_memory = m_coins_db_in_memory;
+    options.wipe_chainstate_db = false;
+    options.prune = chainman_restarted.m_blockman.IsPruneMode();
+    options.check_blocks = m_args.GetIntArg("-checkblocks", DEFAULT_CHECKBLOCKS);
+    options.check_level = m_args.GetIntArg("-checklevel", DEFAULT_CHECKLEVEL);
+    options.require_full_verification =
+        m_args.IsArgSet("-checkblocks") || m_args.IsArgSet("-checklevel");
+    const auto load_result = node::LoadChainstate(chainman_restarted, m_kernel_cache_sizes, options);
+    BOOST_REQUIRE(std::get<0>(load_result) == node::ChainstateLoadStatus::SUCCESS);
+    const auto verify_result = node::VerifyLoadedChainstate(chainman_restarted, options);
+    BOOST_REQUIRE(std::get<0>(verify_result) == node::ChainstateLoadStatus::SUCCESS);
+
+    {
+        LOCK(::cs_main);
+        CBlockIndex* reconsidered_index = chainman_restarted.m_blockman.LookupBlockIndex(invalid_hash);
+        BOOST_REQUIRE(reconsidered_index != nullptr);
+        BOOST_CHECK_EQUAL(reconsidered_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+        BOOST_CHECK_NE(chainman_restarted.ActiveTip()->GetBlockHash(), invalid_hash);
     }
 
     BlockValidationState state;

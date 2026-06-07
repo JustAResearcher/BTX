@@ -296,12 +296,12 @@ BOOST_AUTO_TEST_CASE(regtest_shielded_sunset_height_rejects_negative)
     BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
 }
 
-BOOST_AUTO_TEST_CASE(ds3_unpinned_shielded_snapshot_fails_closed_by_default)
+BOOST_AUTO_TEST_CASE(ds3_unpinned_shielded_snapshot_is_bootstrap_compatible_by_default)
 {
-    // DS-3: a production node must REFUSE an assumeutxo snapshot whose shielded section has no consensus
-    // pin (mainnet pins ship null because they hash the real shielded state at each height and cannot be
-    // precomputed offline). The default is fail-closed; only -allowunpinnedshieldedsnapshot opts in.
-    BOOST_CHECK_EQUAL(DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT, false);
+    // DS-3 strict mode is still available with -allowunpinnedshieldedsnapshot=0, but the current
+    // shipped mainnet snapshots have null shielded pins. Default to compatibility until pinned
+    // snapshots are released, otherwise ordinary bootstrap users must pass a hidden safety valve.
+    BOOST_CHECK_EQUAL(DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT, true);
 }
 
 BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_no_gap)
@@ -314,6 +314,14 @@ BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_no_gap)
     const auto params = CreateChainParams(args, ChainType::MAIN);
     BOOST_REQUIRE(params);
     const auto& consensus = params->GetConsensus();
+    // Pool-credit shutdown is part of the 125,000 sunset package. It must not
+    // fire at the older C-002 proof-hardening height, or live nodes reject the
+    // pre-sunset chain with bad-shielded-pool-credit-disabled.
+    BOOST_CHECK_EQUAL(consensus.nShieldedPoolCreditDisableHeight,
+                      consensus.nShieldedSunsetHeight);
+    BOOST_CHECK(!consensus.IsShieldedPoolCreditDisabled(123'307));
+    BOOST_CHECK(!consensus.IsShieldedPoolCreditDisabled(consensus.nShieldedSunsetHeight - 1));
+    BOOST_CHECK(consensus.IsShieldedPoolCreditDisabled(consensus.nShieldedSunsetHeight));
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityActivationHeight,
                       consensus.nShieldedSunsetHeight);
     // At the sunset block the sunset gate and the velocity cap are simultaneously in force.
@@ -325,6 +333,21 @@ BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_no_gap)
     // drain is still throttled to half the pool per day. Locks the policy against silent regression.
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityCapBps, 5'000u);
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityWindowBlocks, 960u);
+}
+
+BOOST_AUTO_TEST_CASE(production_shielded_pool_credit_disable_aligns_with_sunset)
+{
+    // v0.32.0 was announced and deployed as the 125,000 activation release. Do not retroactively
+    // invalidate already-mined 123,000..124,999 history with the pool-credit gate.
+    ArgsManager args;
+    for (const ChainType net : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET}) {
+        const auto params = CreateChainParams(args, net);
+        BOOST_REQUIRE(params);
+        const auto& consensus = params->GetConsensus();
+        BOOST_CHECK_EQUAL(consensus.nShieldedPoolCreditDisableHeight, consensus.nShieldedSunsetHeight);
+        BOOST_CHECK(!consensus.IsShieldedPoolCreditDisabled(consensus.nShieldedSunsetHeight - 1));
+        BOOST_CHECK(consensus.IsShieldedPoolCreditDisabled(consensus.nShieldedSunsetHeight));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(recovery_exit_activates_with_shielded_sunset_on_production_networks)

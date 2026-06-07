@@ -1030,6 +1030,11 @@ private:
         return cs && !cs->m_disabled;
     }
 
+    void AutoReconsiderShieldedInvalidBlocks(
+        const std::function<bool(const CBlockIndex&)>& include_candidate,
+        const char* log_context,
+        const char* log_reason) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     //! A queue for script verifications that have to be performed by worker threads.
     CCheckQueue<CScriptCheck> m_script_check_queue;
     //! Queue for shielded proof verification worker threads.
@@ -1606,6 +1611,13 @@ public:
      * ActivateBestChain() can retry them once under repaired local state.
      */
     void AutoReconsiderShieldedInvalidBlocksAfterStartupRepair() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * After a shielded consensus activation retune, clear failure flags for
+     * failed pre-activation shielded blocks whose parent remains on the active
+     * chain so ActivateBestChain() can retry them under the current rules.
+     */
+    void AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Return true once per active tip for each automatic shielded repair class. */
     [[nodiscard]] bool MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind kind)

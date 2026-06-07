@@ -11556,7 +11556,10 @@ bool ChainstateManager::RepairShieldedAnchorHistoryFromActiveChain()
     return true;
 }
 
-void ChainstateManager::AutoReconsiderShieldedInvalidBlocksAfterStartupRepair()
+void ChainstateManager::AutoReconsiderShieldedInvalidBlocks(
+    const std::function<bool(const CBlockIndex&)>& include_candidate,
+    const char* log_context,
+    const char* log_reason)
 {
     AssertLockHeld(::cs_main);
     if (m_active_chainstate == nullptr) {
@@ -11567,13 +11570,15 @@ void ChainstateManager::AutoReconsiderShieldedInvalidBlocksAfterStartupRepair()
     for (auto& [_, block_index] : m_blockman.m_block_index) {
         if ((block_index.nStatus & BLOCK_FAILED_VALID) == 0) continue;
         if ((block_index.nStatus & BLOCK_HAVE_DATA) == 0) continue;
+        if (!include_candidate(block_index)) continue;
         if (block_index.pprev == nullptr || !m_active_chainstate->m_chain.Contains(block_index.pprev)) {
             continue;
         }
 
         CBlock block;
         if (!ReadShieldedRebuildBlock(*m_active_chainstate, block_index, block)) {
-            LogPrintf("AutoReconsiderShieldedInvalidBlocksAfterStartupRepair: failed to read candidate block %s at height=%d\n",
+            LogPrintf("%s: failed to read candidate block %s at height=%d\n",
+                      log_context,
                       block_index.GetBlockHash().ToString(),
                       block_index.nHeight);
             continue;
@@ -11591,18 +11596,45 @@ void ChainstateManager::AutoReconsiderShieldedInvalidBlocksAfterStartupRepair()
     size_t reconsidered{0};
     for (CBlockIndex* candidate : candidates) {
         if ((candidate->nStatus & BLOCK_FAILED_VALID) == 0) continue;
-        LogPrintf("AutoReconsiderShieldedInvalidBlocksAfterStartupRepair: clearing failure flags for block %s at height=%d after startup shielded repair\n",
+        LogPrintf("%s: clearing failure flags for block %s at height=%d %s\n",
+                  log_context,
                   candidate->GetBlockHash().ToString(),
-                  candidate->nHeight);
+                  candidate->nHeight,
+                  log_reason);
         m_active_chainstate->ResetBlockFailureFlags(candidate);
         ++reconsidered;
     }
 
     if (reconsidered > 0) {
         RecalculateBestHeader();
-        LogPrintf("AutoReconsiderShieldedInvalidBlocksAfterStartupRepair: scheduled %u shielded block(s) for reconsideration\n",
+        LogPrintf("%s: scheduled %u shielded block(s) for reconsideration\n",
+                  log_context,
                   static_cast<unsigned int>(reconsidered));
     }
+}
+
+void ChainstateManager::AutoReconsiderShieldedInvalidBlocksAfterStartupRepair()
+{
+    AutoReconsiderShieldedInvalidBlocks(
+        [](const CBlockIndex&) { return true; },
+        "AutoReconsiderShieldedInvalidBlocksAfterStartupRepair",
+        "after startup shielded repair");
+}
+
+void ChainstateManager::AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune()
+{
+    AssertLockHeld(::cs_main);
+    const int32_t pool_credit_disable_height{GetConsensus().nShieldedPoolCreditDisableHeight};
+    if (pool_credit_disable_height == std::numeric_limits<int32_t>::max()) {
+        return;
+    }
+
+    AutoReconsiderShieldedInvalidBlocks(
+        [pool_credit_disable_height](const CBlockIndex& block_index) {
+            return block_index.nHeight < pool_credit_disable_height;
+        },
+        "AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune",
+        "after shielded pool-credit disable height retune");
 }
 
 bool ChainstateManager::MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind kind)

@@ -7,14 +7,15 @@ double-spend on a node that bootstrapped from it. The fix pins the shielded stat
 commitment per snapshot height (`AssumeutxoData.shielded_state_commitment`) and rejects any load whose
 reconstructed shielded state does not hash to that pin.
 
-**Fail-closed default.** When a snapshot carries a shielded section but its height has no consensus pin,
-the node **refuses to load it** by default (`validation.cpp` ActivateSnapshot: pinned → verify against
-the pin; unpinned + `!allow_unpinned_shielded_snapshot` → reject `BTX shielded snapshot section has no
-consensus pin for this height`). This is the DS-3 hardening: an unpinned shielded section is
-attacker-supplied and otherwise unvalidated, so it is not loaded silently. An operator who trusts a
-specific snapshot out-of-band can opt in with `-allowunpinnedshieldedsnapshot=1` (logged as a warning),
-which restores the old behavior for that run only. A transparent-only snapshot (no shielded section) is
-unaffected. Filling the pins (below) is what lets unpinned-free, fail-closed bootstrap work for everyone.
+**Compatibility default until pins ship.** When a snapshot carries a shielded section but its height has
+no consensus pin, strict mode (`-allowunpinnedshieldedsnapshot=0`) refuses to load it
+(`validation.cpp` ActivateSnapshot: pinned → verify against the pin; unpinned +
+`!allow_unpinned_shielded_snapshot` → reject `BTX shielded snapshot section has no consensus pin for
+this height`). This is the DS-3 hardening: an unpinned shielded section is attacker-supplied and
+otherwise unvalidated. Current shipped mainnet snapshots do not yet carry shielded pins, so v0.32
+defaults to bootstrap compatibility (`-allowunpinnedshieldedsnapshot=1`) and logs a warning when such a
+snapshot is loaded. Filling the pins (below) is what lets fail-closed bootstrap become the default for
+everyone.
 
 **Why the mainnet pins are not hardcoded in this commit.** The pin is
 `SHA256("BTX_ShieldedSnapshotStatePin_V1" || note_commitment_root || account_registry_root ||
@@ -60,9 +61,9 @@ single node's value should not be trusted blindly.
 | testnet/signet/etc. | — | no assumeutxo entries |
 | regtest | 110, 299, 61'010 | null — filled on demand by test/dev tooling |
 
-The first 10 existing mainnet snapshot heights predate the 123'000 pool-credit-disable gate, and all 11
-predate the 125'000 sunset. The pin protects bootstrapping nodes from a forged shielded section
-regardless of which side of the pool-credit-disable gate the snapshot height is on.
+All 11 existing mainnet snapshot heights predate the 125'000 pool-credit-disable/sunset boundary. The
+pin protects bootstrapping nodes from a forged shielded section regardless of which side of the
+pool-credit-disable gate the snapshot height is on.
 
 **Frozen-ceiling pin at 125'000.** Sunset pillar 4 calls for pinning the 125'000 pool/nullifier/
 commitment roots — the consensus snapshot of the frozen ceiling. Those roots only exist once the chain

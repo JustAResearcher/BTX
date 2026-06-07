@@ -66,14 +66,19 @@ Module-SIS hardness (formally reduced, Tier 1–3) + correct pin + correct patch
 
 ## Consensus Rule
 
+Production constants:
+
+- `BTX_SHIELDED_SUNSET_HEIGHT = 125000`
+- `BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT = BTX_SHIELDED_SUNSET_HEIGHT` (125000)
+
 Add:
 
-- `Consensus::Params::nShieldedPoolCreditDisableHeight = 123000`
+- `Consensus::Params::nShieldedPoolCreditDisableHeight = 125000`
 - `Consensus::Params::nShieldedSunsetHeight = 125000`
 - `IsShieldedPoolCreditDisabled(height)`
 - `IsShieldedSunsetActive(height)`
 
-At `height >= nShieldedPoolCreditDisableHeight`:
+At `height >= nShieldedPoolCreditDisableHeight` (the 125000 sunset boundary):
 
 1. Reject any shielded transaction whose `TryGetShieldedStateValueBalance()` is
    negative. In current turnstile accounting, negative state value balance
@@ -122,14 +127,14 @@ Required call sites:
 
 ## Family Policy
 
-`V2_REBALANCE`: rejected at 123000 STRUCTURALLY (the family is disabled in the pool-credit gate). After
+`V2_REBALANCE`: rejected at 125000 STRUCTURALLY (the family is disabled in the pool-credit gate). After
 the DS-5 fix a rebalance is pool-neutral (state value_balance == 0), so the negative-value-balance
 predicate no longer catches it; it is rejected as `bad-shielded-v2-rebalance-disabled`.
 
-`V2_EGRESS_BATCH`: rejected at 123000 through the negative state value balance
+`V2_EGRESS_BATCH`: rejected at 125000 through the negative state value balance
 predicate (an egress credit has state value_balance < 0).
 
-`V2_SETTLEMENT_ANCHOR`: rejected at 123000 when it carries reserve deltas or an
+`V2_SETTLEMENT_ANCHOR`: rejected at 125000 when it carries reserve deltas or an
 anchored netting manifest.
 
 At 125000 (outflow-only): ONLY a `V2_SEND` whose state `value_balance > fee` (a real transparent
@@ -145,8 +150,9 @@ Historical blocks below the configured gates remain valid.
 
 ## Does This Eliminate Inflation and Double-Spend Risk?
 
-The 123000 gate eliminates known post-C002 pool-credit mint paths that rely on
-negative shielded state balance or deferred settlement-anchor credit machinery.
+The production pool-credit gate is aligned to the 125000 sunset so v0.32.0 does not retroactively
+invalidate already-mined post-123000 history. At and after the sunset it eliminates known pool-credit
+mint paths that rely on negative shielded state balance or deferred settlement-anchor credit machinery.
 The 125000 outflow-only sunset eliminates the largest remaining class: any bug that requires creating
 or value-neutral-spending shielded state after sunset, while still letting legacy holders unshield out.
 
@@ -197,10 +203,10 @@ Crucially, the legacy-exit path (V2_SEND no-output unshield) is untouched by eve
 
 Add tests around lowered regtest gate heights:
 
-- Rebalance and egress pool credits rejected at and after the 123000-equivalent
+- Rebalance and egress pool credits rejected at and after the 125000-equivalent
   gate.
 - Settlement anchor with reserve/manifest credit machinery rejected at and after
-  the 123000-equivalent gate.
+  the 125000-equivalent gate.
 - V2_SEND private transfer rejected at and after the 125000-equivalent gate.
 - V2 lifecycle/control rejected at and after the 125000-equivalent gate.
 - Mempool entries accepted before sunset are evicted when sunset becomes the

@@ -42,7 +42,7 @@ class Ledger:
     enforce_sunset: bool = False
 
     def apply(self, tx: Tx) -> None:
-        if self.enforce_pool_credit_disable and tx.height >= C002_HEIGHT:
+        if self.enforce_pool_credit_disable and tx.height >= SUNSET_HEIGHT:
             if tx.state_value_balance < 0:
                 raise AssertionError(f"{tx.name}: pool-credit gate rejected shielded credit")
             if tx.creates_manifest:
@@ -88,8 +88,8 @@ class Ledger:
 
 
 # Constrain-and-preserve framework (see doc/shielded_sunset_125000_plan.md). The model mirrors the
-# merged consensus code: DS-5 makes a rebalance pool-neutral (state value_balance == 0); the 123000
-# pool-credit gate rejects credits + rollover machinery; the 125000 sunset is the author's full freeze.
+# merged consensus code: DS-5 makes a rebalance pool-neutral (state value_balance == 0); the 125000
+# pool-credit gate rejects credits + rollover machinery as part of the full sunset freeze.
 
 
 def ds5_fixed_rebalance_is_pool_neutral() -> Ledger:
@@ -104,42 +104,42 @@ def ds5_fixed_rebalance_is_pool_neutral() -> Ledger:
 
 
 def pool_credit_gate_blocks_credits_and_rollover() -> None:
-    # (2) At height >= 123000 the pool-credit gate rejects pool credits (negative state value_balance:
+    # (2) At height >= 125000 the pool-credit gate rejects pool credits (negative state value_balance:
     # egress, shield) AND reserve/netting rollover machinery (rebalance via its manifest, value-bearing
     # settlement anchors). DS-1 anchor replay can never re-arm because the model keeps a permanent
     # consumed record. Debits (unshield, value leaving) are NOT rejected -- legacy exits keep working.
     blocked = 0
     for tx in [
-        Tx("rebalance", C002_HEIGHT, 0, 0, shielded_outputs=1, creates_manifest=True, manifest="m"),
-        Tx("egress_credit", C002_HEIGHT, -(2 * COIN), 0, shielded_outputs=2, consumes_anchor="a"),
-        Tx("shield_credit", C002_HEIGHT, -(1 * COIN), 0, shielded_outputs=1),
-        Tx("value_bearing_anchor", C002_HEIGHT, 0, 0, creates_anchor=True, anchor="b"),
+        Tx("rebalance", SUNSET_HEIGHT, 0, 0, shielded_outputs=1, creates_manifest=True, manifest="m"),
+        Tx("egress_credit", SUNSET_HEIGHT, -(2 * COIN), 0, shielded_outputs=2, consumes_anchor="a"),
+        Tx("shield_credit", SUNSET_HEIGHT, -(1 * COIN), 0, shielded_outputs=1),
+        Tx("value_bearing_anchor", SUNSET_HEIGHT, 0, 0, creates_anchor=True, anchor="b"),
     ]:
         ledger = Ledger(enforce_pool_credit_disable=True)
         if tx.consumes_anchor:
-            ledger.anchors[tx.consumes_anchor] = C002_HEIGHT - 10
+            ledger.anchors[tx.consumes_anchor] = SUNSET_HEIGHT - 10
         try:
             ledger.apply(tx)
         except AssertionError:
             blocked += 1
     assert blocked == 4
 
-    # A legacy unshield (value LEAVING the pool, positive state value_balance) is ACCEPTED in the
-    # [123000, 125000) window and drains the pool -- balances stay recoverable.
+    # A legacy unshield (value LEAVING the pool, positive state value_balance) is ACCEPTED before the
+    # 125000 sunset and drains the pool -- balances stay recoverable.
     ledger = Ledger(pool_balance=5 * COIN, enforce_pool_credit_disable=True)
-    ledger.apply(Tx("legacy_unshield", C002_HEIGHT + 1, state_value_balance=1 * COIN,
+    ledger.apply(Tx("legacy_unshield", SUNSET_HEIGHT - 1, state_value_balance=1 * COIN,
                     tx_value_balance=1 * COIN, shielded_spends=1))
     assert ledger.pool_balance == 4 * COIN
 
 
 def blast_radius_bounded_by_frozen_ceiling() -> None:
-    # (3) Monotone clamp: from 123000 the pool only decreases. 100 credit attempts are all rejected;
+    # (3) Monotone clamp: from 125000 the pool only decreases. 100 credit attempts are all rejected;
     # max value ever extractable == the frozen ceiling.
     ceiling = 100 * COIN
     ledger = Ledger(pool_balance=ceiling, enforce_pool_credit_disable=True)
     for i in range(100):
         try:
-            ledger.apply(Tx(f"mint_{i}", C002_HEIGHT, -(1_000_000 * COIN), 0, shielded_outputs=1))
+            ledger.apply(Tx(f"mint_{i}", SUNSET_HEIGHT, -(1_000_000 * COIN), 0, shielded_outputs=1))
             raise SystemExit("monotone clamp failed: a credit was accepted")
         except AssertionError:
             pass
