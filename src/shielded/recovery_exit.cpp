@@ -72,6 +72,10 @@ uint256 ComputeRecoveryExitTransparentBinding(Span<const CTxOut> vout)
 bool VerifyRecoveryExitOwnership(const RecoveryExitClaim& claim,
                                  const uint256& binding_hash)
 {
+    if (claim.spend_pubkey.size() != MLDSA44_PUBKEY_SIZE ||
+        claim.ownership_sig.size() != MLDSA44_SIGNATURE_SIZE) {
+        return false;
+    }
     // Mirror the shielded v2 lifecycle-control verification path exactly: shielded v2 keys are ML-DSA-44.
     // CPQPubKey's constructor never throws; Verify() returns false on a malformed pubkey (size mismatch)
     // or a bad signature. Default slhdsa_fips205=false (no SLH-DSA in the shielded v2 pubkey path).
@@ -96,6 +100,10 @@ bool VerifyRecoveryExitMembership(const RecoveryExitClaim& claim,
     try {
         DataStream ss{claim.membership_proof};
         ss >> witness;
+        if (!ss.empty()) {
+            reject_reason = "bad-recovery-exit-bad-membership-proof";
+            return false;
+        }
     } catch (const std::exception&) {
         reject_reason = "bad-recovery-exit-bad-membership-proof";
         return false;
@@ -129,15 +137,19 @@ bool DeriveRecoveryExitIdentifiers(const RecoveryExitClaim& claim,
         return false;
     }
     const ShieldedNote note = NoteFromClaim(claim);
-    const uint256 legacy_commitment = note.GetCommitment();
-    std::optional<uint256> smile_commitment;
-    if (const auto account = smile2::wallet::BuildCompactPublicAccountFromNote(
-            smile2::wallet::SMILE_GLOBAL_SEED,
-            note)) {
-        smile_commitment = smile2::ComputeCompactPublicAccountHash(*account);
+    const auto account = smile2::wallet::BuildCompactPublicAccountFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        note);
+    if (!account.has_value()) {
+        reject_reason = "bad-recovery-exit-no-smile-account";
+        return false;
     }
-    if (claim.note_commitment != legacy_commitment &&
-        (!smile_commitment.has_value() || claim.note_commitment != *smile_commitment)) {
+    const uint256 smile_commitment = smile2::ComputeCompactPublicAccountHash(*account);
+    if (claim.note_commitment == note.GetCommitment()) {
+        reject_reason = "bad-recovery-exit-legacy-commitment";
+        return false;
+    }
+    if (claim.note_commitment != smile_commitment) {
         reject_reason = "bad-recovery-exit-commitment-binding";
         return false;
     }
@@ -181,9 +193,14 @@ bool CheckRecoveryExitClaim(const RecoveryExitClaim& claim,
         reject_reason = "bad-recovery-exit-expired";
         return false;
     }
-    // Pure transparent exit: recover exactly the note's value to transparent, no shielded outputs.
+    // Pure transparent exit: recover exactly the note's value to transparent, no transparent inputs and
+    // no shielded outputs. This keeps the ownership signature bound to the whole economic shape of the tx.
     if (!MoneyRange(claim.value) || claim.value <= 0) {
         reject_reason = "bad-recovery-exit-value";
+        return false;
+    }
+    if (c.transparent_input_count != 0) {
+        reject_reason = "bad-recovery-exit-transparent-input";
         return false;
     }
     if (c.shielded_output_count != 0) {

@@ -321,6 +321,50 @@ BOOST_AUTO_TEST_CASE(regtest_shielded_sunset_height_override)
     BOOST_CHECK(params->GetConsensus().IsShieldedSunsetActive(126));
 }
 
+BOOST_AUTO_TEST_CASE(regtest_shielded_direct_send_public_flow_disable_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldeddirectsendpublicflowdisableheight", "128");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedDirectSendPublicFlowDisableHeight, 128);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedDirectSendPublicFlowDisabled(127));
+    BOOST_CHECK(params->GetConsensus().IsShieldedDirectSendPublicFlowDisabled(128));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_direct_send_public_flow_disable_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldeddirectsendpublicflowdisableheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_height_128000_upgrade_gate_overrides)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedpoolcreditdisableheight", "128000");
+    args.ForceSetArg("-regtestshieldedsunsetheight", "128000");
+    args.ForceSetArg("-regtestshieldeddirectsendpublicflowdisableheight", "128000");
+    args.ForceSetArg("-regtestshieldedrecoveryexitactivationheight", "128000");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    const auto& consensus = params->GetConsensus();
+    BOOST_CHECK_EQUAL(consensus.nShieldedPoolCreditDisableHeight, 128'000);
+    BOOST_CHECK_EQUAL(consensus.nShieldedSunsetHeight, 128'000);
+    BOOST_CHECK_EQUAL(consensus.nShieldedDirectSendPublicFlowDisableHeight, 128'000);
+    BOOST_CHECK_EQUAL(consensus.nShieldedRecoveryExitActivationHeight, 128'000);
+    BOOST_CHECK(!consensus.IsShieldedPoolCreditDisabled(127'999));
+    BOOST_CHECK(!consensus.IsShieldedSunsetActive(127'999));
+    BOOST_CHECK(!consensus.IsShieldedDirectSendPublicFlowDisabled(127'999));
+    BOOST_CHECK(!consensus.IsShieldedRecoveryExitActive(127'999));
+    BOOST_CHECK(consensus.IsShieldedPoolCreditDisabled(128'000));
+    BOOST_CHECK(consensus.IsShieldedSunsetActive(128'000));
+    BOOST_CHECK(consensus.IsShieldedDirectSendPublicFlowDisabled(128'000));
+    BOOST_CHECK(consensus.IsShieldedRecoveryExitActive(128'000));
+}
+
 BOOST_AUTO_TEST_CASE(regtest_shielded_sunset_height_rejects_negative)
 {
     ArgsManager args;
@@ -328,12 +372,12 @@ BOOST_AUTO_TEST_CASE(regtest_shielded_sunset_height_rejects_negative)
     BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
 }
 
-BOOST_AUTO_TEST_CASE(ds3_unpinned_shielded_snapshot_is_bootstrap_compatible_by_default)
+BOOST_AUTO_TEST_CASE(ds3_unpinned_shielded_snapshot_fails_closed_by_default)
 {
-    // DS-3 strict mode is still available with -allowunpinnedshieldedsnapshot=0, but the current
-    // shipped mainnet snapshots have null shielded pins. Default to compatibility until pinned
-    // snapshots are released, otherwise ordinary bootstrap users must pass a hidden safety valve.
-    BOOST_CHECK_EQUAL(DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT, true);
+    // Shielded snapshot sections are consensus-sensitive state. Default to rejecting unpinned
+    // shielded snapshots; operators can still opt into explicitly trusted repair/bootstrap
+    // material with -allowunpinnedshieldedsnapshot=1.
+    BOOST_CHECK_EQUAL(DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT, false);
 }
 
 BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_no_gap)

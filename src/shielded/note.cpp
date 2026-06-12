@@ -96,6 +96,11 @@ bool ShieldedNote::IsValid() const
     if (rho.IsNull()) return false;
     if (rcm.IsNull()) return false;
     if (memo.size() > MAX_SHIELDED_MEMO_SIZE) return false;
+    if (!spend_anchor.empty()) {
+        if (spend_anchor.size() > MAX_SHIELDED_SPEND_ANCHOR_SIZE) return false;
+        lattice::PolyVec anchor;
+        if (!GetNoteSpendAnchor(*this, anchor)) return false;
+    }
     return true;
 }
 
@@ -115,6 +120,7 @@ void SetNoteSpendAnchor(ShieldedNote& note, const lattice::PolyVec& anchor)
 {
     // Serialize the anchor with the same fixed mod-q encoding used for anchors /
     // key-images on the ring-signature path, so the bytes are canonical.
+    MarkShieldedNoteForModernDerivation(note);
     DataStream ss;
     shielded::ringct::SerializePolyVecModQ23(ss, anchor, "SetNoteSpendAnchor");
     const auto bytes = MakeUCharSpan(ss);

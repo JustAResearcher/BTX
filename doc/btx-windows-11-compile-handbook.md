@@ -58,7 +58,7 @@ experimental backend.
 Recommended clone path:
 
 ```text
-C:\src\btx-node
+C:\src\btx
 ```
 
 Avoid very long or space-heavy paths if you can.
@@ -327,7 +327,7 @@ These paths are there to reduce the most common Windows path-length problems.
 
 ### My repo path contains spaces
 
-The wrapper helps, but a short path like `C:\src\btx-node` is still the best
+The wrapper helps, but a short path like `C:\src\btx` is still the best
 choice.
 
 ### `btxd.exe` starts but mining does not

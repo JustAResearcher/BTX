@@ -145,7 +145,8 @@ bool BlockAssembler::isStillDependent(const CTxMemPool& mempool, CTxMemPool::txi
     return false;
 }
 
-bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
+bool BlockAssembler::TestForBlock(const CTxMemPool& mempool, CTxMemPool::txiter iter)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     uint64_t packageSize = iter->GetSizeWithAncestors();
     int64_t packageSigOps = iter->GetSigOpCostWithAncestors();
@@ -167,7 +168,7 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
 
     CTxMemPool::setEntries package;
     package.insert(iter);
-    if (!TestPackageTransactions(package)) {
+    if (!TestPackageTransactions(mempool, package)) {
         if (nBlockSize > m_options.nBlockMaxSize - 100 || lastFewTxs > 50) {
             blockFinished = true;
             return false;
@@ -182,6 +183,7 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
 }
 
 void BlockAssembler::addPriorityTxs(const CTxMemPool& mempool, int &nPackagesSelected)
+    EXCLUSIVE_LOCKS_REQUIRED(mempool.cs, ::cs_main)
 {
     AssertLockHeld(mempool.cs);
 
@@ -236,7 +238,7 @@ void BlockAssembler::addPriorityTxs(const CTxMemPool& mempool, int &nPackagesSel
         }
 
         // If this tx fits in the block add it, otherwise keep looping
-        if (TestForBlock(iter)) {
+        if (TestForBlock(mempool, iter)) {
             AddToBlock(mempool, iter);
 
             ++nPackagesSelected;

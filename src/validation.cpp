@@ -273,6 +273,26 @@ std::atomic<int64_t> g_reorg_protection_last_rejected_unix{0};
         shielded::v2::GetBundleSemanticFamily(*v2b) == shielded::v2::TransactionFamily::V2_RECOVERY_EXIT;
 }
 
+[[nodiscard]] bool CollectRecoveryExitRetirements(const CShieldedBundle& bundle,
+                                                  std::vector<Nullifier>* nullifiers,
+                                                  std::vector<uint256>* commitments)
+{
+    if (!IsRecoveryExitBundle(bundle)) return true;
+
+    shielded::recovery::RecoveryExitClaim re_claim;
+    shielded::recovery::RecoveryExitIdentifiers re_ids;
+    if (!GetRecoveryExitIdentifiersFromBundle(bundle, re_claim, re_ids)) {
+        return false;
+    }
+    if (nullifiers) {
+        nullifiers->push_back(re_ids.nullifier);
+    }
+    if (commitments) {
+        commitments->push_back(re_ids.commitment);
+    }
+    return true;
+}
+
 [[nodiscard]] uint256 RecoveryExitMembershipRoot(const Consensus::Params& consensus,
                                                  int32_t validation_height,
                                                  const shielded::ShieldedMerkleTree& current_tree)
@@ -439,7 +459,8 @@ std::atomic<int64_t> g_reorg_protection_last_rejected_unix{0};
                                                                  int32_t validation_height,
                                                                  std::string& reject_reason)
 {
-    if (!consensus.IsShieldedMatRiCTDisabled(validation_height) || !tx.HasShieldedBundle()) {
+    (void)view;
+    if (!consensus.IsShieldedDirectSendPublicFlowDisabled(validation_height) || !tx.HasShieldedBundle()) {
         return true;
     }
 
@@ -469,17 +490,8 @@ std::atomic<int64_t> g_reorg_protection_last_rejected_unix{0};
         return false;
     }
 
-    for (const CTxIn& txin : tx.vin) {
-        const Coin& coin = view.AccessCoin(txin.prevout);
-        if (coin.IsSpent()) {
-            return true;
-        }
-        if (!coin.IsCoinBase()) {
-            reject_reason = "bad-shielded-v2-send-public-flow-disabled";
-            return false;
-        }
-    }
-    return true;
+    reject_reason = "bad-shielded-v2-send-public-flow-disabled";
+    return false;
 }
 
 [[nodiscard]] bool ApplyShieldedStateEffects(const CShieldedBundle& bundle,
@@ -489,7 +501,8 @@ std::atomic<int64_t> g_reorg_protection_last_rejected_unix{0};
                                              ShieldedPoolBalance& pool,
                                              std::vector<Nullifier>* all_nullifiers = nullptr,
                                              std::map<uint256, smile2::CompactPublicAccount>* public_accounts = nullptr,
-                                             std::map<uint256, uint256>* account_leaf_commitments = nullptr);
+                                             std::map<uint256, uint256>* account_leaf_commitments = nullptr,
+                                             std::vector<uint256>* recovery_exit_commitments = nullptr);
 
 [[nodiscard]] std::optional<ShieldedStateMutationMarker::PreparedSnapshot>
 MakePreparedShieldedSnapshot(const shielded::ShieldedMerkleTree& tree,
@@ -1239,7 +1252,8 @@ template <typename Spend>
                                         ShieldedPoolBalance& pool,
                                         std::vector<Nullifier>* all_nullifiers = nullptr,
                                         std::map<uint256, smile2::CompactPublicAccount>* public_accounts = nullptr,
-                                        std::map<uint256, uint256>* account_leaf_commitments = nullptr)
+                                        std::map<uint256, uint256>* account_leaf_commitments = nullptr,
+                                        std::vector<uint256>* recovery_exit_commitments = nullptr)
 {
     const auto storage_mode = tree.GetIndexStorageMode();
     tree = shielded::ShieldedMerkleTree{storage_mode};
@@ -1247,6 +1261,7 @@ template <typename Spend>
     if (all_nullifiers) all_nullifiers->clear();
     if (public_accounts) public_accounts->clear();
     if (account_leaf_commitments) account_leaf_commitments->clear();
+    if (recovery_exit_commitments) recovery_exit_commitments->clear();
     if (tip == nullptr) return true;
 
     std::vector<const CBlockIndex*> chain;
@@ -1298,7 +1313,8 @@ template <typename Spend>
                                            pool,
                                            all_nullifiers,
                                            public_accounts,
-                                           account_leaf_commitments)) {
+                                           account_leaf_commitments,
+                                           recovery_exit_commitments)) {
                 return false;
             }
         }
@@ -1334,11 +1350,17 @@ template <typename Spend>
                                              ShieldedPoolBalance& pool,
                                              std::vector<Nullifier>* all_nullifiers,
                                              std::map<uint256, smile2::CompactPublicAccount>* public_accounts,
-                                             std::map<uint256, uint256>* account_leaf_commitments)
+                                             std::map<uint256, uint256>* account_leaf_commitments,
+                                             std::vector<uint256>* recovery_exit_commitments)
 {
     if (all_nullifiers) {
         const auto nullifiers = CollectShieldedNullifiers(bundle);
         all_nullifiers->insert(all_nullifiers->end(), nullifiers.begin(), nullifiers.end());
+    }
+    if (!CollectRecoveryExitRetirements(bundle, all_nullifiers, recovery_exit_commitments)) {
+        LogError("ApplyShieldedStateEffects: failed to derive recovery-exit retirements at block %s\n",
+                 block_hash.ToString());
+        return false;
     }
     if (public_accounts) {
         for (const auto& [commitment, account] : CollectShieldedOutputSmileAccounts(bundle)) {
@@ -2389,7 +2411,15 @@ enum class PersistedShieldedMetadataSyncMode {
         shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     ShieldedPoolBalance rebuilt_pool;
     std::vector<Nullifier> rebuilt_nullifiers;
-    if (!RebuildShieldedState(chainstate, chainstate.m_chain.Tip(), rebuilt_tree, rebuilt_pool, &rebuilt_nullifiers)) {
+    std::vector<uint256> rebuilt_recovery_exit_commitments;
+    if (!RebuildShieldedState(chainstate,
+                              chainstate.m_chain.Tip(),
+                              rebuilt_tree,
+                              rebuilt_pool,
+                              &rebuilt_nullifiers,
+                              /*public_accounts=*/nullptr,
+                              /*account_leaf_commitments=*/nullptr,
+                              &rebuilt_recovery_exit_commitments)) {
         error = "failed to rebuild expected shielded state";
         return false;
     }
@@ -2475,6 +2505,41 @@ enum class PersistedShieldedMetadataSyncMode {
     for (const auto& nf : rebuilt_nullifiers) {
         if (!chainstate.m_chainman.IsShieldedNullifierSpent(nf)) {
             error = strprintf("missing nullifier %s", nf.ToString());
+            return false;
+        }
+    }
+
+    std::sort(rebuilt_recovery_exit_commitments.begin(), rebuilt_recovery_exit_commitments.end());
+    rebuilt_recovery_exit_commitments.erase(std::unique(rebuilt_recovery_exit_commitments.begin(),
+                                                        rebuilt_recovery_exit_commitments.end()),
+                                            rebuilt_recovery_exit_commitments.end());
+    std::vector<uint256> persisted_recovery_exit_commitments;
+    if (!chainstate.m_chainman.ForEachShieldedRecoveryExitCommitment(
+            [&](const uint256& commitment) {
+                persisted_recovery_exit_commitments.push_back(commitment);
+                return true;
+            })) {
+        error = "failed to enumerate persisted recovery-exit commitments";
+        return false;
+    }
+    std::sort(persisted_recovery_exit_commitments.begin(),
+              persisted_recovery_exit_commitments.end());
+    persisted_recovery_exit_commitments.erase(std::unique(persisted_recovery_exit_commitments.begin(),
+                                                          persisted_recovery_exit_commitments.end()),
+                                              persisted_recovery_exit_commitments.end());
+    for (const auto& commitment : rebuilt_recovery_exit_commitments) {
+        if (!std::binary_search(persisted_recovery_exit_commitments.begin(),
+                                persisted_recovery_exit_commitments.end(),
+                                commitment)) {
+            error = strprintf("missing recovery-exit commitment %s", commitment.ToString());
+            return false;
+        }
+    }
+    for (const auto& commitment : persisted_recovery_exit_commitments) {
+        if (!std::binary_search(rebuilt_recovery_exit_commitments.begin(),
+                                rebuilt_recovery_exit_commitments.end(),
+                                commitment)) {
+            error = strprintf("extra recovery-exit commitment %s", commitment.ToString());
             return false;
         }
     }
@@ -2914,6 +2979,7 @@ bool HasInvalidShieldedAnchors(const CTransaction& tx, const ChainstateManager& 
     AssertLockHeld(::cs_main);
     if (!tx.HasShieldedBundle()) return false;
 
+    const int32_t validation_height = chainman.ActiveChain().Height() + 1;
     for (const auto& anchor : CollectShieldedAnchors(tx.GetShieldedBundle())) {
         if (!chainman.IsShieldedAnchorValid(anchor)) {
             return true;
@@ -2934,15 +3000,72 @@ bool HasInvalidShieldedAnchors(const CTransaction& tx, const ChainstateManager& 
         const auto* v2_bundle = tx.GetShieldedBundle().GetV2Bundle();
         if (v2_bundle != nullptr &&
             shielded::v2::BundleHasSemanticFamily(*v2_bundle,
+                                                  shielded::v2::TransactionFamily::V2_EGRESS_BATCH)) {
+            const auto& payload =
+                std::get<shielded::v2::EgressBatchPayload>(v2_bundle->payload);
+            const auto anchor_state =
+                chainman.GetShieldedSettlementAnchorState(payload.settlement_anchor);
+            if (!anchor_state.has_value() ||
+                !IsSettlementAnchorMature(*anchor_state,
+                                          chainman.GetConsensus(),
+                                          validation_height)) {
+                return true;
+            }
+        }
+        if (v2_bundle != nullptr &&
+            shielded::v2::BundleHasSemanticFamily(*v2_bundle,
                                                   shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR)) {
             const auto& payload =
                 std::get<shielded::v2::SettlementAnchorPayload>(v2_bundle->payload);
-            const int32_t validation_height = chainman.ActiveChain().Height() + 1;
             if (!payload.anchored_netting_manifest_id.IsNull() &&
                 !chainman.IsShieldedNettingManifestValid(payload.anchored_netting_manifest_id,
                                                          validation_height)) {
                 return true;
             }
+        }
+    }
+    return false;
+}
+
+bool HasInvalidShieldedRecoveryExitMempoolState(const CTransaction& tx, const ChainstateManager& chainman)
+{
+    AssertLockHeld(::cs_main);
+    if (!tx.HasShieldedBundle()) return false;
+
+    const CShieldedBundle& bundle = tx.GetShieldedBundle();
+    if (!IsRecoveryExitBundle(bundle)) return false;
+
+    shielded::recovery::RecoveryExitClaim re_claim;
+    shielded::recovery::RecoveryExitIdentifiers re_ids;
+    if (!GetRecoveryExitIdentifiersFromBundle(bundle, re_claim, re_ids)) {
+        return true;
+    }
+
+    return chainman.IsShieldedNullifierSpent(re_ids.nullifier) ||
+           chainman.IsShieldedRecoveryExitCommitmentRetired(re_ids.commitment);
+}
+
+bool CollectShieldedMempoolNullifiersForBlock(const CTransaction& tx,
+                                              std::vector<Nullifier>& out_nullifiers)
+{
+    out_nullifiers.clear();
+    if (!tx.HasShieldedBundle()) return true;
+
+    const CShieldedBundle& bundle = tx.GetShieldedBundle();
+    out_nullifiers = CollectShieldedNullifiers(bundle);
+
+    return CollectRecoveryExitRetirements(bundle, &out_nullifiers, /*commitments=*/nullptr);
+}
+
+bool HasSpentShieldedMempoolNullifier(const CTransaction& tx, const ChainstateManager& chainman)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    AssertLockHeld(::cs_main);
+    std::vector<Nullifier> nullifiers;
+    if (!CollectShieldedMempoolNullifiersForBlock(tx, nullifiers)) return true;
+    for (const auto& nullifier : nullifiers) {
+        if (chainman.IsShieldedNullifierSpent(nullifier)) {
+            return true;
         }
     }
     return false;
@@ -2969,7 +3092,21 @@ void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
                 return true;
             }
             if (!shielded_state_ready) return true;
+            if (HasSpentShieldedMempoolNullifier(tx, chainman)) {
+                LogDebug(BCLog::MEMPOOL,
+                         "removing mempool tx %s: stale shielded nullifier at height %d\n",
+                         tx.GetHash().ToString(),
+                         validation_height);
+                return true;
+            }
             if (HasInvalidShieldedAnchors(tx, chainman)) return true;
+            if (HasInvalidShieldedRecoveryExitMempoolState(tx, chainman)) {
+                LogDebug(BCLog::MEMPOOL,
+                         "removing mempool tx %s: stale recovery-exit shielded state at height %d\n",
+                         tx.GetHash().ToString(),
+                         validation_height);
+                return true;
+            }
         }
 
         if (active_chainstate != nullptr && !tx.IsCoinBase()) {
@@ -2980,6 +3117,19 @@ void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
             CCoinsViewMemPool view_mempool{&active_chainstate->CoinsTip(), pool};
             CCoinsViewCache view{&view_mempool};
             if (!view.HaveInputs(tx)) return true;
+            std::string public_flow_reject;
+            if (!RejectPostForkTransparentFundingV2SendContext(tx,
+                                                               view,
+                                                               chainman.GetConsensus(),
+                                                               validation_height,
+                                                               public_flow_reject)) {
+                LogDebug(BCLog::MEMPOOL,
+                         "removing mempool tx %s: stale shielded public flow at height %d (%s)\n",
+                         tx.GetHash().ToString(),
+                         validation_height,
+                         public_flow_reject);
+                return true;
+            }
             TxValidationState script_state;
             PrecomputedTransactionData txdata;
             if (!CheckInputScripts(tx,
@@ -3784,6 +3934,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             re_c.value_balance = re_claim.value;
             re_c.fee = re_fee;
             re_c.transparent_out = re_transparent_out;
+            re_c.transparent_input_count = tx.vin.size();
             re_c.shielded_output_count = bundle.GetShieldedOutputCount();
             re_c.pool_balance = m_active_chainstate.m_chainman.GetShieldedPoolBalance();
             re_c.validation_height = next_block_height;
@@ -5840,6 +5991,10 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                 if (GetRecoveryExitIdentifiersFromBundle(bundle, re_claim, re_ids)) {
                     block_nullifiers.push_back(re_ids.nullifier);
                     block_recovery_exit_commitments.push_back(re_ids.commitment);
+                } else {
+                    LogError("DisconnectBlock(): failed to derive recovery-exit identifiers for tx %s\n",
+                             txref->GetHash().ToString());
+                    return DISCONNECT_FAILED;
                 }
             }
             std::string reject_reason;
@@ -6597,6 +6752,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 re_c.value_balance = re_claim.value;
                 re_c.fee = re_fee;
                 re_c.transparent_out = re_transparent_out;
+                re_c.transparent_input_count = tx.vin.size();
                 re_c.shielded_output_count = bundle_output_commitments.size();
                 re_c.pool_balance = next_pool_balance.GetBalance();
                 re_c.validation_height = pindex->nHeight;
@@ -6672,8 +6828,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             if (UseAccountRegistryEntryCountLimit(params.GetConsensus(), pindex->nHeight) &&
                 WouldExceedAccountRegistryEntryCountLimit(params.GetConsensus(),
                                                          current_registry_entries,
-                                                         nBlockShieldedAccountRegistryAppends +
-                                                             static_cast<uint64_t>(bundle_account_leaves->size()))) {
+                                                         nBlockShieldedAccountRegistryAppends)) {
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                               "bad-blk-shielded-account-registry-size-limit");
                 break;
@@ -9115,7 +9270,12 @@ std::optional<arith_uint256> CalculateClaimedHeadersWork(
  *  in ConnectBlock().
  *  Note that -reindex-chainstate skips the validation that happens here!
  */
-static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, BlockManager& blockman, const ChainstateManager& chainman, const CBlockIndex* pindexPrev) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+static bool ContextualCheckBlockHeader(const CBlockHeader& block,
+                                       BlockValidationState& state,
+                                       BlockManager& blockman,
+                                       const ChainstateManager& chainman,
+                                       const CBlockIndex* pindexPrev,
+                                       bool fCheckPOW = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
     if (!pindexPrev) {
@@ -9145,7 +9305,7 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                                  "matmul seeds do not match deterministic derivation for this height");
         }
 
-        if (!CheckMatMulPreHashGate(block, consensusParams, nHeight)) {
+        if (fCheckPOW && !CheckMatMulPreHashGate(block, consensusParams, nHeight)) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                                  "high-hash",
                                  "matmul pre-hash proof failed");
@@ -9154,10 +9314,11 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
 
     // MatMul phase2/Freivalds checks require full block payload and run in
     // ContextualCheckBlock(). ContextualCheckBlockHeader() remains header-only.
-    if (!consensusParams.fMatMulPOW &&
-               consensusParams.fKAWPOW &&
-               !consensusParams.fSkipKAWPOWValidation &&
-               nHeight >= consensusParams.nKAWPOWHeight) {
+    if (fCheckPOW &&
+        !consensusParams.fMatMulPOW &&
+        consensusParams.fKAWPOW &&
+        !consensusParams.fSkipKAWPOWValidation &&
+        nHeight >= consensusParams.nKAWPOWHeight) {
         if (!CheckKAWPOWProofOfWork(block, nHeight, consensusParams)) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "kawpow proof of work failed");
         }
@@ -9248,7 +9409,11 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
  *  in ConnectBlock().
  *  Note that -reindex-chainstate skips the validation that happens here!
  */
-static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& state, const ChainstateManager& chainman, const CBlockIndex* pindexPrev) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+static bool ContextualCheckBlock(const CBlock& block,
+                                 BlockValidationState& state,
+                                 const ChainstateManager& chainman,
+                                 const CBlockIndex* pindexPrev,
+                                 bool fCheckPOW = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
     if (pindexPrev != nullptr && pindexPrev->nHeight == std::numeric_limits<int>::max()) {
@@ -9261,7 +9426,7 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     const bool is_ibd = chainman.IsInitialBlockDownload();
     const Consensus::Params& consensusParams = chainman.GetConsensus();
 
-    if (consensusParams.fMatMulPOW) {
+    if (fCheckPOW && consensusParams.fMatMulPOW) {
         const bool has_v2_payload = HasMatMulV2Payload(block);
         const bool payload_shape_valid =
             !has_v2_payload || IsMatMulV2PayloadSizeValid(block, consensusParams);
@@ -9769,7 +9934,7 @@ bool TestBlockValidity(BlockValidationState& state,
     indexDummy.phashBlock = &block_hash;
 
     // NOTE: CheckBlockHeader is called by CheckBlock
-    if (!ContextualCheckBlockHeader(block, state, chainstate.m_blockman, chainstate.m_chainman, pindexPrev)) {
+    if (!ContextualCheckBlockHeader(block, state, chainstate.m_blockman, chainstate.m_chainman, pindexPrev, fCheckPOW)) {
         LogError("%s: Consensus::ContextualCheckBlockHeader: %s\n", __func__, state.ToString());
         return false;
     }
@@ -9777,7 +9942,7 @@ bool TestBlockValidity(BlockValidationState& state,
         LogError("%s: Consensus::CheckBlock: %s\n", __func__, state.ToString());
         return false;
     }
-    if (!ContextualCheckBlock(block, state, chainstate.m_chainman, pindexPrev)) {
+    if (!ContextualCheckBlock(block, state, chainstate.m_chainman, pindexPrev, fCheckPOW)) {
         LogError("%s: Consensus::ContextualCheckBlock: %s\n", __func__, state.ToString());
         return false;
     }
@@ -10026,6 +10191,7 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
     }
 
     std::vector<Nullifier> block_nullifiers;
+    std::vector<uint256> block_recovery_exit_commitments;
     std::vector<shielded::registry::ShieldedAccountLeaf> block_account_leaves;
     std::vector<std::pair<uint256, smile2::CompactPublicAccount>> block_smile_public_accounts;
     std::vector<std::pair<uint256, uint256>> block_account_leaf_entries;
@@ -10055,8 +10221,16 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
             }
             const bool use_nonced_bridge_tag =
                 UseNoncedShieldedBridgeTags(m_chainman.GetConsensus(), pindex->nHeight);
-            for (const auto& nullifier : CollectShieldedNullifiers(bundle)) {
-                block_nullifiers.push_back(nullifier);
+            const auto bundle_nullifiers = CollectShieldedNullifiers(bundle);
+            block_nullifiers.insert(block_nullifiers.end(),
+                                    bundle_nullifiers.begin(),
+                                    bundle_nullifiers.end());
+            if (!CollectRecoveryExitRetirements(bundle,
+                                                &block_nullifiers,
+                                                &block_recovery_exit_commitments)) {
+                LogError("RollforwardBlock(): failed to derive recovery-exit retirements at %d\n",
+                         pindex->nHeight);
+                return false;
             }
             const auto bundle_smile_accounts = CollectShieldedOutputSmileAccounts(bundle);
             block_smile_public_accounts.insert(block_smile_public_accounts.end(),
@@ -10152,6 +10326,11 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
         }
         if (!block_nullifiers.empty() && !m_chainman.m_shielded_nullifiers->Insert(block_nullifiers)) {
             LogError("RollforwardBlock(): shielded nullifier insert failed at %d\n", pindex->nHeight);
+            return false;
+        }
+        if (!block_recovery_exit_commitments.empty() &&
+            !m_chainman.m_shielded_nullifiers->InsertRecoveryExitCommitments(block_recovery_exit_commitments)) {
+            LogError("RollforwardBlock(): recovery-exit commitment insert failed at %d\n", pindex->nHeight);
             return false;
         }
         if (!m_chainman.m_shielded_nullifiers->WritePoolBalance(projected_pool.GetBalance())) {
@@ -11897,6 +12076,7 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
         shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     ShieldedPoolBalance rebuilt_pool;
     std::vector<Nullifier> rebuilt_nullifiers;
+    std::vector<uint256> rebuilt_recovery_exit_commitments;
     std::map<uint256, smile2::CompactPublicAccount> rebuilt_public_accounts;
     std::map<uint256, uint256> rebuilt_account_leaf_commitments;
     shielded::registry::ShieldedAccountRegistryState rebuilt_account_registry;
@@ -11906,7 +12086,8 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
                               rebuilt_pool,
                               &rebuilt_nullifiers,
                               &rebuilt_public_accounts,
-                              &rebuilt_account_leaf_commitments)) {
+                              &rebuilt_account_leaf_commitments,
+                              &rebuilt_recovery_exit_commitments)) {
         return false;
     }
     if (!RebuildShieldedAccountRegistryState(*m_active_chainstate, tip, rebuilt_account_registry)) {
@@ -11953,6 +12134,14 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
         }
         if (!rebuilt_nullifiers.empty() && !rebuilt_state->Insert(rebuilt_nullifiers)) {
             LogPrintf("RebuildShieldedStateFromActiveChain: failed to load nullifiers into %s rebuild state at tip=%s height=%d\n",
+                      memory_only ? "memory-only" : "persistent",
+                      tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
+                      tip != nullptr ? tip->nHeight : -1);
+            return nullptr;
+        }
+        if (!rebuilt_recovery_exit_commitments.empty() &&
+            !rebuilt_state->InsertRecoveryExitCommitments(rebuilt_recovery_exit_commitments)) {
+            LogPrintf("RebuildShieldedStateFromActiveChain: failed to load recovery-exit commitments into %s rebuild state at tip=%s height=%d\n",
                       memory_only ? "memory-only" : "persistent",
                       tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
                       tip != nullptr ? tip->nHeight : -1);
@@ -12058,6 +12247,13 @@ ShieldedSnapshotSectionHeader ChainstateManager::GetShieldedSnapshotSectionHeade
     ShieldedSnapshotSectionHeader header;
     header.m_commitment_count = m_shielded_merkle_tree.Size();
     header.m_nullifier_count = m_shielded_nullifiers ? m_shielded_nullifiers->CountNullifiers() : 0;
+    if (!ForEachShieldedRecoveryExitCommitment([&](const uint256&) {
+            if (header.m_recovery_exit_commitment_count == std::numeric_limits<uint64_t>::max()) return false;
+            ++header.m_recovery_exit_commitment_count;
+            return true;
+        })) {
+        throw std::runtime_error("Failed to count BTX recovery-exit commitments for snapshot");
+    }
     if (!ForEachShieldedSettlementAnchor([&](const uint256&) {
             if (header.m_settlement_anchor_count == std::numeric_limits<uint64_t>::max()) return false;
             ++header.m_settlement_anchor_count;
@@ -12105,6 +12301,13 @@ std::optional<shielded::registry::ShieldedStateCommitment> ChainstateManager::Ge
         })) {
         return std::nullopt;
     }
+    std::vector<uint256> recovery_exit_commitments;
+    if (!ForEachShieldedRecoveryExitCommitment([&](const uint256& commitment) {
+            recovery_exit_commitments.push_back(commitment);
+            return true;
+        })) {
+        return std::nullopt;
+    }
 
     std::vector<uint256> settlement_anchors;
     if (!ForEachShieldedSettlementAnchor([&](const uint256& anchor) {
@@ -12128,7 +12331,8 @@ std::optional<shielded::registry::ShieldedStateCommitment> ChainstateManager::Ge
     commitment.nullifier_root = shielded::registry::ComputeNullifierSetCommitment(
         Span<const uint256>{nullifiers.data(), nullifiers.size()});
     HashWriter bridge_commitment;
-    bridge_commitment << std::string{"BTX_SHIELDED_BRIDGE_STATE_COMMITMENT_V1"}
+    bridge_commitment << std::string{"BTX_SHIELDED_BRIDGE_STATE_COMMITMENT_V2"}
+                      << recovery_exit_commitments
                       << settlement_anchors
                       << netting_manifests;
     commitment.bridge_settlement_root = bridge_commitment.GetSHA256();
@@ -12142,7 +12346,7 @@ std::optional<uint256> ChainstateManager::ComputeShieldedSnapshotStatePin() cons
     const auto commitment = GetShieldedStateCommitment();
     if (!commitment.has_value()) return std::nullopt;
     HashWriter pin;
-    pin << std::string{"BTX_ShieldedSnapshotStatePin_V1"}
+    pin << std::string{"BTX_ShieldedSnapshotStatePin_V2"}
         << commitment->note_commitment_root
         << commitment->account_registry_root
         << commitment->nullifier_root
@@ -12182,6 +12386,13 @@ bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip)
                   m_shielded_account_registry.Root().ToString());
         return false;
     }
+    const auto shielded_state_pin = ComputeShieldedSnapshotStatePin();
+    if (!shielded_state_pin.has_value()) {
+        LogPrintf("PersistShieldedState: failed to compute full shielded state pin at height=%d hash=%s\n",
+                  tip ? tip->nHeight : -1,
+                  tip ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+        return false;
+    }
 
     if (!m_shielded_nullifiers->WritePersistedState(
         m_shielded_merkle_tree,
@@ -12199,6 +12410,9 @@ bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip)
     // only here -- direct test/diagnostic nullifier insertions that bypass PersistShieldedState
     // leave the persisted digest unchanged, so the restart drift check still catches them.
     if (!m_shielded_nullifiers->PersistNullifierAccumulator()) {
+        return false;
+    }
+    if (!m_shielded_nullifiers->PersistShieldedStatePin(*shielded_state_pin)) {
         return false;
     }
     return m_shielded_nullifiers->ClearMutationMarker();
@@ -12353,6 +12567,24 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
             return false;
         }
 
+        if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION) {
+            std::vector<uint256> recovery_exit_commitments;
+            recovery_exit_commitments.reserve(std::min<uint64_t>(header.m_recovery_exit_commitment_count, 8192));
+            for (uint64_t i = 0; i < header.m_recovery_exit_commitment_count; ++i) {
+                uint256 commitment;
+                file >> commitment;
+                recovery_exit_commitments.push_back(commitment);
+                if (recovery_exit_commitments.size() == 8192) {
+                    if (!m_shielded_nullifiers->InsertRecoveryExitCommitments(recovery_exit_commitments)) return false;
+                    recovery_exit_commitments.clear();
+                }
+            }
+            if (!recovery_exit_commitments.empty() &&
+                !m_shielded_nullifiers->InsertRecoveryExitCommitments(recovery_exit_commitments)) {
+                return false;
+            }
+        }
+
         if (header.m_snapshot_version >= 4) {
             std::vector<uint256> settlement_anchors;
             settlement_anchors.reserve(std::min<uint64_t>(header.m_settlement_anchor_count, 8192));
@@ -12410,6 +12642,38 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
         }
     } catch (const std::ios_base::failure&) {
         return false;
+    }
+
+    if (header.m_snapshot_version < node::SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION &&
+        tip != nullptr &&
+        GetConsensus().IsShieldedRecoveryExitActive(tip->nHeight)) {
+        const Chainstate* rebuild_chainstate = m_snapshot_chainstate ? m_snapshot_chainstate.get()
+                                                                     : m_active_chainstate;
+        if (rebuild_chainstate == nullptr ||
+            !ShieldedFullRebuildBlocksAvailable(*rebuild_chainstate, tip)) {
+            LogPrintf("LoadShieldedSnapshotSection: refusing post-recovery-exit legacy shielded snapshot without local blocks to rebuild recovery-exit commitments at height=%d hash=%s\n",
+                      tip->nHeight,
+                      tip->GetBlockHash().ToString());
+            return false;
+        }
+        shielded::ShieldedMerkleTree rebuilt_tree{
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+        ShieldedPoolBalance rebuilt_pool;
+        std::vector<uint256> rebuilt_recovery_exit_commitments;
+        if (!RebuildShieldedState(*rebuild_chainstate,
+                                  tip,
+                                  rebuilt_tree,
+                                  rebuilt_pool,
+                                  /*all_nullifiers=*/nullptr,
+                                  /*public_accounts=*/nullptr,
+                                  /*account_leaf_commitments=*/nullptr,
+                                  &rebuilt_recovery_exit_commitments)) {
+            return false;
+        }
+        if (!rebuilt_recovery_exit_commitments.empty() &&
+            !m_shielded_nullifiers->InsertRecoveryExitCommitments(rebuilt_recovery_exit_commitments)) {
+            return false;
+        }
     }
 
     if (!m_shielded_pool_balance.SetBalance(header.m_pool_balance)) {
@@ -12671,6 +12935,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         shielded::ShieldedMerkleTree rebuilt_tree;
         ShieldedPoolBalance rebuilt_pool;
         std::vector<Nullifier> rebuilt_nullifiers;
+        std::vector<uint256> rebuilt_recovery_exit_commitments;
         std::map<uint256, smile2::CompactPublicAccount> rebuilt_public_accounts;
         std::map<uint256, uint256> rebuilt_account_leaf_commitments;
         shielded::registry::ShieldedAccountRegistryState rebuilt_account_registry =
@@ -12681,7 +12946,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                                   rebuilt_pool,
                                   &rebuilt_nullifiers,
                                   &rebuilt_public_accounts,
-                                  &rebuilt_account_leaf_commitments)) {
+                                  &rebuilt_account_leaf_commitments,
+                                  &rebuilt_recovery_exit_commitments)) {
             return false;
         }
         if (!RebuildShieldedAccountRegistryState(*m_active_chainstate, tip, rebuilt_account_registry)) {
@@ -12693,6 +12959,10 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             return false;
         }
         if (!rebuilt_nullifiers.empty() && !m_shielded_nullifiers->Insert(rebuilt_nullifiers)) {
+            return false;
+        }
+        if (!rebuilt_recovery_exit_commitments.empty() &&
+            !m_shielded_nullifiers->InsertRecoveryExitCommitments(rebuilt_recovery_exit_commitments)) {
             return false;
         }
         if (!SyncShieldedSettlementAnchorState(m_blockman, tip, *m_shielded_nullifiers)) {
@@ -12960,15 +13230,22 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             *persisted_commitment_index_digest == *actual_commitment_index_digest) {
             restored_index = true;
         } else if (!ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
-            // The commitment index would normally be rebuilt from chain here, but blocks required
-            // for that rebuild are pruned (issue #35). Rebuilding would fail and crash-loop the
-            // node. Retain the persisted commitment index instead -- the same retain-under-pruning
-            // trust model already used for persisted anchor roots below. This is fail-closed: a
-            // stale index surfaces as a proof-verification failure, never silent acceptance.
-            LogPrintf("EnsureShieldedStateInitialized: commitment index rebuild needs pruned blocks at height=%d hash=%s; retaining persisted commitment index rather than crash-looping\n",
-                      persisted_tip_height,
-                      persisted_tip_hash.ToString());
-            restored_index = true;
+            if (!actual_commitment_index_digest.has_value()) {
+                // Frontier-only externalized retention is safe under pruning: shielded spend
+                // verification that needs a leaf-position lookup fails closed while the index
+                // is absent. A present-but-drifted index is not safe, and is refused below.
+                LogPrintf("EnsureShieldedStateInitialized: commitment index rebuild needs pruned blocks at height=%d hash=%s; retaining frontier-only shielded tree with no commitment index\n",
+                          persisted_tip_height,
+                          persisted_tip_hash.ToString());
+                restored_index = true;
+            } else {
+                LogPrintf("EnsureShieldedStateInitialized: refusing persisted commitment index at height=%d hash=%s because digest verification failed and rebuild needs pruned blocks (expected=%s actual=%s)\n",
+                          persisted_tip_height,
+                          persisted_tip_hash.ToString(),
+                          persisted_commitment_index_digest.has_value() ? persisted_commitment_index_digest->ToString() : "missing",
+                          actual_commitment_index_digest->ToString());
+                return false;
+            }
         } else {
             if (!persisted_commitment_index_digest.has_value()) {
                 LogPrintf("EnsureShieldedStateInitialized: persisted state missing commitment index digest at height=%d hash=%s tree_size=%u root=%s; rebuilding commitment index from chain\n",
@@ -13024,6 +13301,28 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                         persisted_accumulator.has_value() &&
                         *persisted_accumulator == current_accumulator;
                     return fast_startup_nullifier_accumulator_verified;
+                };
+            bool fast_startup_state_pin_checked{false};
+            bool fast_startup_state_pin_verified{false};
+            bool fast_startup_state_pin_present{false};
+            bool fast_startup_state_pin_current_available{false};
+            auto verify_fast_startup_state_pin =
+                [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
+                    AssertLockHeld(::cs_main);
+                    if (fast_startup_state_pin_checked) {
+                        return fast_startup_state_pin_verified;
+                    }
+                    fast_startup_state_pin_checked = true;
+                    const auto persisted_pin =
+                        m_shielded_nullifiers->ReadPersistedShieldedStatePin();
+                    const auto current_pin = ComputeShieldedSnapshotStatePin();
+                    fast_startup_state_pin_present = persisted_pin.has_value();
+                    fast_startup_state_pin_current_available = current_pin.has_value();
+                    fast_startup_state_pin_verified =
+                        persisted_pin.has_value() &&
+                        current_pin.has_value() &&
+                        *persisted_pin == *current_pin;
+                    return fast_startup_state_pin_verified;
                 };
             auto build_account_registry_views =
                 [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
@@ -13174,12 +13473,35 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 !PersistShieldedState(tip)) {
                 return false;
             }
+            const bool nullifier_accumulator_verified =
+                verify_fast_startup_nullifier_accumulator();
+            if (!nullifier_accumulator_verified) {
+                const bool persisted_accumulator_present =
+                    m_shielded_nullifiers->ReadPersistedNullifierAccumulator().has_value();
+                LogPrintf("EnsureShieldedStateInitialized: nullifier accumulator %s at height=%d hash=%s; persisted shielded state may be drifted or tampered\n",
+                          persisted_accumulator_present ? "mismatch" : "absent",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                if (ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+                    LogPrintf("EnsureShieldedStateInitialized: rebuilding full shielded state from chain after nullifier accumulator verification failed\n");
+                    reset_shielded_state();
+                    if (!rebuild_from_chain()) {
+                        return false;
+                    }
+                    return finish_success();
+                }
+                LogPrintf("EnsureShieldedStateInitialized: refusing to restore persisted shielded state because nullifier accumulator verification failed and full rebuild blocks are unavailable\n");
+                return false;
+            }
+            const bool recovery_exit_active_at_tip =
+                tip != nullptr && GetConsensus().IsShieldedRecoveryExitActive(tip->nHeight);
             const bool preserve_persisted_bridge_metadata =
                 m_options.fast_shielded_startup &&
                 !m_options.shielded_startup_audit &&
+                !recovery_exit_active_at_tip &&
                 !startup_shielded_repair_performed &&
                 !preserve_snapshot_bridge_metadata_extras &&
-                verify_fast_startup_nullifier_accumulator();
+                nullifier_accumulator_verified;
             if (preserve_persisted_bridge_metadata) {
                 LogPrintf("EnsureShieldedStateInitialized: preserving persisted settlement-anchor and netting-manifest metadata at height=%d hash=%s because -fastshieldedstartup=1, -shieldedstartupaudit=0, and persisted nullifier accumulator verified\n",
                           tip != nullptr ? tip->nHeight : -1,
@@ -13212,6 +13534,12 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     return false;
                 }
             } else {
+                if (preserve_snapshot_bridge_metadata_extras) {
+                    LogPrintf("EnsureShieldedStateInitialized: refusing to restore snapshot-seeded settlement-anchor/netting metadata at height=%d hash=%s because full shielded rebuild blocks are unavailable\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                    return false;
+                }
                 LogPrintf("EnsureShieldedStateInitialized: full shielded rebuild blocks unavailable at height=%d hash=%s; retaining persisted settlement-anchor and netting-manifest state\n",
                           tip != nullptr ? tip->nHeight : -1,
                           tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
@@ -13219,40 +13547,65 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             m_shielded_state_initialized = true;
 
             // Zero-downtime restart: skip ONLY the expensive cross-chain audit (the genesis
-            // re-derivation in RebuildShieldedState) when the persisted nullifier set is proven
-            // intact by the incrementally-maintained MuHash accumulator. The cheap settlement/
-            // netting drift syncs above always run. The note-commitment frontier (root/size) and
-            // commitment-index digest were already matched to the active tip; the accumulator closes
-            // the one gap the frontier root does not cover -- the nullifier set -- so a drifted,
-            // tampered, or stale set fails this check and falls through to the audit, which rebuilds.
-            // Gated off any startup repair (never trust-skip state we just rebuilt). The accumulator
-            // needs only the nullifier DB, so this drift check works even under pruning, where the
-            // audit itself cannot run.
+            // re-derivation in RebuildShieldedState) when pre-recovery-exit persisted state has enough
+            // cheap restart evidence. After RECOVERY_EXIT activation, a local full-state pin is only
+            // diagnostic: it is computed from the restored shielded DB and is not independent evidence
+            // that recovery-exit commitments match the active chain. Therefore the recovery-exit-active
+            // path always runs the chain-derived exact audit when blocks are available, and fails closed
+            // under pruning instead of trusting a self-consistent local state/pin pair.
             const bool fast_audit_skip_eligible =
                 m_options.fast_shielded_startup &&
                 !startup_shielded_repair_performed;
-            bool nullifier_accumulator_verified = false;
-            if (fast_audit_skip_eligible) {
-                nullifier_accumulator_verified = verify_fast_startup_nullifier_accumulator();
-                if (!nullifier_accumulator_verified) {
-                    const bool persisted_accumulator_present =
-                        m_shielded_nullifiers->ReadPersistedNullifierAccumulator().has_value();
-                    LogPrintf("EnsureShieldedStateInitialized: nullifier accumulator %s at height=%d hash=%s; not taking fast path, running full audit\n",
-                              persisted_accumulator_present ? "mismatch (persisted nullifier set drifted)" : "absent (legacy persisted state)",
-                              tip != nullptr ? tip->nHeight : -1,
-                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-                }
+            const bool recovery_exit_state_pin_required =
+                recovery_exit_active_at_tip;
+            const bool shielded_state_pin_verified =
+                !recovery_exit_state_pin_required || verify_fast_startup_state_pin();
+            if (recovery_exit_state_pin_required && !shielded_state_pin_verified) {
+                LogPrintf("EnsureShieldedStateInitialized: full shielded state pin %s at height=%d hash=%s after recovery-exit activation; cross-chain audit is required\n",
+                          !fast_startup_state_pin_present ? "absent" :
+                          !fast_startup_state_pin_current_available ? "unavailable" : "mismatch",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
             }
             std::string audit_error;
-            if (fast_audit_skip_eligible && nullifier_accumulator_verified) {
-                LogPrintf("EnsureShieldedStateInitialized: -fastshieldedstartup verified persisted nullifier accumulator at height=%d hash=%s; skipping cross-chain audit for zero-downtime restart\n",
+            const bool full_rebuild_blocks_available =
+                ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip);
+            if (recovery_exit_state_pin_required) {
+                if (!full_rebuild_blocks_available) {
+                    LogPrintf("EnsureShieldedStateInitialized: refusing persisted shielded state at height=%d hash=%s because recovery-exit state requires chain-derived audit and full audit blocks are unavailable\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                    return false;
+                }
+                if (!AuditShieldedStateAgainstChain(*m_active_chainstate,
+                                                   audit_error,
+                                                   /*include_proof_audit=*/false)) {
+                    LogPrintf("EnsureShieldedStateInitialized: recovery-exit persisted shielded state audit failed (%s); rebuilding full state from chain\n",
+                              audit_error);
+                    reset_shielded_state();
+                    if (!rebuild_from_chain()) {
+                        return false;
+                    }
+                    return finish_success();
+                }
+                if (!shielded_state_pin_verified || startup_shielded_repair_performed) {
+                    LogPrintf("EnsureShieldedStateInitialized: recovery-exit cross-chain audit verified persisted shielded state; refreshing full shielded state pin at height=%d hash=%s\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                    if (!PersistShieldedState(tip)) {
+                        return false;
+                    }
+                }
+            } else if (fast_audit_skip_eligible && nullifier_accumulator_verified) {
+                LogPrintf("EnsureShieldedStateInitialized: -fastshieldedstartup verified persisted %s at height=%d hash=%s; skipping cross-chain audit for zero-downtime restart\n",
+                          "nullifier accumulator",
                           tip != nullptr ? tip->nHeight : -1,
                           tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
             } else if (!m_options.shielded_startup_audit) {
                 LogPrintf("EnsureShieldedStateInitialized: skipped persisted shielded state startup audit at height=%d hash=%s because -shieldedstartupaudit=0\n",
                           tip != nullptr ? tip->nHeight : -1,
                           tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-            } else if (ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+            } else if (full_rebuild_blocks_available) {
                 if (!AuditShieldedStateAgainstChain(*m_active_chainstate,
                                                    audit_error,
                                                    /*include_proof_audit=*/false)) {
@@ -13454,6 +13807,13 @@ bool ChainstateManager::InsertShieldedNullifiersForTest(const std::vector<Nullif
     AssertLockHeld(::cs_main);
     if (!m_shielded_nullifiers) return false;
     return m_shielded_nullifiers->Insert(nullifiers);
+}
+
+bool ChainstateManager::InsertShieldedRecoveryExitCommitmentsForTest(const std::vector<uint256>& commitments)
+{
+    AssertLockHeld(::cs_main);
+    if (!m_shielded_nullifiers) return false;
+    return m_shielded_nullifiers->InsertRecoveryExitCommitments(commitments);
 }
 
 bool ChainstateManager::InsertShieldedSettlementAnchorsForTest(const std::vector<uint256>& anchors)

@@ -379,6 +379,32 @@ Txid AddSyntheticShieldedMinerTx(CTxMemPool& tx_mempool,
     return txid;
 }
 
+Txid AddSyntheticShieldedStateMinerTx(CTxMemPool& tx_mempool,
+                                      CAmount fee,
+                                      const shielded::v2::TransactionBundle& bundle,
+                                      uint64_t sequence)
+{
+    CMutableTransaction tx;
+    tx.shielded_bundle = CShieldedBundle{};
+    tx.shielded_bundle.v2_bundle = bundle;
+    const auto tx_ref = MakeTransactionRef(std::move(tx));
+    const int64_t extra_weight = std::max<int64_t>(0, GetShieldedPolicyWeight(*tx_ref) - GetTransactionWeight(*tx_ref));
+    const CTxMemPoolEntry entry{
+        tx_ref,
+        fee,
+        TicksSinceEpoch<std::chrono::seconds>(Now<NodeSeconds>()),
+        /*entry_height=*/1,
+        sequence,
+        COIN_AGE_CACHE_ZERO,
+        /*spends_coinbase=*/false,
+        /*extra_weight=*/static_cast<int32_t>(extra_weight),
+        /*sigops_cost=*/0,
+        LockPoints{}};
+    const Txid txid = tx_ref->GetHash();
+    AddToMempool(tx_mempool, entry);
+    return txid;
+}
+
 size_t FindBlockTxIndex(const CBlock& block, const Txid& txid)
 {
     for (size_t i = 0; i < block.vtx.size(); ++i) {
@@ -476,6 +502,17 @@ struct ScopedShieldedRegistryEntryConsensus
     }
 };
 
+struct ScopedShieldedSettlementMaturityConsensus
+{
+    Consensus::Params& consensus;
+    uint32_t settlement_maturity;
+
+    ~ScopedShieldedSettlementMaturityConsensus()
+    {
+        consensus.nShieldedSettlementAnchorMaturity = settlement_maturity;
+    }
+};
+
 struct ScopedFutureMtpDriftConsensus
 {
     Consensus::Params& consensus;
@@ -523,6 +560,7 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
     auto mining{MakeMining()};
     BlockAssembler::Options options;
     options.coinbase_output_script = scriptPubKey;
+    const CAmount BLOCKSUBSIDY{GetBlockSubsidy(/*nHeight=*/1, Assert(m_node.chainman)->GetConsensus())};
 
     LOCK(tx_mempool.cs);
     // Test the ancestor feerate transaction selection.
@@ -536,7 +574,7 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
     tx.vin[0].prevout.hash = txFirst[0]->GetHash();
     tx.vin[0].prevout.n = 0;
     tx.vout.resize(1);
-    tx.vout[0].nValue = 5000000000LL - 1000;
+    tx.vout[0].nValue = BLOCKSUBSIDY - 1000;
     // This tx has a low fee: 1000 satoshis
     Txid hashParentTx = tx.GetHash(); // save this txid for later use
     const auto parent_tx{entry.Fee(1000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx)};
@@ -544,14 +582,14 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
 
     // This tx has a medium fee: 10000 satoshis
     tx.vin[0].prevout.hash = txFirst[1]->GetHash();
-    tx.vout[0].nValue = 5000000000LL - 10000;
+    tx.vout[0].nValue = BLOCKSUBSIDY - 10000;
     Txid hashMediumFeeTx = tx.GetHash();
     const auto medium_fee_tx{entry.Fee(10000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx)};
     AddToMempool(tx_mempool, medium_fee_tx);
 
     // This tx has a high fee, but depends on the first transaction
     tx.vin[0].prevout.hash = hashParentTx;
-    tx.vout[0].nValue = 5000000000LL - 1000 - 50000; // 50k satoshi fee
+    tx.vout[0].nValue = BLOCKSUBSIDY - 1000 - 50000; // 50k satoshi fee
     Txid hashHighFeeTx = tx.GetHash();
     const auto high_fee_tx{entry.Fee(50000).Time(Now<NodeSeconds>()).SpendsCoinbase(false).FromTx(tx)};
     AddToMempool(tx_mempool, high_fee_tx);
@@ -581,7 +619,7 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
 
     // Test that a package below the block min tx fee doesn't get included
     tx.vin[0].prevout.hash = hashHighFeeTx;
-    tx.vout[0].nValue = 5000000000LL - 1000 - 50000; // 0 fee
+    tx.vout[0].nValue = BLOCKSUBSIDY - 1000 - 50000; // 0 fee
     Txid hashFreeTx = tx.GetHash();
     const auto free_tx_entry = entry.Fee(0).FromTx(tx);
     AddToMempool(tx_mempool, free_tx_entry);
@@ -595,7 +633,7 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
     const CAmount minPackageFee = blockMinFeeRate.GetFee(freeTxPolicySize + lowFeeTxPolicySize);
     CAmount feeToUse = minPackageFee - 1;
 
-    tx.vout[0].nValue = 5000000000LL - 1000 - 50000 - feeToUse;
+    tx.vout[0].nValue = BLOCKSUBSIDY - 1000 - 50000 - feeToUse;
     Txid hashLowFeeTx = tx.GetHash();
     AddToMempool(tx_mempool, entry.Fee(feeToUse).FromTx(tx));
     block_template = mining->createNewBlock(options);
@@ -611,7 +649,7 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
     // of the transactions is below the min relay fee
     // Remove the low fee transaction and replace with an above-threshold fee transaction.
     tx_mempool.removeRecursive(CTransaction(tx), MemPoolRemovalReason::REPLACED);
-    tx.vout[0].nValue = 5000000000LL - 1000 - 50000 - (minPackageFee + 1000);
+    tx.vout[0].nValue = BLOCKSUBSIDY - 1000 - 50000 - (minPackageFee + 1000);
     hashLowFeeTx = tx.GetHash();
     AddToMempool(tx_mempool, entry.Fee(minPackageFee + 1000).FromTx(tx));
     block_template = mining->createNewBlock(options);
@@ -623,14 +661,11 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
 
     // Test that transaction selection properly updates ancestor fee
     // calculations as ancestor transactions get included in a block.
-    // Add a 0-fee transaction that has 2 outputs.
+    // Add a valid 0-fee transaction that has 2 outputs.
     tx.vin[0].prevout.hash = txFirst[2]->GetHash();
     tx.vout.resize(2);
-    tx.vout[0].nValue = 5000000000LL - 100000000;
+    tx.vout[0].nValue = BLOCKSUBSIDY - 100000000;
     tx.vout[1].nValue = 100000000; // 1BTC output
-    // Increase size to avoid rounding errors: when the feerate is extremely small (i.e. 1sat/kvB), evaluating the fee
-    // at a smaller transaction size gives us a rounded value of 0.
-    BulkTransaction(tx, 4000);
     Txid hashFreeTx2 = tx.GetHash();
     AddToMempool(tx_mempool, entry.Fee(0).SpendsCoinbase(true).FromTx(tx));
 
@@ -638,8 +673,8 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
     tx.vin[0].prevout.hash = hashFreeTx2;
     tx.vout.resize(1);
     const size_t lowFeeTx2VSize = GetVirtualTransactionSize(CTransaction{tx});
-    feeToUse = blockMinFeeRate.GetFee(lowFeeTx2VSize);
-    tx.vout[0].nValue = 5000000000LL - 100000000 - feeToUse;
+    feeToUse = std::max<CAmount>(blockMinFeeRate.GetFee(lowFeeTx2VSize), 1);
+    tx.vout[0].nValue = BLOCKSUBSIDY - 100000000 - feeToUse;
     Txid hashLowFeeTx2 = tx.GetHash();
     AddToMempool(tx_mempool, entry.Fee(feeToUse).SpendsCoinbase(false).FromTx(tx));
     block_template = mining->createNewBlock(options);
@@ -652,16 +687,21 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
         BOOST_CHECK(block.vtx[i]->GetHash() != hashLowFeeTx2);
     }
 
-    // This tx will be mineable, and should cause hashLowFeeTx2 to be selected
-    // as well.
+    tx_mempool.removeRecursive(CTransaction(tx), MemPoolRemovalReason::REPLACED);
+    feeToUse = blockMinFeeRate.GetFee(GetVirtualTransactionSize(CTransaction{tx})) + 10000;
+    tx.vout[0].nValue = BLOCKSUBSIDY - 100000000 - feeToUse;
+    hashLowFeeTx2 = tx.GetHash();
+    AddToMempool(tx_mempool, entry.Fee(feeToUse).SpendsCoinbase(false).FromTx(tx));
+
+    // This tx will be mineable, and should cause hashLowFeeTx2 to be selected as well.
     tx.vin[0].prevout.n = 1;
     tx.vout[0].nValue = 100000000 - 10000; // 10k satoshi fee
     AddToMempool(tx_mempool, entry.Fee(10000).FromTx(tx));
     block_template = mining->createNewBlock(options);
     BOOST_REQUIRE(block_template);
     block = block_template->getBlock();
-    BOOST_REQUIRE_EQUAL(block.vtx.size(), 9U);
-    BOOST_CHECK(block.vtx[8]->GetHash() == hashLowFeeTx2);
+    BOOST_CHECK(FindBlockTxIndex(block, hashFreeTx2) != block.vtx.size());
+    BOOST_CHECK(FindBlockTxIndex(block, hashLowFeeTx2) != block.vtx.size());
 }
 
 void MinerTestingSetup::TestBasicMining(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst, int baseheight)
@@ -672,7 +712,7 @@ void MinerTestingSetup::TestBasicMining(const CScript& scriptPubKey, const std::
     entry.nFee = 11;
     entry.nHeight = 11;
 
-    const CAmount BLOCKSUBSIDY = 50 * COIN;
+    const CAmount BLOCKSUBSIDY{GetBlockSubsidy(baseheight + 1, Assert(m_node.chainman)->GetConsensus())};
     const CAmount LOWFEE = CENT;
     const CAmount HIGHFEE = COIN;
     const CAmount HIGHERFEE = 4 * COIN;
@@ -972,12 +1012,11 @@ void MinerTestingSetup::TestBasicMining(const CScript& scriptPubKey, const std::
     auto block_template = mining->createNewBlock(options);
     BOOST_REQUIRE(block_template);
 
-    // None of the of the absolute height/time locked tx should have made
-    // it into the template because we still check IsFinalTx in CreateNewBlock,
-    // but relative locked txs will if inconsistently added to mempool.
-    // For now these will still generate a valid template until BIP68 soft fork
+    // None of the absolute or relative locked txs should make it into the
+    // template; CreateNewBlock recomputes sequence locks instead of trusting
+    // potentially corrupted mempool lockpoint metadata.
     CBlock block{block_template->getBlock()};
-    BOOST_CHECK_EQUAL(block.vtx.size(), 3U);
+    BOOST_CHECK_EQUAL(block.vtx.size(), 1U);
     // However if we advance height by 1 and time by SEQUENCE_LOCK_TIME, all of them should be mined
     for (int i = 0; i < CBlockIndex::nMedianTimeSpan; ++i) {
         CBlockIndex* ancestor{Assert(m_node.chainman->ActiveChain().Tip()->GetAncestor(m_node.chainman->ActiveChain().Tip()->nHeight - i))};
@@ -1012,7 +1051,7 @@ void MinerTestingSetup::TestConsensusSerializedSizeLimit(const CScript& scriptPu
     tx.vin[0].scriptSig = CScript() << OP_1;
     tx.vin[0].scriptWitness.stack.emplace_back(MAX_BLOCK_SERIALIZED_SIZE + 1024, 0x42);
     tx.vout.resize(1);
-    tx.vout[0].nValue = 50 * COIN - 1;
+    tx.vout[0].nValue = GetBlockSubsidy(/*nHeight=*/1, Assert(m_node.chainman)->GetConsensus()) - 1;
     tx.vout[0].scriptPubKey = CScript() << OP_1;
 
     const Txid oversized_txid = tx.GetHash();
@@ -1041,6 +1080,7 @@ void MinerTestingSetup::TestPrioritisedMining(const CScript& scriptPubKey, const
 
     BlockAssembler::Options options;
     options.coinbase_output_script = scriptPubKey;
+    const CAmount BLOCKSUBSIDY{GetBlockSubsidy(/*nHeight=*/1, Assert(m_node.chainman)->GetConsensus())};
 
     CTxMemPool& tx_mempool{MakeMempool()};
     LOCK(tx_mempool.cs);
@@ -1054,28 +1094,28 @@ void MinerTestingSetup::TestPrioritisedMining(const CScript& scriptPubKey, const
     tx.vin[0].prevout.n = 0;
     tx.vin[0].scriptSig = CScript() << OP_1;
     tx.vout.resize(1);
-    tx.vout[0].nValue = 5000000000LL; // 0 fee
+    tx.vout[0].nValue = BLOCKSUBSIDY; // 0 fee
     uint256 hashFreePrioritisedTx = tx.GetHash();
     AddToMempool(tx_mempool, entry.Fee(0).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
     tx_mempool.PrioritiseTransaction(hashFreePrioritisedTx, 5 * COIN);
 
     tx.vin[0].prevout.hash = txFirst[1]->GetHash();
     tx.vin[0].prevout.n = 0;
-    tx.vout[0].nValue = 5000000000LL - 1000;
+    tx.vout[0].nValue = BLOCKSUBSIDY - 1000;
     // This tx has a low fee: 1000 satoshis
     Txid hashParentTx = tx.GetHash(); // save this txid for later use
     AddToMempool(tx_mempool, entry.Fee(1000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
 
     // This tx has a medium fee: 10000 satoshis
     tx.vin[0].prevout.hash = txFirst[2]->GetHash();
-    tx.vout[0].nValue = 5000000000LL - 10000;
+    tx.vout[0].nValue = BLOCKSUBSIDY - 10000;
     Txid hashMediumFeeTx = tx.GetHash();
     AddToMempool(tx_mempool, entry.Fee(10000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
     tx_mempool.PrioritiseTransaction(hashMediumFeeTx, -5 * COIN);
 
     // This tx also has a low fee, but is prioritised
     tx.vin[0].prevout.hash = hashParentTx;
-    tx.vout[0].nValue = 5000000000LL - 1000 - 1000; // 1000 satoshi fee
+    tx.vout[0].nValue = BLOCKSUBSIDY - 1000 - 1000; // 1000 satoshi fee
     Txid hashPrioritsedChild = tx.GetHash();
     AddToMempool(tx_mempool, entry.Fee(1000).Time(Now<NodeSeconds>()).SpendsCoinbase(false).FromTx(tx));
     tx_mempool.PrioritiseTransaction(hashPrioritsedChild, 2 * COIN);
@@ -1087,19 +1127,19 @@ void MinerTestingSetup::TestPrioritisedMining(const CScript& scriptPubKey, const
     // FreeParent's prioritisation should not be included in that entry.
     // When FreeChild is included, FreeChild's prioritisation should also not be included.
     tx.vin[0].prevout.hash = txFirst[3]->GetHash();
-    tx.vout[0].nValue = 5000000000LL; // 0 fee
+    tx.vout[0].nValue = BLOCKSUBSIDY; // 0 fee
     Txid hashFreeParent = tx.GetHash();
     AddToMempool(tx_mempool, entry.Fee(0).SpendsCoinbase(true).FromTx(tx));
     tx_mempool.PrioritiseTransaction(hashFreeParent, 10 * COIN);
 
     tx.vin[0].prevout.hash = hashFreeParent;
-    tx.vout[0].nValue = 5000000000LL; // 0 fee
+    tx.vout[0].nValue = BLOCKSUBSIDY; // 0 fee
     Txid hashFreeChild = tx.GetHash();
     AddToMempool(tx_mempool, entry.Fee(0).SpendsCoinbase(false).FromTx(tx));
     tx_mempool.PrioritiseTransaction(hashFreeChild, 1 * COIN);
 
     tx.vin[0].prevout.hash = hashFreeChild;
-    tx.vout[0].nValue = 5000000000LL; // 0 fee
+    tx.vout[0].nValue = BLOCKSUBSIDY; // 0 fee
     Txid hashFreeGrandchild = tx.GetHash();
     AddToMempool(tx_mempool, entry.Fee(0).SpendsCoinbase(false).FromTx(tx));
 
@@ -1127,6 +1167,7 @@ void MinerTestingSetup::TestShieldedAnchorTemplateCleanup(const CScript& scriptP
 
     BlockAssembler::Options options;
     options.coinbase_output_script = scriptPubKey;
+    const CAmount BLOCKSUBSIDY{GetBlockSubsidy(/*nHeight=*/1, Assert(m_node.chainman)->GetConsensus())};
 
     CTxMemPool& tx_mempool{MakeMempool()};
     TestMemPoolEntryHelper entry;
@@ -1149,7 +1190,7 @@ void MinerTestingSetup::TestShieldedAnchorTemplateCleanup(const CScript& scriptP
         tx.vin[0].prevout.n = 0;
         tx.vin[0].scriptSig = CScript() << OP_1;
         tx.vout.resize(1);
-        tx.vout[0].nValue = 5000000000LL - 1000;
+        tx.vout[0].nValue = BLOCKSUBSIDY - 1000;
         tx.shielded_bundle.proof = {0x01};
 
         CShieldedOutput out;
@@ -1167,7 +1208,7 @@ void MinerTestingSetup::TestShieldedAnchorTemplateCleanup(const CScript& scriptP
         v2_tx.vin[0].prevout.n = 0;
         v2_tx.vin[0].scriptSig = CScript() << OP_1;
         v2_tx.vout.resize(1);
-        v2_tx.vout[0].nValue = 5000000000LL - 2000;
+        v2_tx.vout[0].nValue = BLOCKSUBSIDY - 2000;
         v2_tx.shielded_bundle.v2_bundle =
             MakeSyntheticSendBundle(/*seed=*/90'000, stale_anchor, stale_registry_anchor);
         stale_registry_txid = v2_tx.GetHash();
@@ -1208,7 +1249,7 @@ BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
     BOOST_REQUIRE(mining);
 
     // Note that by default, these tests run with size accounting enabled.
-    CScript scriptPubKey = CScript() << "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f"_hex << OP_CHECKSIG;
+    CScript scriptPubKey = CScript() << OP_TRUE;
     BlockAssembler::Options options;
     options.coinbase_output_script = scriptPubKey;
     std::unique_ptr<BlockTemplate> block_template;
@@ -1458,7 +1499,7 @@ BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_FIXTURE_TEST_SUITE(miner_shielded_tests, miner_tests::ShieldedMinerTestingSetup)
 
-BOOST_AUTO_TEST_CASE(block_assembler_fills_last_scan_slot_when_scan_capacity_is_scarce)
+BOOST_AUTO_TEST_CASE(block_assembler_skips_unprojectable_scan_placeholder_when_validity_check_is_disabled)
 {
     BlockAssembler::Options options = MakeSyntheticBlockAssemblerOptions();
     const uint256 settlement_anchor = ConfirmSyntheticSettlementAnchorDigest(*this, options.coinbase_output_script);
@@ -1517,13 +1558,13 @@ BOOST_AUTO_TEST_CASE(block_assembler_fills_last_scan_slot_when_scan_capacity_is_
 
     const size_t scan_index = FindBlockTxIndex(block_template->block, scan_txid);
     const size_t tree_index = FindBlockTxIndex(block_template->block, tree_txid);
-    BOOST_REQUIRE(scan_index != block_template->block.vtx.size());
+    BOOST_CHECK_EQUAL(scan_index, block_template->block.vtx.size());
     BOOST_CHECK_EQUAL(tree_index, block_template->block.vtx.size());
-    BOOST_CHECK_EQUAL(block_template->nShieldedScanUnits, (SCARCITY_TEST_FILLER_COUNT + 1) * SCARCITY_TEST_OUTPUT_CHUNKS);
+    BOOST_CHECK_EQUAL(block_template->nShieldedScanUnits, 0U);
     BOOST_CHECK_EQUAL(block_template->nShieldedTreeUpdateUnits, 0U);
 }
 
-BOOST_AUTO_TEST_CASE(block_assembler_fills_last_tree_slot_when_tree_capacity_is_scarce)
+BOOST_AUTO_TEST_CASE(block_assembler_skips_unprojectable_tree_placeholder_when_validity_check_is_disabled)
 {
     BlockAssembler::Options options = MakeSyntheticBlockAssemblerOptions();
     const uint256 settlement_anchor = ConfirmSyntheticSettlementAnchorDigest(*this, options.coinbase_output_script);
@@ -1582,10 +1623,46 @@ BOOST_AUTO_TEST_CASE(block_assembler_fills_last_tree_slot_when_tree_capacity_is_
 
     const size_t tree_index = FindBlockTxIndex(block_template->block, tree_txid);
     const size_t scan_index = FindBlockTxIndex(block_template->block, scan_txid);
-    BOOST_REQUIRE(tree_index != block_template->block.vtx.size());
+    BOOST_CHECK_EQUAL(tree_index, block_template->block.vtx.size());
     BOOST_CHECK_EQUAL(scan_index, block_template->block.vtx.size());
     BOOST_CHECK_EQUAL(block_template->nShieldedScanUnits, 0U);
-    BOOST_CHECK_EQUAL(block_template->nShieldedTreeUpdateUnits, (SCARCITY_TEST_FILLER_COUNT + 1) * SCARCITY_TEST_RESOURCE_UNITS);
+    BOOST_CHECK_EQUAL(block_template->nShieldedTreeUpdateUnits, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(block_assembler_projects_shielded_pool_balance_when_validity_check_is_disabled)
+{
+    BlockAssembler::Options options = MakeSyntheticBlockAssemblerOptions();
+    const uint256 spend_anchor = GetCurrentSyntheticSpendAnchor(*this);
+    const uint256 account_registry_anchor = GetCurrentSyntheticAccountRegistryAnchor(*this);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Assert(m_node.chainman)->SetShieldedPoolBalanceForTest(1)));
+
+    CTxMemPool& tx_mempool{MakeMempool()};
+    Txid first_txid;
+    Txid second_txid;
+    {
+        LOCK(tx_mempool.cs);
+        first_txid = AddSyntheticShieldedStateMinerTx(tx_mempool,
+                                                      /*fee=*/1'000'000,
+                                                      MakeSyntheticSendBundle(50'000,
+                                                                              spend_anchor,
+                                                                              account_registry_anchor),
+                                                      /*sequence=*/0);
+        second_txid = AddSyntheticShieldedStateMinerTx(tx_mempool,
+                                                       /*fee=*/900'000,
+                                                       MakeSyntheticSendBundle(50'001,
+                                                                               spend_anchor,
+                                                                               account_registry_anchor),
+                                                       /*sequence=*/1);
+    }
+
+    auto block_template =
+        BlockAssembler{Assert(m_node.chainman)->ActiveChainstate(), &tx_mempool, options, m_node}.CreateNewBlock();
+    BOOST_REQUIRE(block_template);
+
+    const bool included_first = FindBlockTxIndex(block_template->block, first_txid) != block_template->block.vtx.size();
+    const bool included_second = FindBlockTxIndex(block_template->block, second_txid) != block_template->block.vtx.size();
+    BOOST_CHECK(included_first || included_second);
+    BOOST_CHECK(!(included_first && included_second));
 }
 
 BOOST_AUTO_TEST_CASE(mixed_family_mempool_trim_evicts_lowest_feerate_entry)
@@ -1701,8 +1778,13 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
 {
     BlockAssembler::Options options = MakeSyntheticBlockAssemblerOptions();
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
-    const auto& consensus = Params().GetConsensus();
+    auto& consensus = const_cast<Consensus::Params&>(Assert(m_node.chainman)->GetConsensus());
+    const ScopedShieldedSettlementMaturityConsensus restore_maturity{
+        consensus,
+        consensus.nShieldedSettlementAnchorMaturity};
+    consensus.nShieldedSettlementAnchorMaturity = 0;
     const int32_t validation_height = GetCurrentSyntheticValidationHeight(*this);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Assert(m_node.chainman)->SetShieldedPoolBalanceForTest(100 * COIN)));
 
     auto prerequisite_rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
         /*reserve_output_count=*/1,
@@ -1725,11 +1807,6 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
     const uint256 spend_anchor = GetCurrentSyntheticSpendAnchor(*this);
     const uint256 account_registry_anchor = GetCurrentSyntheticAccountRegistryAnchor(*this);
     CTxMemPool& tx_mempool{MakeMempool()};
-    size_t funding_index{1};
-    auto next_funding_tx = [&]() -> const CTransactionRef& {
-        BOOST_REQUIRE_LT(funding_index, m_coinbase_txns.size());
-        return m_coinbase_txns.at(funding_index++);
-    };
 
     const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(
         /*output_count=*/2,
@@ -1740,12 +1817,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
         /*settlement_window=*/144,
         &consensus,
         validation_height);
-    auto settlement_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture(
-        /*output_count=*/2,
-        /*proof_receipt_count=*/1,
-        /*required_receipts=*/1,
-        &consensus,
-        validation_height);
+    auto settlement_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture(egress_fixture);
     test::shielded::AttachSettlementAnchorReserveBinding(settlement_fixture.tx,
                                                          prerequisite_rebalance_fixture.reserve_deltas,
                                                          prerequisite_rebalance_fixture.manifest_id);
@@ -1756,45 +1828,27 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
     std::map<Txid, ShieldedResourceUsage> expected_usage_by_txid;
     {
         LOCK(tx_mempool.cs);
-        const Txid send_txid = AddSyntheticShieldedMinerTx(tx_mempool,
-                                                           next_funding_tx(),
-                                                           60'000,
-                                                           /*fee=*/900'000,
-                                                           MakeSyntheticSendBundle(60'000,
-                                                                                   spend_anchor,
-                                                                                   account_registry_anchor),
-                                                           sequence++);
-        const Txid ingress_txid = AddSyntheticShieldedMinerTx(tx_mempool,
-                                                              next_funding_tx(),
-                                                              60'001,
-                                                              /*fee=*/700'000,
-                                                              MakeSyntheticIngressBundle(/*nullifier_count=*/12,
-                                                                                         60'001,
-                                                                                         spend_anchor,
-                                                                                         account_registry_anchor),
-                                                              sequence++);
-        const Txid egress_txid = AddSyntheticShieldedMinerTx(tx_mempool,
-                                                             next_funding_tx(),
-                                                             60'002,
-                                                             /*fee=*/500'000,
-                                                             ExtractV2Bundle(egress_fixture.tx),
-                                                             sequence++);
-        const Txid rebalance_txid = AddSyntheticShieldedMinerTx(tx_mempool,
-                                                                next_funding_tx(),
-                                                                60'003,
-                                                                /*fee=*/320'000,
-                                                                ExtractV2Bundle(rebalance_fixture.tx),
+        const Txid send_txid = AddSyntheticShieldedStateMinerTx(tx_mempool,
+                                                                /*fee=*/900'000,
+                                                                MakeSyntheticSendBundle(60'000,
+                                                                                        spend_anchor,
+                                                                                        account_registry_anchor),
                                                                 sequence++);
-        const Txid settlement_txid = AddSyntheticShieldedMinerTx(tx_mempool,
-                                                                 next_funding_tx(),
-                                                                 60'004,
-                                                                 /*fee=*/180'000,
-                                                                 ExtractV2Bundle(settlement_fixture.tx),
-                                                                 sequence++);
+        const Txid egress_txid = AddSyntheticShieldedStateMinerTx(tx_mempool,
+                                                                  /*fee=*/500'000,
+                                                                  ExtractV2Bundle(egress_fixture.tx),
+                                                                  sequence++);
+        const Txid rebalance_txid = AddSyntheticShieldedStateMinerTx(tx_mempool,
+                                                                     /*fee=*/320'000,
+                                                                     ExtractV2Bundle(rebalance_fixture.tx),
+                                                                     sequence++);
+        const Txid settlement_txid = AddSyntheticShieldedStateMinerTx(tx_mempool,
+                                                                      /*fee=*/180'000,
+                                                                      ExtractV2Bundle(settlement_fixture.tx),
+                                                                      sequence++);
 
         family_labels = {
             {send_txid, "send"},
-            {ingress_txid, "ingress"},
             {egress_txid, "egress"},
             {rebalance_txid, "rebalance"},
             {settlement_txid, "settlement"},
@@ -1902,9 +1956,12 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
 BOOST_AUTO_TEST_CASE(block_assembler_includes_egress_with_confirmed_rebalance_settlement_dependencies)
 {
     auto options = MakeSyntheticBlockAssemblerOptions();
-    options.test_block_validity = true;
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
-    const auto& consensus = Params().GetConsensus();
+    auto& consensus = const_cast<Consensus::Params&>(Assert(m_node.chainman)->GetConsensus());
+    const ScopedShieldedSettlementMaturityConsensus restore_maturity{
+        consensus,
+        consensus.nShieldedSettlementAnchorMaturity};
+    consensus.nShieldedSettlementAnchorMaturity = 0;
     const int32_t validation_height = GetCurrentSyntheticValidationHeight(*this);
     auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
         /*reserve_output_count=*/1,
@@ -1948,22 +2005,15 @@ BOOST_AUTO_TEST_CASE(block_assembler_includes_egress_with_confirmed_rebalance_se
                               settlement_fixture.settlement_anchor_digest)));
 
     CTxMemPool& tx_mempool{MakeMempool()};
-    size_t funding_index{1};
-    auto next_funding_tx = [&]() -> const CTransactionRef& {
-        BOOST_REQUIRE_LT(funding_index, m_coinbase_txns.size());
-        return m_coinbase_txns.at(funding_index++);
-    };
 
     uint64_t sequence{0};
     Txid egress_txid;
     {
         LOCK(tx_mempool.cs);
-        egress_txid = AddSyntheticShieldedMinerTx(tx_mempool,
-                                                  next_funding_tx(),
-                                                  70'000,
-                                                  /*fee=*/900'000,
-                                                  ExtractV2Bundle(egress_fixture.tx),
-                                                  sequence++);
+        egress_txid = AddSyntheticShieldedStateMinerTx(tx_mempool,
+                                                       /*fee=*/900'000,
+                                                       ExtractV2Bundle(egress_fixture.tx),
+                                                       sequence++);
     }
 
     auto block_template =

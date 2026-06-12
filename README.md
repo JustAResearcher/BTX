@@ -20,11 +20,12 @@ path, registry state committed full shielded account-leaf payloads, and
 consumed-leaf tx witnesses were lean on wire while full nodes recovered
 `CompactPublicAccount` state from authenticated consensus data.
 
-Current v0.32.5 production behavior: after block `125000`, consensus disables
+Current v0.32.6 production behavior: after block `125000`, consensus disables
 new shielded credits, private shielded-output appends, bridge ingress/control
 rollover, and re-shielding. Retained production surfaces are balance/viewing,
-legacy recovery accounting, and permitted transparent exits of existing
-shielded value.
+legacy recovery accounting, and permitted transparent exits of existing shielded
+value. From block `128000`, proofless transparent-funded `V2_SEND` public-flow
+shielding is also disabled.
 
 Current measured launch-surface figures on the pre-`61000` baseline surface:
 
@@ -305,7 +306,7 @@ For the full PQ specification and tutorials, see:
 
 BTX includes a **shielded transaction pool** active from genesis on all
 networks. Shielded transactions hide sender, receiver, and amount using
-lattice-based zero-knowledge proofs. As of v0.32.5, coinbase auto-shielding is
+lattice-based zero-knowledge proofs. As of v0.32.6, coinbase auto-shielding is
 opt-in (default off; `-autoshieldcoinbase=1`) so mined rewards stay as
 post-quantum transparent outputs unless an operator chooses to shield.
 
@@ -334,15 +335,17 @@ As of `2026-03-23`, the pre-sunset reset-chain launch architecture was:
 - lean consumed-leaf transaction witnesses on wire
   (`leaf_index + account_leaf_commitment + sibling_path`),
 - egress, rebalance, and settlement flows aligned with the same shielded state
-
-As of v0.32.5, current production nodes enforce the block-`125000` sunset:
-new shielded credits, private shielded-output appends, bridge ingress/control
-transactions, rollover/rebalance, and re-shielding are disabled by consensus.
-Existing shielded balances remain visible/accounted, and strict transparent
-exit/recovery paths remain the supported direction.
   model,
 - legacy MatRiCT and receipt-backed ingress retained only as non-launch
   residual tooling.
+
+As of v0.32.6, current production nodes enforce the block-`125000` sunset:
+new shielded credits, private shielded-output appends, bridge ingress/control
+transactions, rollover/rebalance, and re-shielding are disabled by consensus.
+Existing shielded balances remain visible/accounted, and strict transparent
+exit/recovery paths remain the supported direction. From block `128000`,
+proofless transparent-funded `V2_SEND` public-flow shielding is disabled as a
+cleanup boundary.
 
 The hard-fork launch protocol is final for this chain. Larger recursive CT
 anonymity sets are not part of that protocol and are explicitly rejected by
@@ -634,7 +637,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.32.5 \
+  --release-tag v0.32.6 \
   --preset service \
   --datadir="$HOME/.btx"
 ```

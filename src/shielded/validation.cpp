@@ -250,13 +250,18 @@ namespace {
         return false;
     }
 
+    if (consensus == nullptr || !consensus->IsShieldedDirectSendPublicFlowDisabled(validation_height)) {
+        return true;
+    }
+
     if (!tx.vout.empty()) {
         reject_reason = "bad-shielded-v2-send-public-flow-disabled";
         return false;
     }
 
     if (!tx.vin.empty()) {
-        return true;
+        reject_reason = "bad-shielded-v2-send-public-flow-disabled";
+        return false;
     }
 
     if (payload.value_balance != payload.fee) {
@@ -1732,6 +1737,9 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
             // RECOVERY_EXIT carries no shielded proof payload. Bundle structure enforces the NONE envelope;
             // ConnectBlock validates the transparent claim by checking ownership, snapshot membership, and
             // atomic retirement of both the revealed commitment and canonical normal-path nullifier.
+            if (!m_tx->vin.empty()) {
+                return std::string{"bad-shielded-v2-recovery-exit-transparent-input"};
+            }
             return std::nullopt;
         case shielded::v2::TransactionFamily::V2_GENERIC:
             LogShieldedV2ContextReject("proof-check-v2-generic-family", bundle);

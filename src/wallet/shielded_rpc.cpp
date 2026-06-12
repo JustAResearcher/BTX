@@ -8740,12 +8740,8 @@ RPCHelpMan z_sendmany()
                                 const int32_t build_height = NextShieldingRpcBuildHeight(*pwallet);
                                 const bool recovery_exit_active =
                                     Params().GetConsensus().IsShieldedRecoveryExitActive(build_height);
-                                const bool sunset_active =
-                                    Params().GetConsensus().IsShieldedSunsetActive(build_height);
                                 const bool transparent_only_exit =
                                     shielded_recipients.empty() && !transparent_recipients.empty();
-                                const bool must_use_recovery_exit =
-                                    sunset_active && transparent_only_exit;
                                 const bool try_recovery_exit =
                                     recovery_exit_active &&
                                     transparent_only_exit &&
@@ -8799,22 +8795,6 @@ RPCHelpMan z_sendmany()
                                     }
                                 }
                                 if (!mtx.has_value()) {
-                                    if (must_use_recovery_exit) {
-                                        if (!recovery_exit_active) {
-                                            create_error = strprintf(
-                                                "shielded recovery exits are not active at height %d",
-                                                build_height);
-                                        } else if (transparent_recipients.size() != 1) {
-                                            create_error =
-                                                "post-sunset transparent recovery exits require exactly one transparent recipient";
-                                        } else if (conflict_selection.has_value()) {
-                                            create_error =
-                                                "post-sunset transparent recovery exits do not support conflict_txid replacement";
-                                        } else if (create_error.empty()) {
-                                            create_error = "transparent recovery exit failed";
-                                        }
-                                        throw JSONRPCError(RPC_WALLET_ERROR, create_error);
-                                    }
                                     mtx = pwallet->m_shielded_wallet->CreateShieldedSpend(
                                         shielded_recipients,
                                         transparent_recipients,

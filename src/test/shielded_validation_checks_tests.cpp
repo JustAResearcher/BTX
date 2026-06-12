@@ -1854,6 +1854,67 @@ BOOST_AUTO_TEST_CASE(proof_check_defers_postfork_proofless_transparent_shielding
     BOOST_CHECK_MESSAGE(!res.has_value(), res.value_or("ok"));
 }
 
+BOOST_AUTO_TEST_CASE(proof_check_rejects_post_disable_proofless_transparent_shielding)
+{
+    auto consensus = Params().GetConsensus();
+    const int32_t validation_height = consensus.nShieldedDirectSendPublicFlowDisableHeight;
+    BOOST_REQUIRE(consensus.IsShieldedDirectSendPublicFlowDisabled(validation_height));
+    const CTransaction tx{BuildProoflessTransparentShieldingTx(/*output_value=*/49'000,
+                                                              /*fee=*/1,
+                                                              &consensus,
+                                                              validation_height)};
+
+    CShieldedProofCheck check(tx,
+                              consensus,
+                              validation_height,
+                              {},
+                              {},
+                              {});
+    const auto res = check();
+    BOOST_REQUIRE_MESSAGE(res.has_value(), "expected post-disable proofless shielding reject");
+    BOOST_CHECK_EQUAL(*res, "bad-shielded-v2-send-public-flow-disabled");
+}
+
+BOOST_AUTO_TEST_CASE(proof_check_height_128000_blocks_public_no_spend_without_stranding_lifecycle_exits)
+{
+    auto consensus = Params().GetConsensus();
+    constexpr int32_t validation_height{128'000};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+    consensus.nShieldedPoolCreditDisableHeight = validation_height;
+    consensus.nShieldedSunsetHeight = validation_height;
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = validation_height;
+    consensus.nShieldedRecoveryExitActivationHeight = validation_height;
+    BOOST_REQUIRE(consensus.IsShieldedPoolCreditDisabled(validation_height));
+    BOOST_REQUIRE(consensus.IsShieldedSunsetActive(validation_height));
+    BOOST_REQUIRE(consensus.IsShieldedDirectSendPublicFlowDisabled(validation_height));
+
+    const CTransaction proofless_tx{
+        BuildProoflessTransparentShieldingTx(/*output_value=*/49'000,
+                                             /*fee=*/1,
+                                             &consensus,
+                                             validation_height)};
+    CShieldedProofCheck proofless_check(proofless_tx,
+                                        consensus,
+                                        validation_height,
+                                        {},
+                                        {},
+                                        {});
+    const auto proofless_res = proofless_check();
+    BOOST_REQUIRE_MESSAGE(proofless_res.has_value(),
+                          "expected height-128000 proofless shielding reject");
+    BOOST_CHECK_EQUAL(*proofless_res, "bad-shielded-v2-send-public-flow-disabled");
+
+    const CTransaction lifecycle_tx{BuildLifecycleControlTx(&consensus, validation_height)};
+    CShieldedProofCheck lifecycle_check(lifecycle_tx,
+                                        consensus,
+                                        validation_height,
+                                        {},
+                                        {},
+                                        {});
+    const auto lifecycle_res = lifecycle_check();
+    BOOST_CHECK_MESSAGE(!lifecycle_res.has_value(), lifecycle_res.value_or("ok"));
+}
+
 BOOST_AUTO_TEST_CASE(proof_check_rejects_postfork_mixed_shielded_to_transparent_v2_send)
 {
     auto fixture = BuildV2SendFixture(/*fee=*/shielded::SHIELDED_PRIVACY_FEE_QUANTUM);

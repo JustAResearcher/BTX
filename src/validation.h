@@ -338,6 +338,10 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
 
 [[nodiscard]] bool HasInvalidShieldedAnchors(const CTransaction& tx,
                                              const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+[[nodiscard]] bool HasInvalidShieldedRecoveryExitMempoolState(const CTransaction& tx,
+                                                             const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+[[nodiscard]] bool CollectShieldedMempoolNullifiersForBlock(const CTransaction& tx,
+                                                           std::vector<Nullifier>& out_nullifiers);
 void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
                                                   CChain& chain,
                                                   ChainstateManager& chainman,
@@ -1554,6 +1558,10 @@ public:
     [[nodiscard]] bool InsertShieldedNullifiersForTest(const std::vector<Nullifier>& nullifiers)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Test/diagnostic hook to inject persisted recovery-exit commitments into the live shielded store. */
+    [[nodiscard]] bool InsertShieldedRecoveryExitCommitmentsForTest(const std::vector<uint256>& commitments)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Test/diagnostic hook to inject persisted settlement anchors into the live shielded store. */
     [[nodiscard]] bool InsertShieldedSettlementAnchorsForTest(const std::vector<uint256>& anchors)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -1585,6 +1593,14 @@ public:
     {
         if (!m_shielded_nullifiers) return false;
         return m_shielded_nullifiers->ForEachPersistedNullifier(std::forward<Fn>(fn));
+    }
+
+    /** Iterate over persisted recovery-exit spent commitments in on-disk order. */
+    template <typename Fn>
+    bool ForEachShieldedRecoveryExitCommitment(Fn&& fn) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        if (!m_shielded_nullifiers) return false;
+        return m_shielded_nullifiers->ForEachPersistedRecoveryExitCommitment(std::forward<Fn>(fn));
     }
 
     /** Iterate over persisted settlement-anchor digests in on-disk order. */

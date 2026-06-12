@@ -12,6 +12,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/merkle.h>
+#include <consensus/tx_check.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <deploymentstatus.h>
@@ -34,6 +35,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <set>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -54,6 +56,30 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
     std::vector<unsigned char> witness_program;
     if (!script_pub_key.IsWitnessProgram(witness_version, witness_program)) return false;
     return witness_version == 2 && witness_program.size() == 32;
+}
+
+[[nodiscard]] bool PassesReducedDataOutputLimits(const CTransaction& tx,
+                                                 const Consensus::Params& consensus)
+{
+    if (!consensus.fReducedDataLimits) return true;
+
+    for (const auto& txout : tx.vout) {
+        const size_t script_size{txout.scriptPubKey.size()};
+        const bool is_op_return{script_size > 0 && txout.scriptPubKey[0] == OP_RETURN};
+        if (is_op_return) {
+            if (script_size > consensus.nMaxOpReturnBytes) {
+                return false;
+            }
+            continue;
+        }
+        if (script_size > consensus.nMaxTxoutScriptPubKeyBytes) {
+            return false;
+        }
+        if (consensus.fEnforceP2MROnlyOutputs && !IsP2MROutputScript(txout.scriptPubKey)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 [[nodiscard]] std::vector<uint256> CollectReferencedShieldedNettingManifests(const CTransaction& tx)
@@ -87,13 +113,17 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
     case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR: {
         auto created = ExtractCreatedShieldedSettlementAnchors(tx, validation_height, reject_reason);
         if (!created.has_value()) return false;
-        settlement_anchors.insert(created->begin(), created->end());
+        for (const auto& anchor : *created) {
+            if (!settlement_anchors.insert(anchor).second) return false;
+        }
         return true;
     }
     case shielded::v2::TransactionFamily::V2_REBALANCE: {
         auto created = ExtractCreatedShieldedNettingManifests(tx, reject_reason);
         if (!created.has_value()) return false;
-        netting_manifests.insert(created->begin(), created->end());
+        for (const auto& manifest_id : *created) {
+            if (!netting_manifests.insert(manifest_id).second) return false;
+        }
         return true;
     }
     case shielded::v2::TransactionFamily::V2_SEND:
@@ -108,6 +138,17 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
     return true;
 }
 
+[[nodiscard]] bool IsSettlementAnchorMatureForTemplate(const ConfirmedSettlementAnchorState& anchor_state,
+                                                       const Consensus::Params& consensus,
+                                                       int32_t validation_height)
+{
+    const uint32_t maturity_depth = consensus.GetShieldedSettlementAnchorMaturityDepth(validation_height);
+    if (maturity_depth == 0) return true;
+    if (!anchor_state.IsValid() || validation_height <= anchor_state.created_height) return false;
+    const auto depth = static_cast<uint32_t>(validation_height - anchor_state.created_height);
+    return depth >= maturity_depth;
+}
+
 [[nodiscard]] bool AreShieldedRefsReadyForBlock(const CTransaction& tx,
                                                 const ChainstateManager& chainman,
                                                 const std::set<uint256>& settlement_anchors,
@@ -116,10 +157,46 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
 {
     if (!tx.HasShieldedBundle()) return true;
 
+    if (HasInvalidShieldedRecoveryExitMempoolState(tx, chainman)) {
+        return false;
+    }
+
+    std::vector<Nullifier> shielded_nullifiers;
+    if (!CollectShieldedMempoolNullifiersForBlock(tx, shielded_nullifiers)) {
+        return false;
+    }
+    for (const auto& nullifier : shielded_nullifiers) {
+        if (chainman.IsShieldedNullifierSpent(nullifier)) {
+            return false;
+        }
+    }
+
     for (const auto& anchor : CollectShieldedSettlementAnchorRefs(tx.GetShieldedBundle())) {
         if (anchor.IsNull()) continue;
         if (!chainman.IsShieldedSettlementAnchorValid(anchor) &&
             settlement_anchors.count(anchor) == 0) {
+            return false;
+        }
+    }
+
+    const auto* v2_bundle = tx.GetShieldedBundle().GetV2Bundle();
+    if (v2_bundle != nullptr &&
+        shielded::v2::BundleHasSemanticFamily(*v2_bundle,
+                                              shielded::v2::TransactionFamily::V2_EGRESS_BATCH)) {
+        const auto& payload = std::get<shielded::v2::EgressBatchPayload>(v2_bundle->payload);
+        const int32_t validation_height = chainman.ActiveChain().Height() + 1;
+        const uint32_t maturity_depth =
+            chainman.GetConsensus().GetShieldedSettlementAnchorMaturityDepth(validation_height);
+        const auto anchor_state = chainman.GetShieldedSettlementAnchorState(payload.settlement_anchor);
+        if (maturity_depth > 0) {
+            if (!anchor_state.has_value() ||
+                !IsSettlementAnchorMatureForTemplate(*anchor_state,
+                                                     chainman.GetConsensus(),
+                                                     validation_height)) {
+                return false;
+            }
+        } else if (!anchor_state.has_value() &&
+                   settlement_anchors.count(payload.settlement_anchor) == 0) {
             return false;
         }
     }
@@ -143,6 +220,21 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
     return true;
 }
 
+[[nodiscard]] bool AddShieldedNullifiersForTemplateTx(const CTransaction& tx,
+                                                      std::set<uint256>& shielded_nullifiers)
+{
+    std::vector<Nullifier> tx_nullifiers;
+    if (!CollectShieldedMempoolNullifiersForBlock(tx, tx_nullifiers)) {
+        return false;
+    }
+    for (const auto& nullifier : tx_nullifiers) {
+        if (!shielded_nullifiers.insert(nullifier).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] bool IsShieldedPackageReadyForBlock(const std::vector<CTxMemPool::txiter>& sorted_entries,
                                                   const CTxMemPool::setEntries& in_block,
                                                   const ChainstateManager& chainman)
@@ -150,10 +242,14 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
 {
     std::set<uint256> settlement_anchors;
     std::set<uint256> netting_manifests;
+    std::set<uint256> shielded_nullifiers;
     // The package is being assembled for the next block; bridge-OUT attestor receipts must verify
     // under the scheme fixed by that height (FIPS-205 at/after C-002).
     const int64_t validation_height = chainman.ActiveChain().Height() + 1;
     for (const auto& entry : in_block) {
+        if (!AddShieldedNullifiersForTemplateTx(entry->GetTx(), shielded_nullifiers)) {
+            return false;
+        }
         if (!AddCreatedShieldedRefs(entry->GetTx(), validation_height, settlement_anchors, netting_manifests)) {
             return false;
         }
@@ -161,6 +257,9 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
 
     for (const auto& entry : sorted_entries) {
         if (!AreShieldedRefsReadyForBlock(entry->GetTx(), chainman, settlement_anchors, netting_manifests)) {
+            return false;
+        }
+        if (!AddShieldedNullifiersForTemplateTx(entry->GetTx(), shielded_nullifiers)) {
             return false;
         }
         if (!AddCreatedShieldedRefs(entry->GetTx(), validation_height, settlement_anchors, netting_manifests)) {
@@ -607,6 +706,7 @@ void BlockAssembler::resetBlock()
     nBlockShieldedScanUnits = 0;
     nBlockShieldedTreeUpdateUnits = 0;
     nBlockShieldedAccountRegistryAppends = 0;
+    m_blockShieldedPoolBalance = ShieldedPoolBalance{};
     m_baseShieldedAccountRegistryEntries = 0;
 
     lastFewTxs = 0;
@@ -639,6 +739,10 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     if (!TryGetNextBlockHeight(pindexPrev->nHeight, nHeight)) {
         LogWarning("CreateNewBlock(): block height overflow at prev height %d\n", pindexPrev->nHeight);
         throw std::runtime_error("CreateNewBlock(): block height overflow");
+    }
+    if (!m_blockShieldedPoolBalance.SetBalance(m_chainstate.m_chainman.GetShieldedPoolBalance())) {
+        LogWarning("CreateNewBlock(): invalid shielded pool balance at tip height %d\n", pindexPrev->nHeight);
+        throw std::runtime_error("CreateNewBlock(): invalid shielded pool balance");
     }
     m_baseShieldedAccountRegistryEntries = m_chainstate.m_chainman.GetShieldedAccountRegistryEntryCount();
     LogDebug(BCLog::MINING, "CreateNewBlock(): building on tip height=%d hash=%s\n",
@@ -730,13 +834,8 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     }
     pblocktemplate->vTxSigOpsCost[0] = WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*pblock->vtx[0]);
 
-    const auto& consensus_params = chainparams.GetConsensus();
-    const bool skip_pow_template_check =
-        consensus_params.fMatMulPOW ||
-        (consensus_params.fKAWPOW && !consensus_params.fSkipKAWPOWValidation &&
-            nHeight >= consensus_params.nKAWPOWHeight);
     BlockValidationState state;
-    if (m_options.test_block_validity && !skip_pow_template_check) {
+    if (m_options.test_block_validity) {
         LogDebug(BCLog::MINING, "CreateNewBlock(): running TestBlockValidity for height %d\n", nHeight);
         if (!TestBlockValidity(state, chainparams, m_chainstate, *pblock, pindexPrev,
                                /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/false)) {
@@ -745,9 +844,8 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         }
         LogDebug(BCLog::MINING, "CreateNewBlock(): TestBlockValidity passed for height %d\n", nHeight);
     } else {
-        LogDebug(BCLog::MINING, "CreateNewBlock(): skipping TestBlockValidity (skip_pow=%s, test_validity=%s) for height %d\n",
-                 skip_pow_template_check ? "true" : "false",
-                 m_options.test_block_validity ? "true" : "false", nHeight);
+        LogDebug(BCLog::MINING, "CreateNewBlock(): skipping TestBlockValidity (test_validity=false) for height %d\n",
+                 nHeight);
     }
     const auto time_2{SteadyClock::now()};
 
@@ -809,14 +907,43 @@ static bool TryCountTransactionShieldedAccountRegistryAppends(const CTransaction
 // - transaction finality (locktime)
 // - serialized size limit (consensus nBlockMaxSize ceiling)
 // - shielded verification cost budget
-bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& package) const
+bool BlockAssembler::TestPackageTransactions(const CTxMemPool& mempool,
+                                             const CTxMemPool::setEntries& package) const
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     uint64_t nPotentialBlockSize = nBlockSize; // only used with fNeedSizeAccounting
     uint64_t nPotentialShieldedCost = nBlockShieldedVerifyCost;
     uint64_t nPotentialShieldedScanUnits = nBlockShieldedScanUnits;
     uint64_t nPotentialShieldedTreeUpdateUnits = nBlockShieldedTreeUpdateUnits;
     uint64_t nPotentialShieldedAccountRegistryAppends = nBlockShieldedAccountRegistryAppends;
+    ShieldedPoolBalance nPotentialShieldedPoolBalance = m_blockShieldedPoolBalance;
+    CBlockIndex* const tip = m_chainstate.m_chain.Tip();
+    if (tip == nullptr) return false;
+    CCoinsViewMemPool view_mempool{&m_chainstate.CoinsTip(), mempool};
+    std::set<COutPoint> spent_outpoints;
+    for (CTxMemPool::txiter it : inBlock) {
+        for (const auto& txin : it->GetTx().vin) {
+            if (!txin.prevout.IsNull()) {
+                spent_outpoints.insert(txin.prevout);
+            }
+        }
+    }
     for (CTxMemPool::txiter it : package) {
+        if (it->GetTx().IsCoinBase()) {
+            return false;
+        }
+        TxValidationState tx_state;
+        if (!CheckTransaction(it->GetTx(), tx_state)) {
+            return false;
+        }
+        if (!PassesReducedDataOutputLimits(it->GetTx(), chainparams.GetConsensus())) {
+            return false;
+        }
+        for (const auto& txin : it->GetTx().vin) {
+            if (txin.prevout.IsNull() || !spent_outpoints.insert(txin.prevout).second) {
+                return false;
+            }
+        }
         if (it->GetTx().HasShieldedBundle() &&
             UseAccountRegistryEntryCountLimit(chainparams.GetConsensus(), nHeight) &&
             m_baseShieldedAccountRegistryEntries >
@@ -826,6 +953,24 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
         if (!IsFinalTx(it->GetTx(), nHeight, m_lock_time_cutoff)) {
             return false;
         }
+        const std::optional<LockPoints> lock_points{
+            CalculateLockPointsAtTip(tip, view_mempool, it->GetTx())};
+        if (!lock_points.has_value() ||
+            !CheckSequenceLocksAtTip(tip, *lock_points)) {
+            return false;
+        }
+        it->UpdateLockPoints(*lock_points);
+        if (it->GetSpendsCoinbase()) {
+            for (const CTxIn& txin : it->GetTx().vin) {
+                if (mempool.exists(GenTxid::Txid(txin.prevout.hash))) continue;
+                const Coin& coin{m_chainstate.CoinsTip().AccessCoin(txin.prevout)};
+                if (coin.IsSpent()) return false;
+                const int64_t coinbase_depth{static_cast<int64_t>(nHeight) - coin.nHeight};
+                if (coin.IsCoinBase() && coinbase_depth < COINBASE_MATURITY) {
+                    return false;
+                }
+            }
+        }
         if (fNeedSizeAccounting) {
             uint64_t nTxSize = ::GetSerializeSize(TX_WITH_WITNESS(it->GetTx()));
             if (nPotentialBlockSize + nTxSize >= m_options.nBlockMaxSize) {
@@ -834,6 +979,15 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool::setEntries& packa
             nPotentialBlockSize += nTxSize;
         }
         const auto shielded_usage = GetTransactionShieldedResourceUsage(it->GetTx());
+        if (it->GetTx().HasShieldedBundle()) {
+            std::string pool_balance_reject;
+            const auto state_value_balance =
+                TryGetShieldedStateValueBalance(it->GetTx().GetShieldedBundle(), pool_balance_reject);
+            if (!state_value_balance.has_value() ||
+                !nPotentialShieldedPoolBalance.ApplyValueBalance(*state_value_balance)) {
+                return false;
+            }
+        }
         nPotentialShieldedCost += shielded_usage.verify_units;
         if (nPotentialShieldedCost > chainparams.GetConsensus().nMaxBlockShieldedVerifyCost) {
             return false;
@@ -896,6 +1050,13 @@ void BlockAssembler::AddToBlock(const CTxMemPool& mempool, CTxMemPool::txiter it
     nBlockShieldedScanUnits += shielded_usage.scan_units;
     nBlockShieldedTreeUpdateUnits += shielded_usage.tree_update_units;
     nBlockShieldedAccountRegistryAppends += shielded_account_registry_appends;
+    if (iter->GetTx().HasShieldedBundle()) {
+        std::string pool_balance_reject;
+        const auto state_value_balance =
+            TryGetShieldedStateValueBalance(iter->GetTx().GetShieldedBundle(), pool_balance_reject);
+        Assume(state_value_balance.has_value());
+        Assume(m_blockShieldedPoolBalance.ApplyValueBalance(*state_value_balance));
+    }
     inBlock.insert(iter);
 
     if (m_options.print_modified_fee) {
@@ -1107,7 +1268,7 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
         }
 
         // Test if all tx's are Final
-        if (!TestPackageTransactions(candidate.entries)) {
+        if (!TestPackageTransactions(mempool, candidate.entries)) {
             if (candidate.from_modified) {
                 mapModifiedTx.erase(iter);
             }

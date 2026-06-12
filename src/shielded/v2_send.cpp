@@ -299,7 +299,8 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
         reject_reason = "bad-shielded-v2-builder-transparent-inputs";
         return std::nullopt;
     }
-    if (output_inputs.empty() || output_inputs.size() > MAX_DIRECT_OUTPUTS) {
+    if (output_inputs.size() > MAX_DIRECT_OUTPUTS ||
+        (output_inputs.empty() && (!has_shielded_spends || tx_template.vout.empty()))) {
         reject_reason = "bad-shielded-v2-builder-output-count";
         return std::nullopt;
     }
@@ -416,8 +417,6 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
         std::any_of(output_inputs.begin(), output_inputs.end(), [](const V2SendOutputInput& output) {
             return output.lifecycle_control.has_value();
         });
-    payload.output_note_class = output_inputs.front().note_class;
-    payload.output_scan_domain = output_inputs.front().encrypted_note.scan_domain;
     const bool postfork =
         consensus != nullptr &&
         consensus->IsShieldedMatRiCTDisabled(validation_height);
@@ -435,11 +434,19 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
     const bool use_unshield_send_encoding =
         use_postfork_compact_send_encoding && has_transparent_outflow &&
         consensus != nullptr && consensus->IsShieldedC002Active(validation_height);
+    if (output_inputs.empty() && !use_unshield_send_encoding) {
+        reject_reason = "bad-shielded-v2-builder-output-count";
+        return std::nullopt;
+    }
     if (has_lifecycle_controls) {
         if (postfork || has_shielded_spends || output_inputs.size() != 1) {
             reject_reason = "bad-shielded-v2-builder-lifecycle-control";
             return std::nullopt;
         }
+    }
+    if (!output_inputs.empty()) {
+        payload.output_note_class = output_inputs.front().note_class;
+        payload.output_scan_domain = output_inputs.front().encrypted_note.scan_domain;
     }
     payload.output_encoding = !has_shielded_spends
         ? (use_postfork_compact_send_encoding

@@ -278,6 +278,11 @@ struct Params {
     int32_t nShieldedPQ128UpgradeHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedPoolCreditDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSunsetHeight{std::numeric_limits<int32_t>::max()};
+    /** Disable proofless transparent-funded V2_SEND public-flow shielding. This is
+     *  deliberately separate from the 125,000 shielded sunset so upgraded nodes can
+     *  enforce the mempool/template hardening immediately from the 128,000 cleanup
+     *  boundary without retroactively changing the 125,000..127,999 history. */
+    int32_t nShieldedDirectSendPublicFlowDisableHeight{std::numeric_limits<int32_t>::max()};
     /** RECOVERY_EXIT activation (transparent-claim stranded-note recovery). DISABLED by default
      *  (int32 max) for regtest unless explicitly overridden. Production networks activate it at the
      *  125,000 sunset only after strict zero-output sunset gating, mempool commitment/nullifier
@@ -464,11 +469,20 @@ struct Params {
             nShieldedSunsetHeight != std::numeric_limits<int32_t>::max() &&
             height >= nShieldedSunsetHeight;
     }
+    bool IsShieldedDirectSendPublicFlowDisabled(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedDirectSendPublicFlowDisableHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedDirectSendPublicFlowDisableHeight;
+    }
     bool IsShieldedRecoveryExitActive(int32_t height) const
     {
         return height >= 0 &&
             nShieldedRecoveryExitActivationHeight != std::numeric_limits<int32_t>::max() &&
-            height >= nShieldedRecoveryExitActivationHeight;
+            nShieldedSunsetHeight != std::numeric_limits<int32_t>::max() &&
+            nShieldedRecoveryExitActivationHeight >= nShieldedSunsetHeight &&
+            height >= nShieldedRecoveryExitActivationHeight &&
+            height >= nShieldedSunsetHeight;
     }
     uint32_t GetShieldedSettlementAnchorMaturityDepth(int32_t height) const
     {

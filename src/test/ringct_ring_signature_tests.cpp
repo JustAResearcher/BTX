@@ -493,7 +493,8 @@ BOOST_AUTO_TEST_CASE(known_answer_vectors_for_deterministic_derivations)
     for (size_t i = 0; i < spending_key.size(); ++i) {
         spending_key[i] = static_cast<unsigned char>(0xA0 + i);
     }
-    const uint256 ring_member{"11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff"};
+    const uint256 ring_member =
+        uint256::FromHex("11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff").value();
 
     Nullifier nf;
     BOOST_REQUIRE(DeriveInputNullifierForTest(nf,
@@ -512,7 +513,8 @@ BOOST_AUTO_TEST_CASE(known_answer_vectors_for_deterministic_derivations)
         uint256{"0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100"},
         uint256{"00112233445566778899aabbccddeeff0f0e0d0c0b0a09080706050403020100"},
     };
-    const uint256 tx_binding_hash{"1234567890abcdef00112233445566778899aabbccddeeff1122334455667788"};
+    const uint256 tx_binding_hash =
+        uint256::FromHex("1234567890abcdef00112233445566778899aabbccddeeff1122334455667788").value();
     const uint256 msg_hash = RingSignatureMessageHash({in0, in1}, {out0}, /*fee=*/3, input_nullifiers, tx_binding_hash);
     BOOST_CHECK_EQUAL(msg_hash, uint256{"11d9cac523f007a94904f74314f9e3ed89da86b0d8300bcb78bf1511ad3dc448"});
 }

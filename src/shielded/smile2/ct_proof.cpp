@@ -2126,6 +2126,11 @@ std::optional<SmileCTProof> TryProveCT(
     if (public_fee < 0) {
         return std::nullopt;
     }
+    if (m_in == 0 || m_in > MAX_CT_INPUTS ||
+        n_out > MAX_CT_OUTPUTS ||
+        (n_out == 0 && (!is_v3 || public_fee <= 0))) {
+        return std::nullopt;
+    }
     if (std::any_of(inputs.begin(), inputs.end(), [](const CTInput& input) {
             return input.amount < 0;
         }) ||
@@ -3155,7 +3160,8 @@ bool VerifyCT(
               (unsigned)num_inputs, (unsigned)num_outputs, (unsigned)N, (unsigned)rec_levels, (unsigned)k);
 
     if (num_inputs == 0 || num_inputs > MAX_CT_INPUTS ||
-        num_outputs == 0 || num_outputs > MAX_CT_OUTPUTS) {
+        num_outputs > MAX_CT_OUTPUTS ||
+        (num_outputs == 0 && (!is_v3 || public_fee <= 0))) {
         LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [input-bounds]: num_inputs=%u num_outputs=%u\n",
                   (unsigned)num_inputs,
                   (unsigned)num_outputs);

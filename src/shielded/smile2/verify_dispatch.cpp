@@ -73,7 +73,7 @@ std::optional<std::string> ParseSmile2Proof(
     if (num_inputs == 0 || num_inputs > 16) {
         return std::string{"bad-smile2-proof-input-count"};
     }
-    if (num_outputs == 0 || num_outputs > 16) {
+    if (num_outputs > 16) {
         return std::string{"bad-smile2-proof-output-count"};
     }
 
@@ -125,6 +125,10 @@ std::optional<std::string> ValidateSmile2Proof(
     // historical/pre-activation only — accepting it post-H would let a prover
     // dodge the seed_z binding. Non-anonset (legacy) proofs are unaffected.
     const bool require_c002 = validation_height >= c002_activation_height;
+    if (num_outputs == 0 &&
+        (!bind_anonset_context || !require_c002 || public_fee <= 0)) {
+        return std::string{"bad-smile2-proof-output-count"};
+    }
     const uint8_t expected_wire_version =
         !bind_anonset_context ? SmileCTProof::WIRE_VERSION_LEGACY
         : require_c002        ? SmileCTProof::WIRE_VERSION_C002_HARDENED

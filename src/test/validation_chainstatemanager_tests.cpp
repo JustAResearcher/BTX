@@ -930,6 +930,22 @@ struct PoolCreditRetunePersistedTestChain100Setup : TestChain100Setup
     }
 };
 
+struct RecoveryExitFastStartupPersistedTestChain100Setup : TestChain100Setup
+{
+    RecoveryExitFastStartupPersistedTestChain100Setup()
+        : TestChain100Setup(
+              ChainType::REGTEST,
+              {.extra_args = {"-regtestshieldedsunsetheight=100",
+                              "-regtestshieldedpoolcreditdisableheight=100",
+                              "-regtestshieldedrecoveryexitactivationheight=100",
+                              "-fastshieldedstartup=1",
+                              "-shieldedstartupaudit=0"},
+               .coins_db_in_memory = false,
+               .block_tree_db_in_memory = false})
+    {
+    }
+};
+
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_shielded_state_when_commitment_index_missing, PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -3412,6 +3428,95 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_from_chain_when_persisted_nul
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(), expected_registry_root);
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(), expected_registry_size);
         BOOST_CHECK(!chainman_restarted.IsShieldedNullifierSpent(bogus_nullifier));
+        const auto rebuilt_state_commitment = chainman_restarted.GetShieldedStateCommitment();
+        BOOST_REQUIRE(rebuilt_state_commitment.has_value());
+        BOOST_CHECK_EQUAL(shielded::registry::ComputeShieldedStateCommitmentHash(*rebuilt_state_commitment),
+                          expected_state_commitment_hash);
+        BOOST_CHECK(!chainman_restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_fast_startup_rebuilds_stale_recovery_exit_commitment_state,
+                        RecoveryExitFastStartupPersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    auto simulate_node_restart = [&]() -> ChainstateManager& {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = current_chainman.m_options.datadir,
+                .shielded_startup_audit = false,
+                .fast_shielded_startup = true,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = current_chainman.m_options.datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman.reset();
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
+    };
+
+    const uint256 bogus_recovery_commitment = GetRandHash();
+    uint256 expected_tip_hash;
+    int32_t expected_tip_height{-1};
+    uint256 expected_state_pin;
+    uint256 expected_state_commitment_hash;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedRecoveryExitActive(chainman.ActiveTip()->nHeight));
+        expected_tip_hash = chainman.ActiveTip()->GetBlockHash();
+        expected_tip_height = chainman.ActiveTip()->nHeight;
+        const auto state_pin = chainman.ComputeShieldedSnapshotStatePin();
+        BOOST_REQUIRE(state_pin.has_value());
+        expected_state_pin = *state_pin;
+        const auto state_commitment = chainman.GetShieldedStateCommitment();
+        BOOST_REQUIRE(state_commitment.has_value());
+        expected_state_commitment_hash =
+            shielded::registry::ComputeShieldedStateCommitmentHash(*state_commitment);
+
+        BOOST_REQUIRE(chainman.InsertShieldedRecoveryExitCommitmentsForTest({bogus_recovery_commitment}));
+        BOOST_CHECK(chainman.IsShieldedRecoveryExitCommitmentRetired(bogus_recovery_commitment));
+    }
+
+    ChainstateManager& chainman_restarted = simulate_node_restart();
+    this->LoadVerifyActivateChainstate();
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+        BOOST_CHECK(chainman_restarted.ActiveTip()->GetBlockHash() == expected_tip_hash);
+        BOOST_CHECK_EQUAL(chainman_restarted.ActiveTip()->nHeight, expected_tip_height);
+        BOOST_CHECK(!chainman_restarted.IsShieldedRecoveryExitCommitmentRetired(
+            bogus_recovery_commitment));
+        const auto restored_state_pin = chainman_restarted.ComputeShieldedSnapshotStatePin();
+        BOOST_REQUIRE(restored_state_pin.has_value());
+        BOOST_CHECK_EQUAL(*restored_state_pin, expected_state_pin);
         const auto rebuilt_state_commitment = chainman_restarted.GetShieldedStateCommitment();
         BOOST_REQUIRE(rebuilt_state_commitment.has_value());
         BOOST_CHECK_EQUAL(shielded::registry::ComputeShieldedStateCommitmentHash(*rebuilt_state_commitment),

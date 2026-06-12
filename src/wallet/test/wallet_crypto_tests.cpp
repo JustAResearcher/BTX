@@ -137,7 +137,8 @@ BOOST_AUTO_TEST_CASE(authenticated_secret_roundtrip_and_tamper_detection)
     const CKeyingMaterial master_key(master_key_bytes.begin(), master_key_bytes.end());
     const auto plaintext =
         "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51"_hex_u8;
-    const uint256 iv{"f69f2445df4f9b17ad2b417be66c371000000000000000000000000000000000"};
+    const uint256 iv =
+        uint256::FromHex("f69f2445df4f9b17ad2b417be66c371000000000000000000000000000000000").value();
 
     std::vector<unsigned char> ciphertext;
     BOOST_REQUIRE(EncryptAuthenticatedSecret(master_key, plaintext, iv, ciphertext, "shieldedstate"));
@@ -177,7 +178,8 @@ BOOST_AUTO_TEST_CASE(authenticated_secret_accepts_legacy_ciphertext_for_migratio
     const auto plaintext =
         "ae2d8a571e03ac9c9eb76fac45af8e516bc1bee22e409f96e93d7e117393172a"_hex_u8;
     const CKeyingMaterial plaintext_secure(plaintext.begin(), plaintext.end());
-    const uint256 iv{"000102030405060708090a0b0c0d0e0f00000000000000000000000000000000"};
+    const uint256 iv =
+        uint256::FromHex("000102030405060708090a0b0c0d0e0f00000000000000000000000000000000").value();
 
     std::vector<unsigned char> legacy_ciphertext;
     BOOST_REQUIRE(EncryptSecret(master_key, plaintext_secure, iv, legacy_ciphertext));

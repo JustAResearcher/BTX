@@ -304,6 +304,10 @@ public:
     /** Read the last persisted nullifier accumulator digest, or nullopt if none was ever written. */
     [[nodiscard]] std::optional<uint256> ReadPersistedNullifierAccumulator() const;
 
+    /** Persist/read the full shielded-state pin used to authorize restart fast-start skips. */
+    [[nodiscard]] bool PersistShieldedStatePin(const uint256& state_pin);
+    [[nodiscard]] std::optional<uint256> ReadPersistedShieldedStatePin() const;
+
     /** Read the persisted active shielded frontier state for the current tip. */
     [[nodiscard]] bool ReadPersistedState(shielded::ShieldedMerkleTree& tree,
                                           std::vector<uint256>& anchor_roots,
@@ -477,6 +481,7 @@ private:
     static constexpr uint8_t DB_PERSISTED_STATE{'S'};
     static constexpr uint8_t DB_SNAPSHOT_BRIDGE_METADATA_HINT{'G'};
     static constexpr uint8_t DB_NULLIFIER_ACCUMULATOR{'U'};
+    static constexpr uint8_t DB_SHIELDED_STATE_PIN{'P'};
     static constexpr uint8_t DB_UNSHIELD_VELOCITY{'V'};
     static constexpr uint8_t DB_RECOVERY_EXIT_COMMITMENT{'R'};
 

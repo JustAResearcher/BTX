@@ -217,6 +217,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.shielded_sunset_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedsunsetheight");
     }
+    if (args.IsArgSet("-regtestshieldeddirectsendpublicflowdisableheight")) {
+        options.shielded_direct_send_public_flow_disable_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldeddirectsendpublicflowdisableheight");
+    }
     if (args.IsArgSet("-regtestshieldedrecoveryexitactivationheight")) {
         options.shielded_recovery_exit_activation_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedrecoveryexitactivationheight");

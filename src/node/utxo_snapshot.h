@@ -30,6 +30,7 @@ class Chainstate;
 namespace node {
 static constexpr uint16_t SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION{6};
 static constexpr uint16_t SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION{7};
+static constexpr uint16_t SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION{8};
 
 //! Metadata describing a serialized version of a UTXO set from which an
 //! assumeutxo Chainstate can be constructed.
@@ -38,7 +39,7 @@ static constexpr uint16_t SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION{7};
 class SnapshotMetadata
 {
 public:
-    inline static constexpr uint16_t CURRENT_VERSION{SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION};
+    inline static constexpr uint16_t CURRENT_VERSION{SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION};
 
 private:
     const std::set<uint16_t> m_supported_versions{
@@ -47,7 +48,8 @@ private:
         4,
         5,
         SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION,
-        SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION};
+        SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION,
+        SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION};
     const MessageStartChars m_network_magic;
     uint16_t m_version{CURRENT_VERSION};
 
@@ -129,6 +131,7 @@ public:
     uint16_t m_snapshot_version{SnapshotMetadata::CURRENT_VERSION};
     uint64_t m_commitment_count{0};
     uint64_t m_nullifier_count{0};
+    uint64_t m_recovery_exit_commitment_count{0};
     uint64_t m_settlement_anchor_count{0};
     uint64_t m_netting_manifest_count{0};
     uint64_t m_account_registry_entry_count{0};
@@ -142,6 +145,9 @@ public:
         s << SHIELDED_SNAPSHOT_MAGIC_BYTES;
         s << m_commitment_count;
         s << m_nullifier_count;
+        if (m_snapshot_version >= SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION) {
+            s << m_recovery_exit_commitment_count;
+        }
         s << m_recent_output_counts;
         s << m_pool_balance;
         if (m_snapshot_version >= 4) {
@@ -167,6 +173,11 @@ public:
 
         s >> m_commitment_count;
         s >> m_nullifier_count;
+        if (m_snapshot_version >= SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION) {
+            s >> m_recovery_exit_commitment_count;
+        } else {
+            m_recovery_exit_commitment_count = 0;
+        }
         s >> m_recent_output_counts;
         s >> m_pool_balance;
         if (m_snapshot_version >= 4) {

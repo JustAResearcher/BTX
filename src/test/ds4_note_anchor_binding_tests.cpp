@@ -206,6 +206,33 @@ BOOST_AUTO_TEST_CASE(note_v2_binds_anchor_in_commitment)
     BOOST_CHECK(PolyVecHash(decoded_anchor) == PolyVecHash(T));
 }
 
+BOOST_AUTO_TEST_CASE(setting_note_spend_anchor_marks_note_modern_for_roundtrip)
+{
+    const lattice::PolyVec s = SmallSecret(GetRandHash());
+    BOOST_REQUIRE(lattice::IsValidPolyVec(s) && lattice::PolyVecInfNorm(s) != 0);
+    const lattice::PolyVec T = ComputeBoundAnchor(s);
+    BOOST_REQUIRE(!T.empty());
+
+    ShieldedNote n = MakeNote(8888);
+    BOOST_REQUIRE(!UsesModernShieldedNoteDerivation(n));
+
+    SetNoteSpendAnchor(n, T);
+    BOOST_CHECK(UsesModernShieldedNoteDerivation(n));
+    BOOST_REQUIRE(!n.spend_anchor.empty());
+
+    DataStream ss;
+    ss << n;
+    ShieldedNote decoded;
+    ss >> decoded;
+    BOOST_CHECK(ss.empty());
+    BOOST_CHECK(UsesModernShieldedNoteDerivation(decoded));
+    BOOST_CHECK(decoded.spend_anchor == n.spend_anchor);
+
+    lattice::PolyVec decoded_anchor;
+    BOOST_REQUIRE(GetNoteSpendAnchor(decoded, decoded_anchor));
+    BOOST_CHECK(PolyVecHash(decoded_anchor) == PolyVecHash(T));
+}
+
 // ---------------------------------------------------------------------------
 // (c) End-to-end: build a ring of notes each carrying an anchor, extract the
 //     anchors from the committed notes, and sign/verify in bound mode. A forge

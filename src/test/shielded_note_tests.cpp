@@ -13,6 +13,8 @@
 #include <set>
 #include <vector>
 
+namespace lattice = shielded::lattice;
+
 BOOST_FIXTURE_TEST_SUITE(shielded_note_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(commitment_determinism)
@@ -143,6 +145,50 @@ BOOST_AUTO_TEST_CASE(invalid_note_too_large_memo)
     note.rho = GetRandHash();
     note.rcm = GetRandHash();
     note.memo.resize(MAX_SHIELDED_MEMO_SIZE + 1, 0x01);
+
+    BOOST_CHECK(!note.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(valid_note_accepts_canonical_spend_anchor)
+{
+    ShieldedNote note;
+    note.value = COIN;
+    note.recipient_pk_hash = uint256::ONE;
+    note.rho = GetRandHash();
+    note.rcm = GetRandHash();
+    MarkShieldedNoteForModernDerivation(note);
+
+    lattice::PolyVec anchor(lattice::MODULE_RANK);
+    anchor[0].coeffs[0] = 1;
+    SetNoteSpendAnchor(note, anchor);
+
+    BOOST_CHECK(note.IsValid());
+    lattice::PolyVec decoded;
+    BOOST_CHECK(GetNoteSpendAnchor(note, decoded));
+}
+
+BOOST_AUTO_TEST_CASE(invalid_note_rejects_malformed_spend_anchor)
+{
+    ShieldedNote note;
+    note.value = COIN;
+    note.recipient_pk_hash = uint256::ONE;
+    note.rho = GetRandHash();
+    note.rcm = GetRandHash();
+    MarkShieldedNoteForModernDerivation(note);
+    note.spend_anchor = {0x01, 0x02, 0x03};
+
+    BOOST_CHECK(!note.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(invalid_note_rejects_oversized_spend_anchor)
+{
+    ShieldedNote note;
+    note.value = COIN;
+    note.recipient_pk_hash = uint256::ONE;
+    note.rho = GetRandHash();
+    note.rcm = GetRandHash();
+    MarkShieldedNoteForModernDerivation(note);
+    note.spend_anchor.resize(MAX_SHIELDED_SPEND_ANCHOR_SIZE + 1, 0x01);
 
     BOOST_CHECK(!note.IsValid());
 }
