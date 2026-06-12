@@ -1161,6 +1161,27 @@ std::optional<uint256> NullifierSet::ReadPersistedNullifierAccumulator() const
     return digest;
 }
 
+bool NullifierSet::PersistShieldedStatePin(const uint256& state_pin)
+{
+    if (state_pin.IsNull()) {
+        LogPrintf("NullifierSet::PersistShieldedStatePin rejected null state pin\n");
+        return false;
+    }
+    std::unique_lock lock(m_rwlock);
+    return m_db->Write(std::make_pair(DB_SHIELDED_STATE_PIN, uint8_t{0}), state_pin, /*fSync=*/false);
+}
+
+std::optional<uint256> NullifierSet::ReadPersistedShieldedStatePin() const
+{
+    std::shared_lock lock(m_rwlock);
+    uint256 state_pin;
+    if (!m_db->Read(std::make_pair(DB_SHIELDED_STATE_PIN, uint8_t{0}), state_pin) ||
+        state_pin.IsNull()) {
+        return std::nullopt;
+    }
+    return state_pin;
+}
+
 bool NullifierSet::ReadPersistedState(shielded::ShieldedMerkleTree& tree,
                                       std::vector<uint256>& anchor_roots,
                                       uint256& tip_hash,

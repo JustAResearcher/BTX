@@ -41,6 +41,7 @@ auto consteval_ctor(auto&& input) { return input; }
 
 static constexpr int32_t BTX_SHIELDED_SUNSET_HEIGHT{125'000};
 static constexpr int32_t BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT{BTX_SHIELDED_SUNSET_HEIGHT};
+static constexpr int32_t BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT{128'000};
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
                                  const CScript& genesisOutputScript,
@@ -242,6 +243,7 @@ public:
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
         // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
@@ -510,6 +512,7 @@ public:
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
         // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
@@ -684,6 +687,7 @@ public:
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
         // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
@@ -888,6 +892,7 @@ public:
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
         // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
@@ -1074,6 +1079,8 @@ public:
             opts.shielded_pool_credit_disable_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedSunsetHeight =
             opts.shielded_sunset_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nShieldedDirectSendPublicFlowDisableHeight =
+            opts.shielded_direct_send_public_flow_disable_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedRecoveryExitActivationHeight =
             opts.shielded_recovery_exit_activation_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedRecoveryExitFrozenRoot =
@@ -1139,6 +1146,7 @@ public:
             opts.shielded_pq128_upgrade_height.has_value() ||
             opts.shielded_pool_credit_disable_height.has_value() ||
             opts.shielded_sunset_height.has_value() ||
+            opts.shielded_direct_send_public_flow_disable_height.has_value() ||
             opts.mldsa_disable_height.has_value();
 
         for (const auto& [dep, height] : opts.activation_heights) {
@@ -1319,6 +1327,7 @@ public:
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
         // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the

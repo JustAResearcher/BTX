@@ -28,8 +28,8 @@ RecoveryExitPayload MakeRecoveryExitPayload()
     payload.recipient_pk_hash = uint256{0x11};
     payload.rho = uint256{0x22};
     payload.rcm = uint256{0x33};
-    payload.spend_pubkey = {0x01, 0x02, 0x03, 0x04};
-    payload.ownership_sig = {0x05, 0x06, 0x07, 0x08};
+    payload.spend_pubkey.assign(MLDSA44_PUBKEY_SIZE, 0x01);
+    payload.ownership_sig.assign(MLDSA44_SIGNATURE_SIZE, 0x05);
     payload.membership_proof = {0x09, 0x0a, 0x0b, 0x0c};
     return payload;
 }
@@ -129,6 +129,28 @@ BOOST_AUTO_TEST_CASE(recovery_exit_bundle_requires_no_proof_envelope)
     TransactionBundle with_binding = bundle;
     with_binding.header.proof_envelope.settlement_binding_kind = SettlementBindingKind::GENERIC_SHIELDED;
     BOOST_CHECK(!with_binding.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(recovery_exit_payload_rejects_noncanonical_wire_shapes)
+{
+    RecoveryExitPayload payload = MakeRecoveryExitPayload();
+    BOOST_REQUIRE(payload.IsValid());
+
+    {
+        RecoveryExitPayload bad = payload;
+        bad.spend_pubkey.resize(MLDSA44_PUBKEY_SIZE - 1);
+        BOOST_CHECK(!bad.IsValid());
+    }
+    {
+        RecoveryExitPayload bad = payload;
+        bad.ownership_sig.resize(MLDSA44_SIGNATURE_SIZE - 1);
+        BOOST_CHECK(!bad.IsValid());
+    }
+    {
+        RecoveryExitPayload bad = payload;
+        bad.membership_proof.clear();
+        BOOST_CHECK(!bad.IsValid());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(recovery_exit_state_value_balance_is_outflow_value)

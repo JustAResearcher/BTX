@@ -370,7 +370,13 @@ std::optional<SmileProofResult> CreateSmileProof(
         if (error != nullptr) *error = reason;
         return std::nullopt;
     };
-    if (inputs.empty() || outputs.empty()) return fail("empty inputs or outputs");
+    if (inputs.empty()) return fail("empty inputs");
+    if (outputs.empty() &&
+        (!bind_anonset_context ||
+         validation_height < c002_activation_height ||
+         public_fee <= 0)) {
+        return fail("zero-output proofs require C002 public outflow");
+    }
     if (rng_entropy.size() < 32) return fail("insufficient rng entropy");
     if (ring_members.empty()) return fail("empty ring members");
     if (ring_members.size() > NUM_NTT_SLOTS) return fail("ring too large");

@@ -9,6 +9,7 @@
 #include <node/types.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
+#include <shielded/turnstile.h>
 #include <txmempool.h>
 #include <util/feefrac.h>
 
@@ -165,6 +166,8 @@ private:
     uint64_t nBlockShieldedTreeUpdateUnits{0};
     /** Accumulated shielded account-registry append budget after fork activation. */
     uint64_t nBlockShieldedAccountRegistryAppends{0};
+    /** Projected shielded pool balance after transactions selected for this block. */
+    ShieldedPoolBalance m_blockShieldedPoolBalance;
     /** Shielded account-registry entries at the template base tip. */
     uint64_t m_baseShieldedAccountRegistryEntries{0};
     CAmount nFees;
@@ -211,7 +214,8 @@ private:
 
     // Methods for how to add transactions to a block.
     /** Add transactions based on tx "priority" */
-    void addPriorityTxs(const CTxMemPool& mempool, int &nPackagesSelected) EXCLUSIVE_LOCKS_REQUIRED(mempool.cs);
+    void addPriorityTxs(const CTxMemPool& mempool, int &nPackagesSelected)
+        EXCLUSIVE_LOCKS_REQUIRED(mempool.cs, ::cs_main);
     /** Add transactions based on feerate including unconfirmed ancestors
       * Increments nPackagesSelected / nDescendantsUpdated with corresponding
       * statistics from the package selection (for logging statistics). */
@@ -220,7 +224,8 @@ private:
 
     // helper function for addPriorityTxs
     /** Test if tx will still "fit" in the block */
-    bool TestForBlock(CTxMemPool::txiter iter);
+    bool TestForBlock(const CTxMemPool& mempool, CTxMemPool::txiter iter)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Test if tx still has unconfirmed parents not yet in block */
     bool isStillDependent(const CTxMemPool& mempool, CTxMemPool::txiter iter) EXCLUSIVE_LOCKS_REQUIRED(mempool.cs);
 
@@ -233,7 +238,8 @@ private:
       * locktime, premature-witness, serialized size (if necessary)
       * These checks should always succeed, and they're here
       * only as an extra check in case of suboptimal node configuration */
-    bool TestPackageTransactions(const CTxMemPool::setEntries& package) const;
+    bool TestPackageTransactions(const CTxMemPool& mempool, const CTxMemPool::setEntries& package) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Sort the package in an order that is valid to appear in a block */
     void SortForBlock(const CTxMemPool::setEntries& package, std::vector<CTxMemPool::txiter>& sortedEntries);
 };

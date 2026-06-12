@@ -7,6 +7,7 @@
 // on the normal V2_SEND path or already spent pre-sunset collides in the SHARED nullifier set => rejected.
 
 #include <consensus/amount.h>
+#include <consensus/params.h>
 #include <hash.h>
 #include <pqkey.h>
 #include <primitives/transaction.h>
@@ -58,6 +59,7 @@ std::vector<unsigned char> RandBytes(size_t n)
 struct Fixture {
     RecoveryExitClaim claim;
     RecoveryExitConstraints c;
+    uint256 legacy_cm;
     uint256 expected_cm;
     uint256 expected_nf;
 };
@@ -77,7 +79,12 @@ std::optional<Fixture> TryMakeValid(CAmount value, CAmount fee)
     note.recipient_pk_hash = f.claim.recipient_pk_hash;
     note.rho = f.claim.rho;
     note.rcm = f.claim.rcm;
-    f.expected_cm = note.GetCommitment();
+    f.legacy_cm = note.GetCommitment();
+    const auto account = smile2::wallet::BuildCompactPublicAccountFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        note);
+    if (!account.has_value()) return std::nullopt;
+    f.expected_cm = smile2::ComputeCompactPublicAccountHash(*account);
     f.claim.note_commitment = f.expected_cm;
     const auto nf = smile2::wallet::ComputeSmileNullifierFromNote(
         smile2::wallet::SMILE_GLOBAL_SEED, note);
@@ -87,6 +94,7 @@ std::optional<Fixture> TryMakeValid(CAmount value, CAmount fee)
     f.c.value_balance = value;
     f.c.fee = fee;
     f.c.transparent_out = value - fee;
+    f.c.transparent_input_count = 0;
     f.c.shielded_output_count = 0;
     f.c.pool_balance = value * 10;
     f.c.validation_height = 125'050;
@@ -113,8 +121,8 @@ Fixture MakeValid(CAmount value, CAmount fee)
 BOOST_FIXTURE_TEST_SUITE(recovery_exit_tests, BasicTestingSetup)
 
 // The crux: consensus derives EXACTLY the normal-path SMILE2 nullifier from the revealed note (no key)
-// and only accepts a tree commitment deterministically bound to that note. This is what makes shared-set
-// cross-path dedup possible while still proving membership of the actual tree leaf.
+// and only accepts the SMILE compact account commitment deterministically bound to that note. That keeps
+// the recoverable commitment in the same nullifier keyspace as the normal post-sunset spend path.
 BOOST_AUTO_TEST_CASE(derives_exact_normal_path_smile_nullifier_and_commitment)
 {
     const Fixture f = MakeValid(50 * COIN, 1000);
@@ -125,26 +133,16 @@ BOOST_AUTO_TEST_CASE(derives_exact_normal_path_smile_nullifier_and_commitment)
     BOOST_CHECK(ids.commitment == f.expected_cm);
 }
 
-BOOST_AUTO_TEST_CASE(accepts_smile_compact_account_tree_commitment)
+BOOST_AUTO_TEST_CASE(rejects_legacy_note_commitment_even_when_opening_matches)
 {
     Fixture f = MakeValid(50 * COIN, 1000);
-    ShieldedNote note;
-    note.value = f.claim.value;
-    note.recipient_pk_hash = f.claim.recipient_pk_hash;
-    note.rho = f.claim.rho;
-    note.rcm = f.claim.rcm;
-    const auto account = smile2::wallet::BuildCompactPublicAccountFromNote(
-        smile2::wallet::SMILE_GLOBAL_SEED,
-        note);
-    BOOST_REQUIRE(account.has_value());
-    f.claim.note_commitment = smile2::ComputeCompactPublicAccountHash(*account);
+    BOOST_REQUIRE(f.legacy_cm != f.expected_cm);
+    f.claim.note_commitment = f.legacy_cm;
 
     RecoveryExitIdentifiers ids;
     std::string err;
-    BOOST_REQUIRE_MESSAGE(DeriveRecoveryExitIdentifiers(f.claim, ids, err), err);
-    BOOST_CHECK(ids.nullifier == f.expected_nf);
-    BOOST_CHECK(ids.commitment == f.claim.note_commitment);
-    BOOST_CHECK(ids.commitment != f.expected_cm);
+    BOOST_CHECK(!DeriveRecoveryExitIdentifiers(f.claim, ids, err));
+    BOOST_CHECK_EQUAL(err, "bad-recovery-exit-legacy-commitment");
 }
 
 BOOST_AUTO_TEST_CASE(rejects_pubkey_not_binding_to_note)
@@ -214,6 +212,10 @@ BOOST_AUTO_TEST_CASE(rejects_double_recovery_same_commitment)
 
 BOOST_AUTO_TEST_CASE(rejects_non_pure_transparent_exit)
 {
+    {   Fixture f = MakeValid(50 * COIN, 1000); f.c.transparent_input_count = 1;
+        RecoveryExitIdentifiers ids; std::string err;
+        BOOST_CHECK(!CheckRecoveryExitClaim(f.claim, f.c, ids, err));
+        BOOST_CHECK_EQUAL(err, "bad-recovery-exit-transparent-input"); }
     {   Fixture f = MakeValid(50 * COIN, 1000); f.c.shielded_output_count = 1;
         RecoveryExitIdentifiers ids; std::string err;
         BOOST_CHECK(!CheckRecoveryExitClaim(f.claim, f.c, ids, err));
@@ -254,6 +256,22 @@ BOOST_AUTO_TEST_CASE(rejects_when_not_active_or_pool_empty_or_expired)
         RecoveryExitIdentifiers ids; std::string err;
         BOOST_CHECK(!CheckRecoveryExitClaim(f.claim, f.c, ids, err));
         BOOST_CHECK_EQUAL(err, "bad-recovery-exit-expired"); }
+}
+
+BOOST_AUTO_TEST_CASE(recovery_exit_requires_sunset_configured_and_reached)
+{
+    Consensus::Params consensus;
+    consensus.nShieldedSunsetHeight = 125'000;
+    consensus.nShieldedRecoveryExitActivationHeight = 125'000;
+    BOOST_CHECK(!consensus.IsShieldedRecoveryExitActive(124'999));
+    BOOST_CHECK(consensus.IsShieldedRecoveryExitActive(125'000));
+
+    consensus.nShieldedRecoveryExitActivationHeight = 124'000;
+    BOOST_CHECK(!consensus.IsShieldedRecoveryExitActive(125'000));
+
+    consensus.nShieldedSunsetHeight = std::numeric_limits<int32_t>::max();
+    consensus.nShieldedRecoveryExitActivationHeight = 125'000;
+    BOOST_CHECK(!consensus.IsShieldedRecoveryExitActive(125'000));
 }
 
 BOOST_AUTO_TEST_CASE(rejects_unverified_ownership_or_membership)
@@ -311,6 +329,13 @@ BOOST_AUTO_TEST_CASE(membership_accepts_valid_witness_rejects_wrong_inputs)
 
     std::string err;
     BOOST_CHECK_MESSAGE(VerifyRecoveryExitMembership(claim, cm, root, err), err);
+
+    // Valid witness plus trailing bytes is non-canonical and must not verify.
+    RecoveryExitClaim trailing = claim;
+    trailing.membership_proof.push_back(0x00);
+    err.clear();
+    BOOST_CHECK(!VerifyRecoveryExitMembership(trailing, cm, root, err));
+    BOOST_CHECK_EQUAL(err, "bad-recovery-exit-bad-membership-proof");
 
     // Wrong root -> non-authenticating.
     err.clear();
@@ -377,6 +402,13 @@ BOOST_AUTO_TEST_CASE(ownership_accepts_valid_pq_signature_rejects_tampered)
         malformed.spend_pubkey = RandBytes(8);
         BOOST_CHECK(!VerifyRecoveryExitOwnership(malformed, binding_hash));
     }
+
+    // Malformed (too-short) signature -> rejected before crypto dispatch.
+    {
+        RecoveryExitClaim malformed = claim;
+        malformed.ownership_sig.resize(8);
+        BOOST_CHECK(!VerifyRecoveryExitOwnership(malformed, binding_hash));
+    }
 }
 
 namespace {
@@ -405,20 +437,25 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_full_consensus_flow, BasicTestingSetup)
                        smile2::wallet::SMILE_GLOBAL_SEED, note).has_value();
     }
     BOOST_REQUIRE(eligible);
-    const uint256 cm = note.GetCommitment();
+    const auto account = smile2::wallet::BuildCompactPublicAccountFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        note);
+    BOOST_REQUIRE(account.has_value());
+    const uint256 recovery_cm = smile2::ComputeCompactPublicAccountHash(*account);
 
-    // Real commitment tree: decoys then the note appended last, so Witness() authenticates cm against the
-    // test root. Production activation must use the consensus-pinned 125,000 root.
+    // Real commitment tree: decoys then the recoverable SMILE account commitment appended last, so
+    // Witness() authenticates it against the test root. Production activation must use the
+    // consensus-pinned 125,000 root.
     shielded::ShieldedMerkleTree tree;
     tree.Append(GetRandHash());
     tree.Append(GetRandHash());
-    tree.Append(cm);
+    tree.Append(recovery_cm);
     const shielded::ShieldedMerkleWitness witness = tree.Witness();
     const uint256 frozen_root = tree.Root();
 
     RecoveryExitClaim claim;
     claim.value = note.value;
-    claim.note_commitment = cm;
+    claim.note_commitment = recovery_cm;
     claim.recipient_pk_hash = note.recipient_pk_hash;
     claim.rho = note.rho;
     claim.rcm = note.rcm;
@@ -427,7 +464,7 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_full_consensus_flow, BasicTestingSetup)
 
     RecoveryExitIdentifiers ids; std::string err;
     BOOST_REQUIRE_MESSAGE(DeriveRecoveryExitIdentifiers(claim, ids, err), err);
-    BOOST_CHECK(ids.commitment == cm);
+    BOOST_CHECK(ids.commitment == recovery_cm);
 
     // Transparent payout + ownership signature over the binding hash.
     std::vector<CTxOut> vout{CTxOut(note.value - 1000, CScript() << OP_TRUE)};
@@ -441,7 +478,7 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_full_consensus_flow, BasicTestingSetup)
     BOOST_CHECK_MESSAGE(VerifyRecoveryExitMembership(claim, ids.commitment, frozen_root, mrr), mrr);
     RecoveryExitConstraints c;
     c.value_balance = claim.value; c.fee = 1000; c.transparent_out = note.value - 1000;
-    c.shielded_output_count = 0; c.pool_balance = note.value * 10;
+    c.transparent_input_count = 0; c.shielded_output_count = 0; c.pool_balance = note.value * 10;
     c.validation_height = 125'050; c.activation_height = 125'000; c.expiry_height = 0;
     c.ownership_verified = true; c.membership_verified = true;
     c.nullifier_already_spent = false; c.commitment_already_claimed = false;

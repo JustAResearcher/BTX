@@ -1,15 +1,16 @@
 # RECOVERY_EXIT — transparent-claim stranded-note recovery (post-125,000)
 
-**Decision (owner):** preserve stranded-note rescue after the 125,000 sunset, but only as a
-**transparent claim that reveals the spent note** — DS-4-immune by construction, with no dependency on
-the (unwired, audit-gated) bound-mode ring path. Chosen over the ring-based "unique nullifier" form,
-which carries a bounded DS-4 over-drain residual because legacy cm-v1 notes cannot be anchor-bound.
+**Decision (owner):** preserve stranded-note rescue after the 125,000 sunset only for notes whose frozen
+tree leaf is the deterministic SMILE compact account commitment. Legacy cm-v1 note commitments are not
+recoverable through this path because an old MatRiCT spend records only a private-key-derived legacy
+nullifier, while recovery can only derive the public SMILE nullifier from the revealed note. Accepting
+legacy commitments would let an already-spent legacy note prove tree membership and claim again.
 
-**Hard safety constraint:** `RECOVERY_EXIT` must not be activated until it also closes the cross-path
-double-spend between normal `V2_SEND` unshield and revealed-commitment recovery. A pre-snapshot note may
-be spendable by both paths; therefore a recovery claim must retire the note's revealed commitment **and**
-the exact normal-path nullifier that a `V2_SEND` spend would have produced. A claimant-supplied nullifier
-is not sufficient.
+**Hard safety constraint:** `RECOVERY_EXIT` must not be activated unless every recoverable leaf shares the
+same nullifier keyspace as normal `V2_SEND` unshield. Therefore a recovery claim must prove membership of
+the note's SMILE compact account commitment and retire that commitment **and** the exact normal-path
+SMILE nullifier that a `V2_SEND` spend would have produced. A claimant-supplied nullifier is not
+sufficient, and a legacy cm-v1 commitment is rejected.
 
 ## Current branch status
 
@@ -43,8 +44,10 @@ Production posture:
   testnet4, signet, and shielded-v2 dev.
 - Normal spendable notes exit through strict pure `V2_SEND` transparent unshield: `value_balance > fee`
   and zero shielded outputs.
-- Stranded notes exit through `V2_RECOVERY_EXIT` if the wallet has the note opening, spending key, and
-  Merkle witness needed for the transparent claim.
+- Stranded SMILE-account notes exit through `V2_RECOVERY_EXIT` if the wallet has the note opening,
+  spending key, and Merkle witness for the compact account commitment.
+- Legacy cm-v1 notes are intentionally not recoverable by this mechanism unless a later design can prove
+  non-spend across the old private legacy-nullifier keyspace.
 - This has internal AI-assisted review and tests, not independent external cryptographer sign-off.
 
 ## 1. Philosophy
@@ -66,15 +69,17 @@ specific sunset reject).
 
 ### Revealed fields (the claim)
 - `value` (CAmount), `recipient_pk_hash` (uint256), `rho` (uint256), `rcm` (uint256) — the full opening
-  of the note, so `cm` is recomputable:
+  of the note, so the deterministic SMILE compact account commitment is recomputable:
   `inner = SHA256("BTX_Note_Inner_V1" || LE64(value) || recipient_pk_hash)`,
-  `cm = SHA256("BTX_Note_Commit_V1" || inner || rho || rcm)`.
+  then the note-derived SMILE compact public account is hashed with
+  `BTX_SMILE2_Compact_Public_Account_V1`.
 - `spend_pubkey` — the full PQ public key with `SHA256(spend_pubkey) == recipient_pk_hash`.
 - `ownership_sig` — a PQ signature by `spend_pubkey` over the claim's transparent-binding hash (the tx /
   outputs / `cm`), proving the claimant controls the note.
-- `membership_proof` — a Merkle path proving `cm` was in the shielded commitment tree at or before the
-  frozen 125,000 snapshot. Validation uses a hardcoded `nShieldedRecoveryExitFrozenRoot` when present;
-  otherwise it uses the live tree root after the sunset zero-output rule has made that root immutable.
+- `membership_proof` — a Merkle path proving the SMILE compact account commitment was in the shielded
+  commitment tree at or before the frozen 125,000 snapshot. Validation uses a hardcoded
+  `nShieldedRecoveryExitFrozenRoot` when present; otherwise it uses the live tree root after the sunset
+  zero-output rule has made that root immutable.
 - No user-provided nullifier is trusted. Consensus reconstructs the `ShieldedNote` from the revealed
   fields and derives the canonical normal-exit nullifier itself, using the same deterministic note-to-SMILE
   derivation as the `V2_SEND` path (`ComputeSmileNullifierFromNote(SMILE_GLOBAL_SEED, note)`). If the note
@@ -86,19 +91,22 @@ specific sunset reject).
 At `height >= nShieldedRecoveryExitActivationHeight` (which must be `>= 125,000`), accept a
 `V2_RECOVERY_EXIT` iff:
 
-1. **Recompute & bind:** `cm` recomputes from `(value, recipient_pk_hash, rho, rcm)` as above.
-2. **Pre-snapshot membership:** `membership_proof` validates `cm` against the **frozen 125,000 commitment
-   root**: either the pinned root or the live immutable post-sunset root. A note that did not exist at the
-   snapshot cannot be recovered.
+1. **Recompute & bind:** the SMILE compact account commitment recomputes from
+   `(value, recipient_pk_hash, rho, rcm)` as above. The legacy note commitment
+   `SHA256("BTX_Note_Commit_V1" || inner || rho || rcm)` is rejected.
+2. **Pre-snapshot membership:** `membership_proof` validates the SMILE compact account commitment against
+   the **frozen 125,000 commitment root**: either the pinned root or the live immutable post-sunset root.
+   A note that did not exist at the snapshot cannot be recovered.
 3. **Ownership:** `SHA256(spend_pubkey) == recipient_pk_hash` and `ownership_sig` verifies under
    `spend_pubkey` over the claim binding hash.
-4. **Pure transparent exit:** `value_balance == value` and `value_balance > fee`; the bundle has
-   **zero shielded outputs**; exactly one (or the designated) transparent output with
-   `transparent_out == value - fee`. (No re-shield, no change note.)
+4. **Pure transparent exit:** `value_balance == value` and `value_balance > fee`; the transaction has
+   **zero transparent inputs**; the bundle has **zero shielded outputs**; transparent outputs sum to
+   `transparent_out == value - fee`. (No input sponsorship, no re-shield, no change note.)
 5. **Cross-path single-spend:** consensus derives `normal_nf`, the exact nullifier that a normal
    post-sunset `V2_SEND` SMILE2 unshield would reveal for this note. Both `cm` and `normal_nf` must be
    unspent before acceptance. On connect, consensus records **both**:
-   - `cm` in a persistent spent-commitment set, preventing a second `RECOVERY_EXIT`; and
+   - the SMILE compact account commitment in a persistent spent-commitment set, preventing a second
+     `RECOVERY_EXIT`; and
    - `normal_nf` in the existing shielded nullifier set, preventing a later normal `V2_SEND` spend.
 
    Conversely, if the note was already spent normally, `normal_nf` is already in the nullifier set and the
@@ -123,8 +131,10 @@ whose collected nullifier is `normal_nf`.
 - **No ring → no key image → no DS-4.** The spent note is revealed and deduped on `cm` via a permanent
   spent-commitment set; one note can be claimed at most once. The whole DS-4 class (forge a second
   nullifier for a hidden note) does not exist here.
-- **No cross-path double-spend.** The recovery claim also retires the note's canonical `V2_SEND` nullifier.
-  A note spent through normal unshield cannot later recover, and a recovered note cannot later unshield.
+- **No cross-path double-spend for recoverable SMILE leaves.** The recovery claim also retires the note's
+  canonical `V2_SEND` nullifier. A note spent through normal SMILE unshield cannot later recover, and a
+  recovered note cannot later unshield. Legacy cm-v1 leaves are rejected because their old spend nullifier
+  is private-key-derived and cannot be checked from public recovery fields.
 - **No new shielded value.** Zero shielded outputs, pool-debit-only, turnstile-bounded → cannot inflate
   the pool or keep the shielded state machine alive. Monotone-decreasing invariant preserved.
 - **Cannot exceed legitimate value.** `value` is bound to the revealed note and gated by pre-snapshot

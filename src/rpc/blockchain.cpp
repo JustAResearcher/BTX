@@ -4074,6 +4074,16 @@ UniValue WriteUTXOSnapshot(
             })) {
             throw std::ios_base::failure("Failed to serialize BTX shielded nullifiers");
         }
+        uint64_t written_recovery_exit_commitments{0};
+        if (!chainstate.m_chainman.ForEachShieldedRecoveryExitCommitment([&](const uint256& commitment) {
+                afile << commitment;
+                ++written_recovery_exit_commitments;
+                return true;
+            })) {
+            throw std::ios_base::failure("Failed to serialize BTX recovery-exit commitments");
+        }
+        CHECK_NONFATAL(written_recovery_exit_commitments ==
+                       shielded_section->m_recovery_exit_commitment_count);
         if (!chainstate.m_chainman.ForEachShieldedSettlementAnchor([&](const uint256& anchor) {
                 afile << anchor;
                 return true;

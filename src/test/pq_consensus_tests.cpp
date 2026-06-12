@@ -101,9 +101,11 @@ CShieldedBundle BuildCTVV2ShieldedBundle()
     encrypted_note.ephemeral_key = ComputeLegacyPayloadEphemeralKey(
         Span<const uint8_t>{encrypted_note.ciphertext.data(), encrypted_note.ciphertext.size()});
 
+    const uint256 spend_anchor{0x32};
+
     SpendDescription spend;
     spend.nullifier = uint256{0x31};
-    spend.merkle_anchor = uint256{0x32};
+    spend.merkle_anchor = spend_anchor;
     spend.account_leaf_commitment = registry_witness->second.account_leaf_commitment;
     spend.account_registry_proof = registry_witness->second;
     spend.note_commitment = spend_note_commitment;
@@ -117,7 +119,7 @@ CShieldedBundle BuildCTVV2ShieldedBundle()
     output.encrypted_note = encrypted_note;
 
     SendPayload payload;
-    payload.spend_anchor = uint256{0x37};
+    payload.spend_anchor = spend_anchor;
     payload.account_registry_anchor = registry_witness->first;
     payload.spends = {spend};
     payload.outputs = {output};

@@ -80,7 +80,7 @@ CMutableTransaction BuildShieldedV2SendTx(const Nullifier& nf,
     output.note_class = NoteClass::USER;
     output.smile_account = MakeSmileAccount(0x63);
     output.note_commitment = smile2::ComputeCompactPublicAccountHash(*output.smile_account);
-    output.value_commitment = uint256{0x64};
+    output.value_commitment = smile2::ComputeSmileOutputCoinHash(output.smile_account->public_coin);
     output.encrypted_note = encrypted_note;
 
     SendPayload payload;
@@ -175,8 +175,7 @@ CMutableTransaction BuildShieldedV2SpendPathRecoveryTx(
 // A SMILE2-eligible note whose pubkey hash binds (so the mempool's DeriveRecoveryExitIdentifiers succeeds).
 ShieldedNote MakeRecoverableNote(std::vector<unsigned char>& out_pubkey)
 {
-    const uint256 pk = GetRandHash();
-    out_pubkey.assign(pk.begin(), pk.end());
+    out_pubkey.assign(MLDSA44_PUBKEY_SIZE, 0x42);
     HashWriter hw;
     hw.write(AsBytes(Span<const unsigned char>{out_pubkey.data(), out_pubkey.size()}));
     ShieldedNote note;
@@ -200,12 +199,16 @@ CMutableTransaction BuildShieldedRecoveryExitTx(const ShieldedNote& note,
     using namespace shielded::v2;
     RecoveryExitPayload payload;
     payload.value = note.value;
-    payload.note_commitment = note.GetCommitment();
+    const auto account = smile2::wallet::BuildCompactPublicAccountFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        note);
+    BOOST_REQUIRE(account.has_value());
+    payload.note_commitment = smile2::ComputeCompactPublicAccountHash(*account);
     payload.recipient_pk_hash = note.recipient_pk_hash;
     payload.rho = note.rho;
     payload.rcm = note.rcm;
     payload.spend_pubkey = pubkey;
-    payload.ownership_sig = {sig_variant};
+    payload.ownership_sig.assign(MLDSA44_SIGNATURE_SIZE, sig_variant);
     payload.membership_proof = {0x02};
     const auto nf = smile2::wallet::ComputeSmileNullifierFromNote(smile2::wallet::SMILE_GLOBAL_SEED, note);
     out_nf = nf.value_or(uint256{});

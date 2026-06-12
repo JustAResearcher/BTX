@@ -107,9 +107,11 @@ BOOST_AUTO_TEST_CASE(checktxinputs_uses_v2_send_fee_as_explicit_shielded_balance
         *input_account);
     BOOST_REQUIRE(account_registry_witness.has_value());
 
+    const uint256 spend_anchor{0x62};
+
     SpendDescription spend;
     spend.nullifier = uint256{0x61};
-    spend.merkle_anchor = uint256{0x62};
+    spend.merkle_anchor = spend_anchor;
     spend.account_leaf_commitment = *account_leaf_commitment;
     spend.account_registry_proof = account_registry_witness->second;
     spend.note_commitment = uint256{0x63};
@@ -127,7 +129,7 @@ BOOST_AUTO_TEST_CASE(checktxinputs_uses_v2_send_fee_as_explicit_shielded_balance
         Span<const uint8_t>{output.encrypted_note.ciphertext.data(), output.encrypted_note.ciphertext.size()});
 
     SendPayload payload;
-    payload.spend_anchor = uint256{0x67};
+    payload.spend_anchor = spend_anchor;
     payload.account_registry_anchor = account_registry_witness->first;
     payload.spends = {spend};
     payload.outputs = {output};

@@ -997,7 +997,7 @@ SmileCTDecodeStatus DecodeCTProof(const std::vector<uint8_t>& data,
     const uint8_t* end = data.data() + data.size();
 
     if (num_inputs == 0 || num_inputs > MAX_CT_INPUTS) return SmileCTDecodeStatus::MALFORMED;
-    if (num_outputs == 0 || num_outputs > MAX_CT_OUTPUTS) return SmileCTDecodeStatus::MALFORMED;
+    if (num_outputs > MAX_CT_OUTPUTS) return SmileCTDecodeStatus::MALFORMED;
 
     // C-002 staged activation: v3 proofs carry R5 range slots; v2 do not.
     const bool with_range = wire_version >= SmileCTProof::WIRE_VERSION_C002_HARDENED;

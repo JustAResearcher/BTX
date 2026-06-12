@@ -99,6 +99,7 @@ struct RecoveryExitConstraints {
     CAmount value_balance{0};      //!< bundle state value balance (must equal the recovered value)
     CAmount fee{0};
     CAmount transparent_out{0};    //!< total transparent output value
+    uint64_t transparent_input_count{0};
     uint64_t shielded_output_count{0};
     CAmount pool_balance{0};       //!< current frozen pool balance
     int32_t validation_height{0};
@@ -113,8 +114,8 @@ struct RecoveryExitConstraints {
 /** Full consensus predicate for a RECOVERY_EXIT. On success, fills `out` with the identifiers the caller
  *  must atomically retire (nullifier into the shared NullifierSet, commitment into the spent-commitment
  *  set). Enforces: fork active; key binding; pure transparent exit (value_balance == value > fee,
- *  nonnegative fee, transparent_out == value - fee, zero shielded outputs); single-claim (neither identifier already
- *  retired); pool_balance > 0 and not past expiry. */
+ *  nonnegative fee, transparent_out == value - fee, zero transparent inputs, zero shielded outputs);
+ *  single-claim (neither identifier already retired); pool_balance > 0 and not past expiry. */
 [[nodiscard]] bool CheckRecoveryExitClaim(const RecoveryExitClaim& claim,
                                           const RecoveryExitConstraints& c,
                                           RecoveryExitIdentifiers& out,

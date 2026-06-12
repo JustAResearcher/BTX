@@ -9,6 +9,7 @@
 #include <shielded/smile2/poly.h>
 #include <shielded/smile2/public_account.h>
 #include <shielded/smile2/serialize.h>
+#include <shielded/smile2/verify_dispatch.h>
 #include <test/util/setup_common.h>
 #include <test/util/shielded_smile_test_util.h>
 
@@ -69,11 +70,21 @@ SmileCTProof ProveCtWithRetriesForTest(const std::vector<CTInput>& inputs,
                                        const std::vector<CTOutput>& outputs,
                                        const CTPublicData& pub,
                                        uint64_t base_seed,
-                                       int64_t public_fee = 0)
+                                       int64_t public_fee = 0,
+                                       bool bind_anonset_context = false,
+                                       int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT,
+                                       int64_t c002_activation_height = SmileCTProof::C002_ACTIVATION_HEIGHT)
 {
     for (uint32_t attempt = 0; attempt < MAX_CT_TEST_PROOF_ATTEMPTS; ++attempt) {
         const uint64_t attempt_seed = base_seed + (CT_TEST_PROOF_RETRY_STRIDE * attempt);
-        SmileCTProof proof = smile2::ProveCT(inputs, outputs, pub, attempt_seed, public_fee);
+        SmileCTProof proof = smile2::ProveCT(inputs,
+                                             outputs,
+                                             pub,
+                                             attempt_seed,
+                                             public_fee,
+                                             bind_anonset_context,
+                                             validation_height,
+                                             c002_activation_height);
         if (!proof.serial_numbers.empty() &&
             !proof.z.empty() &&
             !proof.z0.empty() &&
@@ -264,6 +275,168 @@ BOOST_AUTO_TEST_CASE(p4_g0_try_prove_ct_rejects_unbalanced_statement_early)
     BOOST_CHECK(legacy.z.empty());
     BOOST_CHECK(legacy.z0.empty());
     BOOST_CHECK(legacy.aux_commitment.t0.empty());
+}
+
+BOOST_AUTO_TEST_CASE(c002_zero_output_unshield_proof_requires_bound_public_outflow)
+{
+    constexpr int64_t kActivationHeight = SmileCTProof::C002_ACTIVATION_HEIGHT;
+    const auto setup = CTTestSetup::Create(/*N=*/16,
+                                           /*num_inputs=*/1,
+                                           /*num_outputs=*/0,
+                                           {25},
+                                           {},
+                                           /*seed_val=*/0x33);
+
+    std::string error;
+    BOOST_CHECK(!TryProveCT(setup.inputs,
+                            setup.outputs,
+                            setup.pub,
+                            /*rng_seed=*/0x7006,
+                            /*public_fee=*/25,
+                            /*bind_anonset_context=*/true,
+                            &error,
+                            kActivationHeight - 1,
+                            kActivationHeight)
+                     .has_value());
+    BOOST_CHECK(!TryProveCT(setup.inputs,
+                            setup.outputs,
+                            setup.pub,
+                            /*rng_seed=*/0x7007,
+                            /*public_fee=*/0,
+                            /*bind_anonset_context=*/true,
+                            &error,
+                            kActivationHeight,
+                            kActivationHeight)
+                     .has_value());
+    BOOST_CHECK(!TryProveCT(setup.inputs,
+                            setup.outputs,
+                            setup.pub,
+                            /*rng_seed=*/0x7008,
+                            /*public_fee=*/25,
+                            /*bind_anonset_context=*/false,
+                            &error,
+                            kActivationHeight,
+                            kActivationHeight)
+                     .has_value());
+
+    const SmileCTProof proof = ProveCtWithRetriesForTest(setup.inputs,
+                                                         setup.outputs,
+                                                         setup.pub,
+                                                         /*base_seed=*/0xABC0033,
+                                                         /*public_fee=*/25,
+                                                         /*bind_anonset_context=*/true,
+                                                         kActivationHeight,
+                                                         kActivationHeight);
+    BOOST_REQUIRE(!proof.serial_numbers.empty());
+    BOOST_REQUIRE_EQUAL(proof.output_coins.size(), 0U);
+    BOOST_REQUIRE(VerifyCT(proof,
+                           /*num_inputs=*/1,
+                           /*num_outputs=*/0,
+                           setup.pub,
+                           /*public_fee=*/25,
+                           /*bind_anonset_context=*/true));
+    BOOST_CHECK(!VerifyCT(proof,
+                          /*num_inputs=*/1,
+                          /*num_outputs=*/0,
+                          setup.pub,
+                          /*public_fee=*/0,
+                          /*bind_anonset_context=*/true));
+
+    const auto proof_bytes = SerializeCTProof(proof);
+    SmileCTProof parsed;
+    const auto parse_err = ParseSmile2Proof(proof_bytes,
+                                            /*num_inputs=*/1,
+                                            /*num_outputs=*/0,
+                                            parsed);
+    BOOST_REQUIRE_MESSAGE(!parse_err.has_value(), parse_err.value_or("ok"));
+    BOOST_CHECK_EQUAL(parsed.wire_version, SmileCTProof::WIRE_VERSION_C002_HARDENED);
+    BOOST_CHECK_MESSAGE(!ValidateSmile2Proof(parsed,
+                                             /*num_inputs=*/1,
+                                             /*num_outputs=*/0,
+                                             /*output_coins=*/{},
+                                             setup.pub,
+                                             /*public_fee=*/25,
+                                             /*bind_anonset_context=*/true,
+                                             kActivationHeight,
+                                             kActivationHeight)
+                             .has_value(),
+                        "zero-output C002 unshield proof should validate");
+    BOOST_CHECK_EQUAL(ValidateSmile2Proof(parsed,
+                                          /*num_inputs=*/1,
+                                          /*num_outputs=*/0,
+                                          /*output_coins=*/{},
+                                          setup.pub,
+                                          /*public_fee=*/25,
+                                          /*bind_anonset_context=*/true,
+                                          kActivationHeight - 1,
+                                          kActivationHeight)
+                          .value_or(""),
+                      "bad-smile2-proof-output-count");
+}
+
+BOOST_AUTO_TEST_CASE(c002_zero_output_unshield_rejects_malicious_input_ring_mutation)
+{
+    constexpr int64_t kActivationHeight = SmileCTProof::C002_ACTIVATION_HEIGHT;
+    auto setup = CTTestSetup::Create(/*N=*/32,
+                                     /*num_inputs=*/1,
+                                     /*num_outputs=*/0,
+                                     {100},
+                                     {},
+                                     /*seed_val=*/0x34);
+    const SmileCTProof proof = ProveCtWithRetriesForTest(setup.inputs,
+                                                         setup.outputs,
+                                                         setup.pub,
+                                                         /*base_seed=*/0xABC0034,
+                                                         /*public_fee=*/100,
+                                                         /*bind_anonset_context=*/true,
+                                                         kActivationHeight,
+                                                         kActivationHeight);
+    BOOST_REQUIRE(VerifyCT(proof,
+                           /*num_inputs=*/1,
+                           /*num_outputs=*/0,
+                           setup.pub,
+                           /*public_fee=*/100,
+                           /*bind_anonset_context=*/true));
+
+    auto tampered_pub = setup.pub;
+    const size_t secret_index = setup.inputs[0].secret_index;
+    BOOST_REQUIRE(secret_index < tampered_pub.coin_rings[0].size());
+    BOOST_REQUIRE(!tampered_pub.coin_rings[0][secret_index].t_msg.empty());
+    tampered_pub.coin_rings[0][secret_index].t_msg[0].coeffs[0] =
+        mod_q(tampered_pub.coin_rings[0][secret_index].t_msg[0].coeffs[0] + 1);
+    BOOST_REQUIRE(secret_index < tampered_pub.account_rings[0].size());
+    tampered_pub.account_rings[0][secret_index].public_coin = tampered_pub.coin_rings[0][secret_index];
+    BOOST_CHECK(!VerifyCT(proof,
+                          /*num_inputs=*/1,
+                          /*num_outputs=*/0,
+                          tampered_pub,
+                          /*public_fee=*/100,
+                          /*bind_anonset_context=*/true));
+
+    tampered_pub = setup.pub;
+    tampered_pub.account_rings[0][secret_index].account_leaf_commitment = uint256{0x35};
+    BOOST_CHECK(!VerifyCT(proof,
+                          /*num_inputs=*/1,
+                          /*num_outputs=*/0,
+                          tampered_pub,
+                          /*public_fee=*/100,
+                          /*bind_anonset_context=*/true));
+
+    auto tampered_input_setup = setup;
+    BOOST_REQUIRE(!tampered_input_setup.inputs[0].coin_r.empty());
+    tampered_input_setup.inputs[0].coin_r[0].coeffs[0] =
+        mod_q(tampered_input_setup.inputs[0].coin_r[0].coeffs[0] + 1);
+    std::string error;
+    BOOST_CHECK(!TryProveCT(tampered_input_setup.inputs,
+                            tampered_input_setup.outputs,
+                            tampered_input_setup.pub,
+                            /*rng_seed=*/0x7009,
+                            /*public_fee=*/100,
+                            /*bind_anonset_context=*/true,
+                            &error,
+                            kActivationHeight,
+                            kActivationHeight)
+                     .has_value());
 }
 
 BOOST_AUTO_TEST_CASE(p4_g0_amount_encoding_roundtrip)

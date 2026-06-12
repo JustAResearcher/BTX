@@ -5418,8 +5418,7 @@ std::optional<CMutableTransaction> CShieldedWallet::BuildRecoveryExitTransaction
         return fail("missing spending key for stranded note");
     }
     std::vector<unsigned char> spend_pubkey = signing_keyset->spending_key.GetPubKey();
-    if (spend_pubkey.empty() ||
-        spend_pubkey.size() > shielded::v2::MAX_RECOVERY_EXIT_PUBKEY_BYTES) {
+    if (spend_pubkey.size() != shielded::v2::MAX_RECOVERY_EXIT_PUBKEY_BYTES) {
         return fail("invalid spending pubkey for stranded note");
     }
     if (HashBytes(Span<const unsigned char>{spend_pubkey.data(), spend_pubkey.size()}) !=
@@ -5463,8 +5462,8 @@ std::optional<CMutableTransaction> CShieldedWallet::BuildRecoveryExitTransaction
     if (!signing_keyset->spending_key.Sign(binding_hash, ownership_sig) || ownership_sig.empty()) {
         return fail("failed to sign recovery exit ownership");
     }
-    if (ownership_sig.size() > shielded::v2::MAX_RECOVERY_EXIT_SIGNATURE_BYTES) {
-        return fail("recovery exit ownership signature oversized");
+    if (ownership_sig.size() != shielded::v2::MAX_RECOVERY_EXIT_SIGNATURE_BYTES) {
+        return fail("recovery exit ownership signature has invalid size");
     }
     // Local self-check: confirm the signature verifies under the revealed pubkey.
     claim.ownership_sig = ownership_sig;

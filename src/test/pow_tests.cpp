@@ -2382,7 +2382,7 @@ BOOST_AUTO_TEST_CASE(matmul_share_target_override_relaxes_only_digest_exit)
     // Block target == 1 (set via nBits below) is effectively unsolvable in a handful of tries, while the
     // maximal share target accepts the first scanned nonce. The two together prove the override changed
     // only the digest acceptance decision, not which nonces were scanned.
-    const uint256 easy_share_target{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    const uint256 easy_share_target{uint256::FromHex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff").value()};
 
     // Cover both solver dispatch paths by reading the activation height from the params themselves.
     const int32_t nonce_seed_height = static_cast<int32_t>(consensus.nMatMulNonceSeedHeight);

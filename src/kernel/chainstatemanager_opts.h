@@ -23,10 +23,10 @@ class ValidationSignals;
 
 static constexpr bool DEFAULT_CHECKPOINTS_ENABLED{true};
 static constexpr auto DEFAULT_MAX_TIP_AGE{24h};
-//! DS-3 compatibility default: current shipped assumeutxo snapshots do not yet carry shielded pins.
-//! Keep bootstrap usable by default, while allowing strict operators to opt out with
-//! -allowunpinnedshieldedsnapshot=0 until pinned snapshots are shipped.
-static constexpr bool DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT{true};
+//! Fail closed for shielded assumeutxo state unless the snapshot height has a
+//! consensus shielded-state pin, or the operator explicitly opts into trusting an
+//! unpinned shielded snapshot with -allowunpinnedshieldedsnapshot=1.
+static constexpr bool DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT{false};
 
 namespace kernel {
 
@@ -89,11 +89,11 @@ struct ChainstateManagerOpts {
     //! clean full rebuild from local block data. Supported replacement for the manual "move shielded_state
     //! aside" recovery; intended to be passed once (e.g. -resetshieldedstate) then removed.
     bool reset_shielded_state{false};
-    //! DS-3 compatibility gate: optionally refuse to load an assumeutxo snapshot whose shielded section has no
+    //! DS-3 compatibility gate: optionally allow loading an assumeutxo snapshot whose shielded section has no
     //! consensus pin (AssumeutxoData.shielded_state_commitment) for its height. The shielded section
     //! (pool balance + nullifier set + commitment tree) is attacker-supplied and otherwise unvalidated,
-    //! so an unpinned shielded snapshot can seed a double-spend. Default true preserves shipped snapshot
-    //! bootstrap compatibility; set false (-allowunpinnedshieldedsnapshot=0) to require pinned snapshots.
+    //! so an unpinned shielded snapshot can seed a double-spend. Default false fails closed; set true
+    //! (-allowunpinnedshieldedsnapshot=1) only for explicitly trusted repair/bootstrap material.
     bool allow_unpinned_shielded_snapshot{DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT};
     //! Action taken when a candidate branch would reorg deeper than the
     //! deep-reorg threshold. Default WARN keeps pure Nakamoto consensus (no

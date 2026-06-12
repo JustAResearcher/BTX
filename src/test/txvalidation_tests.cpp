@@ -231,8 +231,8 @@ void ExpectBlockAccepted(TestChain100Setup& setup, const CBlock& block)
     shielded::v2::OutputDescription output;
     output.note_class = NoteClass::USER;
     output.note_commitment = smile2::ComputeCompactPublicAccountHash(*smile_account);
-    output.value_commitment = uint256{1};
     output.smile_account = *smile_account;
+    output.value_commitment = smile2::ComputeSmileOutputCoinHash(output.smile_account->public_coin);
     output.encrypted_note = *payload;
     BOOST_REQUIRE(output.IsValid());
     return output;
@@ -1001,7 +1001,8 @@ struct V2DirectSendChainFixture
     int32_t validation_height = std::numeric_limits<int32_t>::max(),
     CAmount fee = V2_DIRECT_SEND_FEE,
     size_t seeded_note_count = shielded::ringct::GetMinimumPrivacyTreeSize(shielded::lattice::RING_SIZE),
-    CAmount transparent_output_value = 0)
+    CAmount transparent_output_value = 0,
+    bool include_shielded_output = true)
 {
     V2DirectSendChainFixture fixture;
     fixture.spending_key.assign(32, 0x44);
@@ -1096,10 +1097,15 @@ struct V2DirectSendChainFixture
     BOOST_REQUIRE(AttachAccountRegistryWitnessesFromRegistry(spend_inputs, account_registry));
 
     BOOST_REQUIRE_GE(fixture.ring_notes[V2_DIRECT_SEND_REAL_INDEX].value, fee + transparent_output_value);
-    const ShieldedNote output_note = MakeIngressNote(
-        fixture.ring_notes[V2_DIRECT_SEND_REAL_INDEX].value - fee - transparent_output_value,
-        /*seed=*/0xd1);
-    const auto output_input = BuildDirectSendOutputInput(output_note, /*recipient_seed=*/0xe1);
+    std::vector<V2SendOutputInput> output_inputs;
+    if (include_shielded_output) {
+        const ShieldedNote output_note = MakeIngressNote(
+            fixture.ring_notes[V2_DIRECT_SEND_REAL_INDEX].value - fee - transparent_output_value,
+            /*seed=*/0xd1);
+        output_inputs.push_back(BuildDirectSendOutputInput(output_note, /*recipient_seed=*/0xe1));
+    } else {
+        BOOST_REQUIRE_GT(transparent_output_value, 0);
+    }
 
     if (validation_height == std::numeric_limits<int32_t>::max()) {
         validation_height = WITH_LOCK(cs_main, return chainman.ActiveChain().Height() + 1);
@@ -1117,7 +1123,7 @@ struct V2DirectSendChainFixture
             tx_template,
             fixture.spend_anchor,
             spend_inputs,
-            {output_input},
+            output_inputs,
             fee,
             Span<const unsigned char>{fixture.spending_key.data(), fixture.spending_key.size()},
             reject_reason,
@@ -1141,11 +1147,13 @@ struct V2DirectSendChainFixture
     BOOST_REQUIRE(shielded::v2::BundleHasSemanticFamily(*bundle, TransactionFamily::V2_SEND));
     const auto& payload = std::get<shielded::v2::SendPayload>(bundle->payload);
     BOOST_REQUIRE_EQUAL(payload.spends.size(), 1U);
-    BOOST_REQUIRE_EQUAL(payload.outputs.size(), 1U);
+    BOOST_REQUIRE_EQUAL(payload.outputs.size(), include_shielded_output ? 1U : 0U);
 
     fixture.account_registry_anchor = payload.account_registry_anchor;
     fixture.input_nullifier = payload.spends.front().nullifier;
-    fixture.output_commitment = payload.outputs.front().note_commitment;
+    if (include_shielded_output) {
+        fixture.output_commitment = payload.outputs.front().note_commitment;
+    }
     fixture.built = std::move(*built);
     return fixture;
 }
@@ -2978,13 +2986,9 @@ BOOST_FIXTURE_TEST_CASE(block_rejects_post_c002_rebalance_to_reserve_bound_settl
                       initial_pool_balance);
 }
 
-// NOTE on the outflow exit ACCEPTANCE path (value_balance > fee): a real z->t unshield only becomes
-// buildable/sound at/after C002_ACTIVATION_HEIGHT (123000) -- the SMILE_COMPACT_POSTFORK unshield
-// encoding binds the public outflow only there (see shielded/v2_send.cpp). C002_ACTIVATION_HEIGHT is a
-// hard constant with no regtest override, so a genuine unshield cannot be constructed at the low heights
-// of TestChain100Setup. The acceptance of value_balance > fee V2_SEND exits at the sunset height
-// (>= 125000 > 123000) is therefore exercised on mainnet/by the builder's own C-002 boundary, while the
-// regtest suite covers every REJECTION case below (z->z private transfer, lifecycle, recovery, credits).
+// A genuine z->t unshield is only sound once C-002 binds the public outflow into
+// the SMILE statement. Regtest lowers that activation height in targeted cases
+// below so both acceptance and rejection surfaces are exercised locally.
 
 BOOST_FIXTURE_TEST_CASE(block_rejects_v2_send_private_transfer_at_sunset_height, TestChain100Setup)
 {
@@ -4564,7 +4568,11 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_postfork_v2_lifecycle_control, TestCh
     const ScopedConsensusHeightOverride restore{
         consensus.nShieldedMatRiCTDisableHeight,
         consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_public_flow{
+        consensus.nShieldedDirectSendPublicFlowDisableHeight,
+        consensus.nShieldedDirectSendPublicFlowDisableHeight};
     consensus.nShieldedMatRiCTDisableHeight = tip_height + 1;
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = tip_height + 1;
 
     auto lifecycle_tx = BuildLifecycleControlTx(*this,
                                                 /*change_value=*/49'000,
@@ -4654,7 +4662,11 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_postfork_proofless_transparent_shield
     const ScopedConsensusHeightOverride restore{
         consensus.nShieldedMatRiCTDisableHeight,
         consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_public_flow{
+        consensus.nShieldedDirectSendPublicFlowDisableHeight,
+        consensus.nShieldedDirectSendPublicFlowDisableHeight};
     consensus.nShieldedMatRiCTDisableHeight = tip_height + 1;
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = tip_height + 1;
     auto shielding_tx = BuildTransparentShieldingV2SendTx(*this,
                                                           /*output_value=*/49'000,
                                                           /*fee=*/V2_DIRECT_SEND_FEE,
@@ -4670,6 +4682,48 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_postfork_proofless_transparent_shield
     BOOST_CHECK_MESSAGE(result.m_state.IsInvalid(), result.m_state.GetRejectReason());
     BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-shielded-v2-send-public-flow-disabled");
     BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
+}
+
+BOOST_FIXTURE_TEST_CASE(tx_mempool_cleanup_evicts_proofless_transparent_shielding_at_public_flow_disable, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t tip_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
+    const int32_t validation_height = tip_height + 1;
+    const ScopedConsensusHeightOverride restore_matrict{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_public_flow{
+        consensus.nShieldedDirectSendPublicFlowDisableHeight,
+        consensus.nShieldedDirectSendPublicFlowDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = std::numeric_limits<int32_t>::max();
+
+    auto shielding_tx = BuildTransparentShieldingV2SendTx(*this,
+                                                          /*output_value=*/49'000,
+                                                          /*fee=*/V2_DIRECT_SEND_FEE,
+                                                          &consensus,
+                                                          validation_height);
+    const auto txref = MakeTransactionRef(shielding_tx);
+    const auto txid = GenTxid::Txid(txref->GetHash());
+    const int32_t cleanup_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+
+    const auto accepted = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(txref, /*test_accept=*/false));
+    BOOST_CHECK_MESSAGE(accepted.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                        accepted.m_state.GetRejectReason());
+    BOOST_REQUIRE(WITH_LOCK(m_node.mempool->cs, return m_node.mempool->exists(txid)));
+
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = cleanup_height;
+    {
+        LOCK2(cs_main, m_node.mempool->cs);
+        RemoveStaleShieldedAnchorMempoolTransactions(*m_node.mempool,
+                                                     m_node.chainman->ActiveChain(),
+                                                     *m_node.chainman,
+                                                     &m_node.chainman->ActiveChainstate());
+    }
+
+    BOOST_CHECK(!WITH_LOCK(m_node.mempool->cs, return m_node.mempool->exists(txid)));
 }
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_postfork_coinbase_shielding_v2_send, TestChain100Setup)
@@ -4692,6 +4746,36 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_postfork_coinbase_shielding_v2_send, 
         return m_node.chainman->ProcessTransaction(MakeTransactionRef(shielding_tx), /*test_accept=*/true));
 
     BOOST_CHECK_EQUAL(result.m_result_type, MempoolAcceptResult::ResultType::VALID);
+}
+
+BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_post_disable_coinbase_shielding_v2_send, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t validation_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const ScopedConsensusHeightOverride restore_matrict{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_public_flow{
+        consensus.nShieldedDirectSendPublicFlowDisableHeight,
+        consensus.nShieldedDirectSendPublicFlowDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = validation_height;
+
+    const auto shielding_tx = BuildCoinbaseShieldingV2SendTx(*this,
+                                                             /*output_value=*/49'000,
+                                                             /*fee=*/V2_DIRECT_SEND_FEE,
+                                                             &consensus,
+                                                             validation_height);
+
+    const auto result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(shielding_tx), /*test_accept=*/true));
+
+    BOOST_CHECK_MESSAGE(result.m_result_type == MempoolAcceptResult::ResultType::INVALID,
+                        result.m_state.GetRejectReason());
+    BOOST_CHECK_MESSAGE(result.m_state.IsInvalid(), result.m_state.GetRejectReason());
+    BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-shielded-v2-send-public-flow-disabled");
+    BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
 }
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_postfork_v2_lifecycle_tampered_binding, TestChain100Setup)
@@ -4855,6 +4939,214 @@ BOOST_FIXTURE_TEST_CASE(
                                 return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
                                     ShieldedAutoRepairKind::STATE_REBUILD)),
                       0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_c002_zero_output_unshield_v2_send, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t validation_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const ScopedConsensusHeightOverride restore_matrict{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_c002{
+        consensus.nShieldedC002ActivationHeight,
+        consensus.nShieldedC002ActivationHeight};
+    const ScopedConsensusHeightOverride restore_sunset{
+        consensus.nShieldedSunsetHeight,
+        consensus.nShieldedSunsetHeight};
+    const ScopedConsensusHeightOverride restore_public_flow{
+        consensus.nShieldedDirectSendPublicFlowDisableHeight,
+        consensus.nShieldedDirectSendPublicFlowDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+    consensus.nShieldedC002ActivationHeight = validation_height;
+    consensus.nShieldedSunsetHeight = std::numeric_limits<int32_t>::max();
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = std::numeric_limits<int32_t>::max();
+
+    const CAmount input_value =
+        V2_DIRECT_SEND_RING_NOTE_VALUE + static_cast<CAmount>(V2_DIRECT_SEND_REAL_INDEX) * 500;
+    const CAmount transparent_output_value = input_value - V2_DIRECT_SEND_FEE;
+    auto fixture = BuildV2DirectSendChainFixture(
+        *this,
+        &consensus,
+        validation_height,
+        V2_DIRECT_SEND_FEE,
+        shielded::ringct::GetMinimumPrivacyTreeSize(shielded::lattice::RING_SIZE),
+        transparent_output_value,
+        /*include_shielded_output=*/false);
+    const auto& bundle = *fixture.built.tx.shielded_bundle.v2_bundle;
+    const auto& payload = std::get<shielded::v2::SendPayload>(bundle.payload);
+    BOOST_REQUIRE_EQUAL(payload.outputs.size(), 0U);
+    BOOST_REQUIRE_EQUAL(fixture.built.tx.vin.size(), 0U);
+    BOOST_REQUIRE_EQUAL(fixture.built.tx.vout.size(), 1U);
+    BOOST_CHECK(payload.output_encoding == shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD);
+    BOOST_CHECK_EQUAL(payload.value_balance, transparent_output_value + V2_DIRECT_SEND_FEE);
+    consensus.nShieldedSunsetHeight = validation_height;
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = validation_height;
+
+    const auto result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
+    BOOST_CHECK_MESSAGE(result.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                        result.m_state.GetRejectReason());
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block = CreateBlock({fixture.built.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockAccepted(*this, block);
+}
+
+BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_c002_zero_output_unshield_without_proof, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t validation_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const ScopedConsensusHeightOverride restore_matrict{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_c002{
+        consensus.nShieldedC002ActivationHeight,
+        consensus.nShieldedC002ActivationHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+    consensus.nShieldedC002ActivationHeight = validation_height;
+
+    const CAmount input_value =
+        V2_DIRECT_SEND_RING_NOTE_VALUE + static_cast<CAmount>(V2_DIRECT_SEND_REAL_INDEX) * 500;
+    auto fixture = BuildV2DirectSendChainFixture(
+        *this,
+        &consensus,
+        validation_height,
+        V2_DIRECT_SEND_FEE,
+        shielded::ringct::GetMinimumPrivacyTreeSize(shielded::lattice::RING_SIZE),
+        input_value - V2_DIRECT_SEND_FEE,
+        /*include_shielded_output=*/false);
+    auto& bundle = *fixture.built.tx.shielded_bundle.v2_bundle;
+    bundle.header.proof_envelope.proof_kind = shielded::v2::ProofKind::NONE;
+    bundle.header.proof_envelope.membership_proof_kind = shielded::v2::ProofComponentKind::NONE;
+    bundle.header.proof_envelope.amount_proof_kind = shielded::v2::ProofComponentKind::NONE;
+    bundle.header.proof_envelope.balance_proof_kind = shielded::v2::ProofComponentKind::NONE;
+    bundle.header.proof_envelope.statement_digest = uint256::ZERO;
+    bundle.proof_payload.clear();
+
+    const auto result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
+    BOOST_CHECK_MESSAGE(result.m_result_type == MempoolAcceptResult::ResultType::INVALID,
+                        result.m_state.GetRejectReason());
+    BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-shielded-bundle");
+}
+
+BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_c002_zero_output_unshield_malformed_context, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t validation_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const ScopedConsensusHeightOverride restore_matrict{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_c002{
+        consensus.nShieldedC002ActivationHeight,
+        consensus.nShieldedC002ActivationHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+    consensus.nShieldedC002ActivationHeight = validation_height;
+
+    const CAmount input_value =
+        V2_DIRECT_SEND_RING_NOTE_VALUE + static_cast<CAmount>(V2_DIRECT_SEND_REAL_INDEX) * 500;
+    auto fixture = BuildV2DirectSendChainFixture(
+        *this,
+        &consensus,
+        validation_height,
+        V2_DIRECT_SEND_FEE,
+        shielded::ringct::GetMinimumPrivacyTreeSize(shielded::lattice::RING_SIZE),
+        input_value - V2_DIRECT_SEND_FEE,
+        /*include_shielded_output=*/false);
+    auto& bundle = *fixture.built.tx.shielded_bundle.v2_bundle;
+    auto& payload = std::get<shielded::v2::SendPayload>(bundle.payload);
+
+    auto malformed_balance_tx = fixture.built.tx;
+    auto& malformed_balance_bundle = *malformed_balance_tx.shielded_bundle.v2_bundle;
+    auto& malformed_balance_payload =
+        std::get<shielded::v2::SendPayload>(malformed_balance_bundle.payload);
+    malformed_balance_payload.value_balance = malformed_balance_payload.fee;
+    malformed_balance_bundle.header.payload_digest =
+        shielded::v2::ComputeSendPayloadDigest(malformed_balance_payload);
+    const auto malformed_balance_result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(malformed_balance_tx),
+                                                   /*test_accept=*/true));
+    BOOST_CHECK_MESSAGE(malformed_balance_result.m_result_type == MempoolAcceptResult::ResultType::INVALID,
+                        malformed_balance_result.m_state.GetRejectReason());
+    BOOST_CHECK_EQUAL(malformed_balance_result.m_state.GetRejectReason(), "bad-shielded-bundle");
+
+    auto malformed_encoding_tx = fixture.built.tx;
+    auto& malformed_encoding_bundle = *malformed_encoding_tx.shielded_bundle.v2_bundle;
+    auto& malformed_encoding_payload =
+        std::get<shielded::v2::SendPayload>(malformed_encoding_bundle.payload);
+    malformed_encoding_payload.output_encoding = shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK;
+    malformed_encoding_bundle.header.payload_digest =
+        shielded::v2::ComputeSendPayloadDigest(malformed_encoding_payload);
+    const auto malformed_encoding_result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(malformed_encoding_tx),
+                                                   /*test_accept=*/true));
+    BOOST_CHECK_MESSAGE(malformed_encoding_result.m_result_type == MempoolAcceptResult::ResultType::INVALID,
+                        malformed_encoding_result.m_state.GetRejectReason());
+    BOOST_CHECK_EQUAL(malformed_encoding_result.m_state.GetRejectReason(), "bad-shielded-bundle");
+
+    CPQKey lifecycle_key;
+    CPQKey lifecycle_successor_key;
+    lifecycle_key.MakeNewKey(PQAlgorithm::ML_DSA_44);
+    lifecycle_successor_key.MakeNewKey(PQAlgorithm::ML_DSA_44);
+    BOOST_REQUIRE(lifecycle_key.IsValid());
+    BOOST_REQUIRE(lifecycle_successor_key.IsValid());
+    const auto lifecycle_subject = MakeLifecycleAddressForTxValidation(lifecycle_key, 0xb1);
+    const auto lifecycle_successor =
+        MakeLifecycleAddressForTxValidation(lifecycle_successor_key, 0xc1);
+    const uint256 lifecycle_binding_digest{0xb2};
+    payload.lifecycle_controls.push_back(MakeLifecycleRecordForTxValidation(
+        shielded::v2::AddressLifecycleControlKind::ROTATE,
+        lifecycle_key,
+        lifecycle_subject,
+        lifecycle_successor,
+        lifecycle_binding_digest));
+    bundle.header.payload_digest = shielded::v2::ComputeSendPayloadDigest(payload);
+    const auto lifecycle_result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx),
+                                                   /*test_accept=*/true));
+    BOOST_CHECK_MESSAGE(lifecycle_result.m_result_type == MempoolAcceptResult::ResultType::INVALID,
+                        lifecycle_result.m_state.GetRejectReason());
+    BOOST_CHECK_EQUAL(lifecycle_result.m_state.GetRejectReason(), "bad-shielded-bundle");
+}
+
+BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_c002_zero_output_unshield_tampered_transparent_outflow, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t validation_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const ScopedConsensusHeightOverride restore_matrict{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_c002{
+        consensus.nShieldedC002ActivationHeight,
+        consensus.nShieldedC002ActivationHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+    consensus.nShieldedC002ActivationHeight = validation_height;
+
+    const CAmount input_value =
+        V2_DIRECT_SEND_RING_NOTE_VALUE + static_cast<CAmount>(V2_DIRECT_SEND_REAL_INDEX) * 500;
+    auto fixture = BuildV2DirectSendChainFixture(
+        *this,
+        &consensus,
+        validation_height,
+        V2_DIRECT_SEND_FEE,
+        shielded::ringct::GetMinimumPrivacyTreeSize(shielded::lattice::RING_SIZE),
+        input_value - V2_DIRECT_SEND_FEE,
+        /*include_shielded_output=*/false);
+    BOOST_REQUIRE_EQUAL(fixture.built.tx.vout.size(), 1U);
+    fixture.built.tx.vout[0].nValue += shielded::SHIELDED_PRIVACY_FEE_QUANTUM;
+
+    const auto result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
+    BOOST_CHECK_MESSAGE(result.m_result_type == MempoolAcceptResult::ResultType::INVALID,
+                        result.m_state.GetRejectReason());
+    BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-shielded-proof");
 }
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_postfork_legacy_compact_direct_send_encoding, TestChain100Setup)
@@ -5074,7 +5366,11 @@ BOOST_FIXTURE_TEST_CASE(block_rejects_postfork_proofless_transparent_shielding_v
     const ScopedConsensusHeightOverride restore{
         consensus.nShieldedMatRiCTDisableHeight,
         consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_public_flow{
+        consensus.nShieldedDirectSendPublicFlowDisableHeight,
+        consensus.nShieldedDirectSendPublicFlowDisableHeight};
     consensus.nShieldedMatRiCTDisableHeight = tip_height + 1;
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = tip_height + 1;
     auto shielding_tx = BuildTransparentShieldingV2SendTx(*this,
                                                           /*output_value=*/49'000,
                                                           /*fee=*/V2_DIRECT_SEND_FEE,
@@ -5104,6 +5400,61 @@ BOOST_FIXTURE_TEST_CASE(block_accepts_postfork_coinbase_shielding_v2_send, TestC
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     const CBlock block = CreateBlock({shielding_tx}, script_pub_key, m_node.chainman->ActiveChainstate());
     ExpectBlockAccepted(*this, block);
+}
+
+BOOST_FIXTURE_TEST_CASE(block_rejects_post_disable_coinbase_shielding_v2_send, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t validation_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const ScopedConsensusHeightOverride restore_matrict{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_public_flow{
+        consensus.nShieldedDirectSendPublicFlowDisableHeight,
+        consensus.nShieldedDirectSendPublicFlowDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = validation_height;
+
+    const auto shielding_tx = BuildCoinbaseShieldingV2SendTx(*this,
+                                                             /*output_value=*/49'000,
+                                                             /*fee=*/V2_DIRECT_SEND_FEE,
+                                                             &consensus,
+                                                             validation_height);
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block = CreateBlock({shielding_tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, block, "bad-shielded-v2-send-public-flow-disabled");
+}
+
+BOOST_FIXTURE_TEST_CASE(block_rejects_c002_zero_output_unshield_tampered_transparent_outflow, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t validation_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const ScopedConsensusHeightOverride restore_matrict{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_c002{
+        consensus.nShieldedC002ActivationHeight,
+        consensus.nShieldedC002ActivationHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+    consensus.nShieldedC002ActivationHeight = validation_height;
+
+    const CAmount input_value =
+        V2_DIRECT_SEND_RING_NOTE_VALUE + static_cast<CAmount>(V2_DIRECT_SEND_REAL_INDEX) * 500;
+    auto fixture = BuildV2DirectSendChainFixture(
+        *this,
+        &consensus,
+        validation_height,
+        V2_DIRECT_SEND_FEE,
+        shielded::ringct::GetMinimumPrivacyTreeSize(shielded::lattice::RING_SIZE),
+        input_value - V2_DIRECT_SEND_FEE,
+        /*include_shielded_output=*/false);
+    BOOST_REQUIRE_EQUAL(fixture.built.tx.vout.size(), 1U);
+    fixture.built.tx.vout[0].nValue += shielded::SHIELDED_PRIVACY_FEE_QUANTUM;
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block = CreateBlock({fixture.built.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, block, "bad-shielded-proof");
 }
 
 BOOST_FIXTURE_TEST_CASE(block_rejects_postfork_v2_lifecycle_tampered_binding, TestChain100Setup)

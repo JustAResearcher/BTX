@@ -637,6 +637,9 @@ BOOST_AUTO_TEST_CASE(send_bundle_roundtrip_and_bundle_id_commits_to_proof_payloa
     payload.spend_anchor = uint256{0x01};
     payload.account_registry_anchor = uint256{0x02};
     payload.spends = {MakeSpend(0x10), MakeSpend(0x20)};
+    for (auto& spend : payload.spends) {
+        spend.merkle_anchor = payload.spend_anchor;
+    }
     payload.outputs = {MakeOutput(NoteClass::USER, ScanDomain::USER, 0x30),
                        MakeOutput(NoteClass::USER, ScanDomain::USER, 0x40)};
     payload.fee = 2 * COIN;
@@ -661,6 +664,36 @@ BOOST_AUTO_TEST_CASE(send_bundle_roundtrip_and_bundle_id_commits_to_proof_payloa
     TransactionBundle different_proof = bundle;
     different_proof.proof_payload.push_back(0x99);
     BOOST_CHECK(ComputeTransactionBundleId(different_proof) != ComputeTransactionBundleId(bundle));
+}
+
+BOOST_AUTO_TEST_CASE(send_payload_rejects_split_spend_anchor)
+{
+    SendPayload payload;
+    payload.spend_anchor = uint256{0x21};
+    payload.account_registry_anchor = uint256{0x22};
+    payload.spends = {MakeSpend(0x23)};
+    payload.spends.front().merkle_anchor = payload.spend_anchor;
+    payload.outputs = {MakeOutput(NoteClass::USER, ScanDomain::USER, 0x24)};
+    payload.fee = COIN / 10;
+    payload.value_balance = payload.fee;
+
+    BOOST_REQUIRE(payload.IsValid());
+
+    payload.spends.front().merkle_anchor = uint256{0x25};
+    BOOST_CHECK(!payload.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(send_payload_rejects_mismatched_direct_output_value_commitment)
+{
+    SendPayload payload;
+    payload.outputs = {MakeOutput(NoteClass::USER, ScanDomain::USER, 0x26)};
+    payload.value_balance = -COIN / 10;
+    payload.fee = COIN / 10;
+
+    BOOST_REQUIRE(payload.IsValid());
+
+    payload.outputs.front().value_commitment = uint256{0x27};
+    BOOST_CHECK(!payload.IsValid());
 }
 
 BOOST_AUTO_TEST_CASE(spend_path_recovery_bundle_roundtrip_and_payload_digest_are_stable)
@@ -1555,6 +1588,7 @@ BOOST_AUTO_TEST_CASE(v2_output_families_require_smile_accounts)
     send_payload.spend_anchor = uint256{0x11};
     send_payload.account_registry_anchor = uint256{0x12};
     send_payload.spends = {MakeSpend(0x12)};
+    send_payload.spends.front().merkle_anchor = send_payload.spend_anchor;
     send_payload.outputs = {MakeOutput(NoteClass::USER, ScanDomain::USER, 0x13)};
     send_payload.outputs[0].smile_account.reset();
     send_payload.fee = 1;
@@ -1911,6 +1945,7 @@ BOOST_AUTO_TEST_CASE(bundle_state_accessors_cover_v2_families)
         payload.spend_anchor = uint256{0xe0};
         payload.account_registry_anchor = uint256{0xe1};
         payload.spends = {MakeSpend(0xe1)};
+        payload.spends.front().merkle_anchor = payload.spend_anchor;
         payload.outputs = {MakeOutput(NoteClass::USER, ScanDomain::USER, 0xe4)};
         payload.fee = 7;
         payload.value_balance = payload.fee;

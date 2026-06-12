@@ -708,6 +708,7 @@ bool SendPayload::IsValid() const
 {
     const Span<const OutputDescription> output_span = MakeSpan(outputs);
     const bool has_spends = !spends.empty();
+    const bool has_outputs = !outputs.empty();
     const bool has_lifecycle_controls = !lifecycle_controls.empty();
     const bool elides_value_balance =
         SendOutputEncodingElidesValueBalance(output_encoding) && !has_lifecycle_controls;
@@ -716,6 +717,7 @@ bool SendPayload::IsValid() const
             if (spend.version != WIRE_VERSION ||
                 spend.nullifier.IsNull() ||
                 spend.merkle_anchor.IsNull() ||
+                spend.merkle_anchor != spend_anchor ||
                 spend.account_leaf_commitment.IsNull() ||
                 !spend.account_registry_proof.IsValid() ||
                 spend.account_registry_proof.account_leaf_commitment != spend.account_leaf_commitment) {
@@ -728,12 +730,19 @@ bool SendPayload::IsValid() const
         });
     if (version != WIRE_VERSION ||
         spends.size() > MAX_DIRECT_SPENDS ||
-        outputs.empty() || outputs.size() > MAX_DIRECT_OUTPUTS ||
+        outputs.size() > MAX_DIRECT_OUTPUTS ||
         lifecycle_controls.size() > MAX_ADDRESS_LIFECYCLE_CONTROLS ||
         !IsValidSendOutputEncoding(output_encoding) ||
         !AllValid(output_span) ||
         !MoneyRangeSigned(value_balance) ||
         !MoneyRange(fee) || fee < 0) {
+        return false;
+    }
+    if (!has_outputs &&
+        (!has_spends ||
+         has_lifecycle_controls ||
+         output_encoding != SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD ||
+         value_balance <= fee)) {
         return false;
     }
 
@@ -772,8 +781,9 @@ bool SendPayload::IsValid() const
     }
 
     if (IsCompactSendOutputEncoding(output_encoding)) {
-        if (!IsValidNoteClass(output_note_class) ||
-            output_scan_domain != ScanDomain::OPAQUE ||
+        if ((has_outputs &&
+             (!IsValidNoteClass(output_note_class) ||
+              output_scan_domain != ScanDomain::OPAQUE)) ||
             !std::all_of(outputs.begin(), outputs.end(), [&](const OutputDescription& output) {
                 return output.note_class == output_note_class &&
                        output.encrypted_note.scan_domain == output_scan_domain &&
@@ -804,6 +814,17 @@ bool SendPayload::IsValid() const
         std::sort(control_indexes.begin(), control_indexes.end());
         if (std::adjacent_find(control_indexes.begin(), control_indexes.end()) != control_indexes.end()) {
             return false;
+        }
+    }
+
+    if (!has_lifecycle_controls) {
+        for (const OutputDescription& output : outputs) {
+            if (output.note_class == NoteClass::USER &&
+                output.smile_account.has_value() &&
+                output.value_commitment !=
+                    smile2::ComputeSmileOutputCoinHash(output.smile_account->public_coin)) {
+                return false;
+            }
         }
     }
 
@@ -857,8 +878,9 @@ bool RecoveryExitPayload::IsValid() const
            !recipient_pk_hash.IsNull() &&
            !rho.IsNull() &&
            !rcm.IsNull() &&
-           !spend_pubkey.empty() && spend_pubkey.size() <= MAX_RECOVERY_EXIT_PUBKEY_BYTES &&
-           !ownership_sig.empty() && ownership_sig.size() <= MAX_RECOVERY_EXIT_SIGNATURE_BYTES &&
+           spend_pubkey.size() == MLDSA44_PUBKEY_SIZE &&
+           ownership_sig.size() == MLDSA44_SIGNATURE_SIZE &&
+           !membership_proof.empty() &&
            membership_proof.size() <= MAX_RECOVERY_EXIT_MEMBERSHIP_PROOF_BYTES;
 }
 
