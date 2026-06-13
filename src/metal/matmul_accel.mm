@@ -23,10 +23,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <limits.h>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
+#include <mach-o/dyld.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
 
@@ -1016,6 +1019,51 @@ kernel void product_compressed_sha256(
 
 )METAL";
 
+void AppendUniquePath(std::vector<std::string>& paths, const char* path)
+{
+    if (path == nullptr || path[0] == '\0') return;
+    if (std::find(paths.begin(), paths.end(), path) == paths.end()) {
+        paths.emplace_back(path);
+    }
+}
+
+std::optional<std::string> ExecutableDirectory()
+{
+    uint32_t size = PATH_MAX;
+    std::vector<char> buffer(size);
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        buffer.resize(size);
+        if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+            return std::nullopt;
+        }
+    }
+
+    char resolved[PATH_MAX];
+    const char* executable_path = realpath(buffer.data(), resolved) != nullptr ? resolved : buffer.data();
+    std::string path{executable_path};
+    const auto separator = path.find_last_of('/');
+    if (separator == std::string::npos) {
+        return std::nullopt;
+    }
+    return path.substr(0, separator);
+}
+
+std::vector<std::string> MatMulMetallibCandidatePaths()
+{
+    std::vector<std::string> paths;
+    AppendUniquePath(paths, std::getenv("BTX_MATMUL_METALLIB_PATH"));
+
+    if (const auto executable_dir = ExecutableDirectory()) {
+        const std::string packaged_path = *executable_dir + "/metal/matmul_accel_kernels.metallib";
+        AppendUniquePath(paths, packaged_path.c_str());
+    }
+
+#if defined(BTX_MATMUL_METALLIB_PATH)
+    AppendUniquePath(paths, BTX_MATMUL_METALLIB_PATH);
+#endif
+    return paths;
+}
+
 constexpr uint32_t FC_INDEX_N = 0;
 constexpr uint32_t FC_INDEX_B = 1;
 constexpr uint32_t FC_INDEX_R = 2;
@@ -1358,15 +1406,19 @@ struct MetalContext {
 
             NSError* library_error = nil;
             id<MTLLibrary> library = nil;
-#if defined(BTX_MATMUL_METALLIB_PATH)
-            NSString* precompiled_path = [NSString stringWithUTF8String:BTX_MATMUL_METALLIB_PATH];
-            if ([[NSFileManager defaultManager] fileExistsAtPath:precompiled_path]) {
+            for (const auto& candidate_path : MatMulMetallibCandidatePaths()) {
+                NSString* precompiled_path = [NSString stringWithUTF8String:candidate_path.c_str()];
+                if (![[NSFileManager defaultManager] fileExistsAtPath:precompiled_path]) {
+                    continue;
+                }
                 library_error = nil;
                 NSURL* precompiled_url = [NSURL fileURLWithPath:precompiled_path];
                 library = [device newLibraryWithURL:precompiled_url error:&library_error];
                 using_precompiled_library = (library != nil);
+                if (library != nil) {
+                    break;
+                }
             }
-#endif
             if (library == nil) {
                 library_error = nil;
                 library = [device newLibraryWithSource:[NSString stringWithUTF8String:KERNEL_SOURCE]

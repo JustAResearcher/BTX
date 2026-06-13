@@ -18,8 +18,12 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <limits.h>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <vector>
+#include <mach-o/dyld.h>
 
 namespace {
 
@@ -29,6 +33,51 @@ int64_t SteadyMilliseconds()
 {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+void AppendUniquePath(std::vector<std::string>& paths, const char* path)
+{
+    if (path == nullptr || path[0] == '\0') return;
+    if (std::find(paths.begin(), paths.end(), path) == paths.end()) {
+        paths.emplace_back(path);
+    }
+}
+
+std::optional<std::string> ExecutableDirectory()
+{
+    uint32_t size = PATH_MAX;
+    std::vector<char> buffer(size);
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        buffer.resize(size);
+        if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+            return std::nullopt;
+        }
+    }
+
+    char resolved[PATH_MAX];
+    const char* executable_path = realpath(buffer.data(), resolved) != nullptr ? resolved : buffer.data();
+    std::string path{executable_path};
+    const auto separator = path.find_last_of('/');
+    if (separator == std::string::npos) {
+        return std::nullopt;
+    }
+    return path.substr(0, separator);
+}
+
+std::vector<std::string> OracleMetallibCandidatePaths()
+{
+    std::vector<std::string> paths;
+    AppendUniquePath(paths, std::getenv("BTX_ORACLE_METALLIB_PATH"));
+
+    if (const auto executable_dir = ExecutableDirectory()) {
+        const std::string packaged_path = *executable_dir + "/metal/oracle_accel_kernels.metallib";
+        AppendUniquePath(paths, packaged_path.c_str());
+    }
+
+#if defined(BTX_ORACLE_METALLIB_PATH)
+    AppendUniquePath(paths, BTX_ORACLE_METALLIB_PATH);
+#endif
+    return paths;
 }
 
 constexpr const char* KERNEL_SOURCE = R"METAL(
@@ -574,18 +623,21 @@ struct MetalContext {
             NSError* library_error = nil;
             id<MTLLibrary> library = nil;
             std::string precompiled_error;
-#if defined(BTX_ORACLE_METALLIB_PATH)
-            NSString* precompiled_path = [NSString stringWithUTF8String:BTX_ORACLE_METALLIB_PATH];
-            if ([[NSFileManager defaultManager] fileExistsAtPath:precompiled_path]) {
+            for (const auto& candidate_path : OracleMetallibCandidatePaths()) {
+                NSString* precompiled_path = [NSString stringWithUTF8String:candidate_path.c_str()];
+                if (![[NSFileManager defaultManager] fileExistsAtPath:precompiled_path]) {
+                    continue;
+                }
                 library_error = nil;
                 NSURL* precompiled_url = [NSURL fileURLWithPath:precompiled_path];
                 library = [device newLibraryWithURL:precompiled_url error:&library_error];
                 using_precompiled_library = (library != nil);
                 if (library == nil && library_error != nil) {
                     precompiled_error = [[library_error localizedDescription] UTF8String];
+                } else if (library != nil) {
+                    break;
                 }
             }
-#endif
             if (library == nil) {
                 library_error = nil;
                 library = [device newLibraryWithSource:[NSString stringWithUTF8String:KERNEL_SOURCE]

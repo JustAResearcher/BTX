@@ -155,6 +155,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--btxd", required=True, help="Path to the btxd binary for this platform.")
     parser.add_argument("--btx-cli", required=True, help="Path to the btx-cli binary for this platform.")
+    parser.add_argument("--matmul-metallib", help="Optional precompiled MatMul Metal library for macOS archives.")
+    parser.add_argument("--oracle-metallib", help="Optional precompiled oracle Metal library for macOS archives.")
     parser.add_argument(
         "--source-root",
         default=str(ROOT),
@@ -187,6 +189,8 @@ def stage_release_tree(
     platform_id: str,
     btxd_path: Path,
     btx_cli_path: Path,
+    matmul_metallib_path: Path | None,
+    oracle_metallib_path: Path | None,
     source_root: Path,
     temp_root: Path,
 ) -> tuple[Path, list[str]]:
@@ -220,6 +224,22 @@ def stage_release_tree(
         destination.write_text(wrapper, encoding="utf-8")
         destination.chmod(0o755)
         included.append(str(destination.relative_to(release_root)))
+
+    if platform_id.startswith("macos-"):
+        metallib_inputs = [
+            (matmul_metallib_path, "matmul_accel_kernels.metallib"),
+            (oracle_metallib_path, "oracle_accel_kernels.metallib"),
+        ]
+        metal_dir = libexec_dir / "metal"
+        for source_path, dest_name in metallib_inputs:
+            if source_path is None:
+                continue
+            source = ensure_input_file(source_path, dest_name)
+            metal_dir.mkdir(parents=True, exist_ok=True)
+            destination = metal_dir / dest_name
+            shutil.copy2(source, destination)
+            destination.chmod(0o644)
+            included.append(str(destination.relative_to(release_root)))
 
     for relative_path in SUPPORT_FILES:
         source = ensure_input_file(source_root / relative_path, relative_path)
@@ -291,6 +311,8 @@ def main(argv: list[str]) -> int:
             platform_id=args.platform_id,
             btxd_path=Path(args.btxd).expanduser().resolve(),
             btx_cli_path=Path(args.btx_cli).expanduser().resolve(),
+            matmul_metallib_path=Path(args.matmul_metallib).expanduser().resolve() if args.matmul_metallib else None,
+            oracle_metallib_path=Path(args.oracle_metallib).expanduser().resolve() if args.oracle_metallib else None,
             source_root=source_root,
             temp_root=temp_root,
         )
