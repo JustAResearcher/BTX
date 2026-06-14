@@ -72,6 +72,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <set>
 #include <thread>
 #include <algorithm>
 #include <array>
@@ -91,24 +92,24 @@ using util::ToString;
 
 static int64_t DefaultMinOutboundPeersForMiningTemplate(const CChainParams& params)
 {
-    return params.GetChainType() == ChainType::MAIN ? 2 : 0;
+    return params.GetChainType() == ChainType::MAIN ? 3 : 0;
 }
 
 static int64_t DefaultMaxHeaderLagForMiningTemplate(const CChainParams& params)
 {
     // Allow small transient lag, but avoid mining from a significantly stale
     // validated tip when better headers are already known.
-    return params.GetChainType() == ChainType::MAIN ? 8 : 0;
+    return params.GetChainType() == ChainType::MAIN ? 3 : 0;
 }
 
 static int64_t DefaultMinSyncedOutboundPeersForMiningTemplate(const CChainParams& params)
 {
-    return params.GetChainType() == ChainType::MAIN ? 1 : 0;
+    return params.GetChainType() == ChainType::MAIN ? 2 : 0;
 }
 
 static int64_t DefaultMaxPeerSyncHeightLagForMiningTemplate(const CChainParams& params)
 {
-    return params.GetChainType() == ChainType::MAIN ? 2 : 0;
+    return params.GetChainType() == ChainType::MAIN ? 1 : 0;
 }
 
 struct OutboundPeerDiagnostic
@@ -124,6 +125,38 @@ struct OutboundPeerDiagnostic
     int64_t last_block_time{0};
     int64_t last_block_announcement{0};
     bool counts_as_synced_outbound{false};
+};
+
+struct ChainTipStatusSummary
+{
+    int64_t count{0};
+    int64_t highest_height{-1};
+    int64_t max_branch_length{0};
+    int64_t max_branch_tip_height{-1};
+    std::string max_branch_tip_hash{};
+
+    void Record(const CBlockIndex& block, const int branch_length)
+    {
+        ++count;
+        highest_height = std::max<int64_t>(highest_height, block.nHeight);
+        if (branch_length > max_branch_length ||
+            (branch_length == max_branch_length && block.nHeight > max_branch_tip_height)) {
+            max_branch_length = branch_length;
+            max_branch_tip_height = block.nHeight;
+            max_branch_tip_hash = block.GetBlockHash().GetHex();
+        }
+    }
+
+    UniValue ToJSON() const
+    {
+        UniValue obj(UniValue::VOBJ);
+        obj.pushKV("count", count);
+        obj.pushKV("highest_height", highest_height);
+        obj.pushKV("max_branch_length", max_branch_length);
+        obj.pushKV("max_branch_tip_height", max_branch_tip_height);
+        obj.pushKV("max_branch_tip_hash", max_branch_tip_hash);
+        return obj;
+    }
 };
 
 struct OutboundPeerDiagnosticsSummary
@@ -201,19 +234,6 @@ static OutboundPeerDiagnosticsSummary CollectOutboundPeerDiagnostics(
     return summary;
 }
 
-static size_t CountSyncedOutboundPeers(
-    const CConnman& connman,
-    const PeerManager& peerman,
-    const int active_tip_height,
-    const int64_t max_peer_sync_height_lag)
-{
-    return CollectOutboundPeerDiagnostics(
-        connman,
-        &peerman,
-        active_tip_height,
-        max_peer_sync_height_lag).synced_outbound_peers;
-}
-
 static void EnforceMiningTemplateReadiness(
     const ChainstateManager& chainman,
     const CConnman& connman,
@@ -226,71 +246,18 @@ static void EnforceMiningTemplateReadiness(
     const bool enforce_header_lag,
     const int64_t max_header_lag) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (enforce_connectivity) {
-        if (connman.GetNodeCount(ConnectionDirection::Both) == 0) {
-            throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, CLIENT_NAME " is not connected!");
-        }
+    (void)connman;
+    (void)peerman;
+    (void)enforce_connectivity;
+    (void)min_outbound_peers;
+    (void)min_synced_outbound_peers;
+    (void)max_peer_sync_height_lag;
+    (void)enforce_header_lag;
+    (void)max_header_lag;
+    (void)miner;
 
-        if (min_outbound_peers > 0) {
-            const size_t outbound_peers = connman.GetNodeCount(ConnectionDirection::Out);
-            if (outbound_peers < static_cast<size_t>(min_outbound_peers)) {
-                throw JSONRPCError(
-                    RPC_CLIENT_NOT_CONNECTED,
-                    strprintf("%s has %u outbound peers, requires at least %d for getblocktemplate; "
-                              "set -miningminoutboundpeers=0 to disable",
-                              CLIENT_NAME, outbound_peers, min_outbound_peers));
-            }
-        }
-
-        if (miner.isInitialBlockDownload()) {
-            throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, CLIENT_NAME " is in initial sync and waiting for blocks...");
-        }
-
-        if (min_synced_outbound_peers > 0) {
-            if (peerman == nullptr) {
-                throw JSONRPCError(RPC_INTERNAL_ERROR, "Peer manager unavailable while enforcing mining peer sync guard");
-            }
-            const CBlockIndex* const active_tip = chainman.ActiveChain().Tip();
-            if (active_tip == nullptr) {
-                throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, CLIENT_NAME " has no active tip yet");
-            }
-
-            const size_t synced_outbound_peers = CountSyncedOutboundPeers(
-                connman,
-                *peerman,
-                active_tip->nHeight,
-                max_peer_sync_height_lag);
-            if (synced_outbound_peers < static_cast<size_t>(min_synced_outbound_peers)) {
-                throw JSONRPCError(
-                    RPC_CLIENT_NOT_CONNECTED,
-                    strprintf(
-                        "%s has %u synced outbound peers, requires at least %d within %d blocks of active tip for getblocktemplate; "
-                        "set -miningminsyncedoutboundpeers=0 to disable",
-                        CLIENT_NAME,
-                        static_cast<unsigned>(synced_outbound_peers),
-                        min_synced_outbound_peers,
-                        static_cast<int>(max_peer_sync_height_lag)));
-            }
-        }
-    }
-
-    if (enforce_header_lag && max_header_lag > 0) {
-        const CBlockIndex* const active_tip = chainman.ActiveChain().Tip();
-        const CBlockIndex* const best_header = chainman.m_best_header;
-        if (active_tip && best_header) {
-            const int64_t header_lag = std::max<int64_t>(0, best_header->nHeight - active_tip->nHeight);
-            if (header_lag > max_header_lag) {
-                throw JSONRPCError(
-                    RPC_CLIENT_IN_INITIAL_DOWNLOAD,
-                    strprintf(
-                        "%s validated tip is %d blocks behind best header (%d > %d); "
-                        "set -miningmaxheaderlag=0 to disable",
-                        CLIENT_NAME,
-                        header_lag,
-                        header_lag,
-                        max_header_lag));
-            }
-        }
+    if (chainman.ActiveChain().Tip() == nullptr) {
+        throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, CLIENT_NAME " has no active tip yet");
     }
 }
 
@@ -1134,6 +1101,10 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
     const uint32_t warn_depth = cm_opts.max_reorg_depth_warn.value_or(profile_settings.warn_depth);
     const uint32_t park_depth = cm_opts.max_reorg_depth_park.value_or(profile_settings.park_depth);
     const uint32_t finality_depth = cm_opts.local_finality_depth.value_or(profile_settings.finality_depth);
+    const uint32_t hysteresis_depth =
+        cm_opts.reorg_hysteresis_depth.value_or(profile_settings.hysteresis_depth);
+    const uint32_t hysteresis_work_margin =
+        cm_opts.reorg_hysteresis_work_margin.value_or(profile_settings.hysteresis_work_margin);
     const bool enabled =
         (warn_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED ||
          park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED) &&
@@ -1163,6 +1134,15 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
                enabled && finality_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED
                    ? static_cast<int64_t>(finality_depth)
                    : 0);
+    obj.pushKV("hysteresis_depth",
+               enabled && hysteresis_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
+                       hysteresis_work_margin > 0
+                   ? static_cast<int64_t>(hysteresis_depth)
+                   : 0);
+    obj.pushKV("hysteresis_work_margin",
+               enabled && hysteresis_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED
+                   ? static_cast<int64_t>(hysteresis_work_margin)
+                   : 0);
     obj.pushKV("locally_finalized_height",
                enabled && finality_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED && current_tip_height >= 0
                    ? std::max<int64_t>(0, static_cast<int64_t>(current_tip_height) - finality_depth)
@@ -1191,6 +1171,14 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
     obj.pushKV("last_rejected_fork_height", stats.last_rejected_fork_height);
     obj.pushKV("last_rejected_candidate_height", stats.last_rejected_candidate_height);
     obj.pushKV("last_rejected_unix", stats.last_rejected_unix);
+    obj.pushKV("deferred_reorgs", stats.deferred_reorgs);
+    obj.pushKV("deepest_deferred_reorg_depth", static_cast<int64_t>(stats.deepest_deferred_reorg_depth));
+    obj.pushKV("last_deferred_reorg_depth", static_cast<int64_t>(stats.last_deferred_reorg_depth));
+    obj.pushKV("last_deferred_required_work_margin", static_cast<int64_t>(stats.last_deferred_required_work_margin));
+    obj.pushKV("last_deferred_tip_height", stats.last_deferred_tip_height);
+    obj.pushKV("last_deferred_fork_height", stats.last_deferred_fork_height);
+    obj.pushKV("last_deferred_candidate_height", stats.last_deferred_candidate_height);
+    obj.pushKV("last_deferred_unix", stats.last_deferred_unix);
     UniValue parked_roots(UniValue::VARR);
     const auto roots = chainman.GetParkedReorgBranchRoots();
     for (const uint256& root : roots) {
@@ -1198,6 +1186,113 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
     }
     obj.pushKV("parked_branch_count", static_cast<int64_t>(roots.size()));
     obj.pushKV("parked_branch_roots", std::move(parked_roots));
+    return obj;
+}
+
+static std::string ChainTipStatusForBlock(const CChain& active_chain, const CBlockIndex& block)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (active_chain.Contains(&block)) {
+        return "active";
+    }
+    if (block.nStatus & BLOCK_FAILED_MASK) {
+        return "invalid";
+    }
+    if (!block.HaveNumChainTxs()) {
+        return "headers-only";
+    }
+    if (block.IsValid(BLOCK_VALID_SCRIPTS)) {
+        return "valid-fork";
+    }
+    if (block.IsValid(BLOCK_VALID_TREE)) {
+        return "valid-headers";
+    }
+    return "unknown";
+}
+
+static void RecordForkHealthTip(
+    const CChain& active_chain,
+    const CBlockIndex* active_tip,
+    const CBlockIndex& block,
+    std::map<std::string, ChainTipStatusSummary>& summaries) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const CBlockIndex* const fork = active_tip != nullptr ? active_chain.FindFork(&block) : nullptr;
+    const int branch_length = fork != nullptr ? block.nHeight - fork->nHeight : block.nHeight + 1;
+    summaries[ChainTipStatusForBlock(active_chain, block)].Record(block, branch_length);
+}
+
+static UniValue BuildForkHealthSummary(ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    CChain& active_chain = chainman.ActiveChain();
+    const CBlockIndex* const active_tip = active_chain.Tip();
+    std::set<const CBlockIndex*> orphan_tips;
+    std::set<const CBlockIndex*> orphan_blocks;
+    std::set<const CBlockIndex*> orphan_prevs;
+
+    for (const auto& [_, block_index] : chainman.BlockIndex()) {
+        if (active_chain.Contains(&block_index)) {
+            continue;
+        }
+        orphan_blocks.insert(&block_index);
+        if (block_index.pprev != nullptr) {
+            orphan_prevs.insert(block_index.pprev);
+        }
+    }
+    for (const CBlockIndex* block : orphan_blocks) {
+        if (orphan_prevs.erase(block) == 0) {
+            orphan_tips.insert(block);
+        }
+    }
+
+    static constexpr std::array<std::string_view, 6> TIP_STATUSES{
+        "active", "invalid", "headers-only", "valid-fork", "valid-headers", "unknown"};
+    std::map<std::string, ChainTipStatusSummary> summaries;
+    for (const std::string_view status : TIP_STATUSES) {
+        summaries.try_emplace(std::string{status});
+    }
+
+    for (const CBlockIndex* block : orphan_tips) {
+        RecordForkHealthTip(active_chain, active_tip, *block, summaries);
+    }
+    if (active_tip != nullptr) {
+        RecordForkHealthTip(active_chain, active_tip, *active_tip, summaries);
+    }
+
+    UniValue by_status(UniValue::VOBJ);
+    UniValue status_detail(UniValue::VOBJ);
+    for (const auto& [status, summary] : summaries) {
+        by_status.pushKV(status, summary.count);
+        status_detail.pushKV(status, summary.ToJSON());
+    }
+
+    const auto& invalid = summaries["invalid"];
+    const auto& headers_only = summaries["headers-only"];
+    const auto& valid_fork = summaries["valid-fork"];
+    const auto& valid_headers = summaries["valid-headers"];
+    const int64_t validated_fork_branch_length =
+        std::max(valid_fork.max_branch_length, valid_headers.max_branch_length);
+
+    UniValue observations(UniValue::VARR);
+    if (headers_only.max_branch_length >= 3) {
+        observations.push_back("headers_only_branch_depth_ge_3");
+    }
+    if (invalid.count > 0) {
+        observations.push_back("invalid_tips_present");
+    }
+    if (validated_fork_branch_length >= 2) {
+        observations.push_back("validated_fork_branch_depth_ge_2");
+    }
+
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("active_height", active_tip != nullptr ? active_tip->nHeight : -1);
+    obj.pushKV("active_hash", active_tip != nullptr ? active_tip->GetBlockHash().GetHex() : "");
+    obj.pushKV("total_tips", static_cast<int64_t>(orphan_tips.size() + (active_tip != nullptr ? 1 : 0)));
+    obj.pushKV("by_status", std::move(by_status));
+    obj.pushKV("status_detail", std::move(status_detail));
+    obj.pushKV("max_headers_only_branch_length", headers_only.max_branch_length);
+    obj.pushKV("max_invalid_branch_length", invalid.max_branch_length);
+    obj.pushKV("max_validated_fork_branch_length", validated_fork_branch_length);
+    obj.pushKV("observations", std::move(observations));
     return obj;
 }
 
@@ -1626,6 +1721,7 @@ static UniValue BuildMatMulChallengeResponse(
     const CBlockIndex* pindex_prev{nullptr};
     int next_height{0};
     int64_t mintime{0};
+    int64_t parent_median_time_past{0};
     UniValue time_policy(UniValue::VOBJ);
     {
         LOCK(cs_main);
@@ -1636,6 +1732,7 @@ static UniValue BuildMatMulChallengeResponse(
         }
         UpdateTime(&challenge_header, consensus, pindex_prev);
         mintime = GetMinimumTime(pindex_prev, consensus);
+        parent_median_time_past = pindex_prev->GetMedianTimePast();
         time_policy = MiningTimePolicyToJSON(consensus, pindex_prev, next_height, challenge_header.GetBlockTime());
     }
     challenge_header.nNonce64 = 0;
@@ -1645,7 +1742,9 @@ static UniValue BuildMatMulChallengeResponse(
     if (challenge_header.matmul_dim == 0) {
         challenge_header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
     }
-    SetDeterministicMatMulSeeds(challenge_header, consensus, next_height);
+    if (!SetDeterministicMatMulSeeds(challenge_header, consensus, next_height, parent_median_time_past)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "unable to derive deterministic MatMul seeds");
+    }
 
     CBlockIndex next_index;
     next_index.pprev = const_cast<CBlockIndex*>(pindex_prev);
@@ -1671,7 +1770,9 @@ static UniValue BuildMatMulChallengeResponse(
     profiled_index.nTime = challenge_header.nTime;
     profiled_index.nBits = profiled_bits;
     challenge_header.nBits = profiled_bits;
-    SetDeterministicMatMulSeeds(challenge_header, consensus, next_height);
+    if (!SetDeterministicMatMulSeeds(challenge_header, consensus, next_height, parent_median_time_past)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "unable to derive deterministic MatMul seeds");
+    }
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("chain", chain_name);
@@ -4491,6 +4592,7 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
     const auto& consensus = chainman.GetConsensus();
 
     int next_height{0};
+    int64_t parent_median_time_past{0};
     bool kawpow_active{false};
     bool matmul_active{consensus.fMatMulPOW};
     uint256 tip_hash_before_mining;
@@ -4508,6 +4610,7 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
             throw JSONRPCError(RPC_INTERNAL_ERROR, "next block height overflow");
         }
         kawpow_active = consensus.fKAWPOW && next_height >= consensus.nKAWPOWHeight;
+        parent_median_time_past = pindex_prev->GetMedianTimePast();
         tip_hash_before_mining = chainman.ActiveChain().Tip()->GetBlockHash();
         LogDebug(BCLog::MINING, "GenerateBlock: starting for height %d, prevhash=%s, tip=%s, matmul=%s, kawpow=%s, max_tries=%lu\n",
                  next_height, block.hashPrevBlock.GetHex(), tip_hash_before_mining.GetHex(),
@@ -4575,14 +4678,24 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
         if (block.matmul_dim == 0) {
             block.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
         }
-        SetDeterministicMatMulSeeds(block, consensus, next_height);
+        if (!SetDeterministicMatMulSeeds(block, consensus, next_height, parent_median_time_past)) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "unable to derive deterministic MatMul seeds");
+        }
         block.mix_hash.SetNull();
 
         const bool include_freivalds_payload =
             ShouldIncludeMatMulFreivaldsPayloadForMining(next_height, consensus);
         std::vector<uint32_t>* freivalds_payload_out = include_freivalds_payload ? &block.matrix_c_data : nullptr;
 
-        if (!SolveMatMul(block, consensus, max_tries, next_height, &abort_mining, freivalds_payload_out)) {
+        if (!SolveMatMul(
+                block,
+                consensus,
+                max_tries,
+                next_height,
+                &abort_mining,
+                freivalds_payload_out,
+                nullptr,
+                parent_median_time_past)) {
             cleanup_watcher();
             if (aborted_by_chain_guard) {
                 throw JSONRPCError(
@@ -5018,15 +5131,39 @@ static RPCHelpMan getmininginfo()
                         {RPCResult::Type::OBJ, "chain_guard", "Local mining chain-alignment guard status",
                         {
                             {RPCResult::Type::BOOL, "enabled", "Whether the guard is enabled on this node"},
-                            {RPCResult::Type::BOOL, "healthy", "Whether local mining is currently allowed to continue"},
-                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether miners should currently stop submitting new work to this node"},
-                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, catch_up, or pause"},
+                            {RPCResult::Type::BOOL, "healthy", "Whether peer-derived mining alignment checks currently look healthy"},
+                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether local no-tip or disabled-network state requires miners to wait before requesting new work"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, catch_up, or enable_network"},
                             {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                             {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                             {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
                             {RPCResult::Type::NUM, "median_peer_tip", "Median tip height advertised by considered outbound peers, or -1 if unavailable"},
                             {RPCResult::Type::NUM, "best_peer_tip", "Highest tip height advertised by considered outbound peers, or -1 if unavailable"},
                             {RPCResult::Type::NUM, "near_tip_peers", "Considered outbound peers within the near-tip window of the local tip"},
+                        }},
+                        {RPCResult::Type::OBJ, "fork_health", "Compact chain-tip pressure summary for mining monitors; advisory only and never a mining pause condition",
+                        {
+                            {RPCResult::Type::NUM, "active_height", "Current active-chain height"},
+                            {RPCResult::Type::STR_HEX, "active_hash", "Current active-chain tip hash"},
+                            {RPCResult::Type::NUM, "total_tips", "Total active plus non-active chain tips known locally"},
+                            {RPCResult::Type::OBJ_DYN, "by_status", "Count of known tips by getchaintips-compatible status",
+                            {
+                                {RPCResult::Type::NUM, "status", "Tip count for this status"},
+                            }},
+                            {RPCResult::Type::OBJ_DYN, "status_detail", "Per-status high-water marks",
+                            {
+                                {RPCResult::Type::NUM, "count", "Known tips with this status"},
+                                {RPCResult::Type::NUM, "highest_height", "Highest tip height with this status, or -1"},
+                                {RPCResult::Type::NUM, "max_branch_length", "Deepest branch length with this status"},
+                                {RPCResult::Type::NUM, "max_branch_tip_height", "Tip height for the deepest branch with this status, or -1"},
+                                {RPCResult::Type::STR_HEX, "max_branch_tip_hash", "Tip hash for the deepest branch with this status, or empty"},
+                            }},
+                            {RPCResult::Type::NUM, "max_headers_only_branch_length", "Deepest headers-only branch length known locally"},
+                            {RPCResult::Type::NUM, "max_invalid_branch_length", "Deepest invalid branch length known locally"},
+                            {RPCResult::Type::NUM, "max_validated_fork_branch_length", "Deepest known valid-fork or valid-headers branch length"},
+                            {RPCResult::Type::ARR, "observations", "Advisory fork-pressure observations", {
+                                {RPCResult::Type::STR, "", "Observation code"},
+                            }},
                         }},
                         {RPCResult::Type::OBJ, "backend_runtime", "MatMul mining backend resolution and fallback counters",
                         {
@@ -5140,6 +5277,7 @@ static RPCHelpMan getmininginfo()
         obj.pushKV("matmul_r", static_cast<int64_t>(chainman.GetConsensus().nMatMulNoiseRank));
     }
     obj.pushKV("chain_guard", MiningChainGuardToJSON(chain_guard_status));
+    obj.pushKV("fork_health", BuildForkHealthSummary(chainman));
     obj.pushKV("backend_runtime", BuildBackendRuntimeProfile());
     int next_height_for_policy{0};
     if (!TryGetNextBlockHeight(&tip, next_height_for_policy)) {
@@ -5472,9 +5610,9 @@ static RPCHelpMan getmatmulchallenge()
                         {RPCResult::Type::OBJ, "chain_guard", "Local mining chain-alignment guard status",
                         {
                             {RPCResult::Type::BOOL, "enabled", "Whether the guard is enabled on this node"},
-                            {RPCResult::Type::BOOL, "healthy", "Whether local mining is currently allowed to continue"},
-                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether miners should currently stop submitting new work to this node"},
-                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, catch_up, or pause"},
+                            {RPCResult::Type::BOOL, "healthy", "Whether peer-derived mining alignment checks currently look healthy"},
+                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether local no-tip or disabled-network state requires miners to wait before requesting new work"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, catch_up, or enable_network"},
                             {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                             {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                             {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
@@ -5783,9 +5921,9 @@ static RPCHelpMan getmatmulchallengeprofile()
                         {RPCResult::Type::OBJ, "chain_guard", "Local mining chain-alignment guard status",
                         {
                             {RPCResult::Type::BOOL, "enabled", "Whether the guard is enabled on this node"},
-                            {RPCResult::Type::BOOL, "healthy", "Whether local mining is currently allowed to continue"},
-                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether miners should currently stop submitting new work to this node"},
-                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, catch_up, or pause"},
+                            {RPCResult::Type::BOOL, "healthy", "Whether peer-derived mining alignment checks currently look healthy"},
+                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether local no-tip or disabled-network state requires miners to wait before requesting new work"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, catch_up, or enable_network"},
                             {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                             {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                             {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
@@ -7265,9 +7403,9 @@ static RPCHelpMan getblocktemplate()
                 {RPCResult::Type::OBJ, "chain_guard", "Mining chain-alignment status for external miners",
                 {
                     {RPCResult::Type::BOOL, "enabled", "Whether the guard is enabled on this node"},
-                    {RPCResult::Type::BOOL, "healthy", "Whether the node currently considers its active tip aligned enough for mining"},
-                    {RPCResult::Type::BOOL, "should_pause_mining", "Whether external miners should pause submitting new work"},
-                    {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, catch_up, or pause"},
+                    {RPCResult::Type::BOOL, "healthy", "Whether the node currently considers its active tip aligned with peer observations"},
+                    {RPCResult::Type::BOOL, "should_pause_mining", "Whether local no-tip or disabled-network state requires external miners to wait before requesting new work"},
+                    {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, catch_up, or enable_network"},
                     {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                     {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                     {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
@@ -7649,7 +7787,13 @@ static UniValue TemplateToJSON(
         if (block_header.matmul_dim == 0) {
             block_header.matmul_dim = static_cast<uint16_t>(consensusParams.nMatMulDimension);
         }
-        SetDeterministicMatMulSeeds(block_header, consensusParams, next_height);
+        if (!SetDeterministicMatMulSeeds(
+                block_header,
+                consensusParams,
+                next_height,
+                pindexPrev->GetMedianTimePast())) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "unable to derive deterministic MatMul seeds");
+        }
         block_header.matmul_digest.SetNull();
     }
 
@@ -7881,11 +8025,7 @@ static RPCHelpMan submitblock()
     const std::string& block_hex = request.params[0].get_str();
     EnforceBlockHexSizeLimit(block_hex, "hexdata");
 
-    NodeContext& node = EnsureAnyNodeContext(request.context);
-    const auto chain_guard_status = node::GetMiningChainGuardStatus(node);
-    if (node::ShouldPauseMiningByChainGuard(chain_guard_status)) {
-        return strprintf("paused-chain-guard-%s", node::GetMiningChainGuardRecommendedAction(chain_guard_status));
-    }
+    EnsureAnyNodeContext(request.context);
 
     std::shared_ptr<CBlock> blockptr = std::make_shared<CBlock>();
     CBlock& block = *blockptr;

@@ -1114,9 +1114,14 @@ check_runtime_health() {
   check_backend_runtime_health
   update_chain_progress "${now}" "${local_tip}" "${peer_count}"
 
-  if [[ "${healthy}" == "true" && "${pause}" == "false" ]]; then
+  if [[ "${pause}" == "false" ]]; then
     health_failure_streak=0
-    last_health_reason="ok"
+    if [[ "${healthy}" == "true" ]]; then
+      last_health_reason="ok"
+    else
+      last_health_reason="advisory:${reason}"
+      log_health "chain-guard-advisory reason=${reason} action=${recommended_action} local_tip=${local_tip} peer_median=${median_peer_tip} peers=${peer_count} near_tip_peers=${near_tip_peers}"
+    fi
     same_reason_streak=0
     maybe_refresh_healthy_peer_topology "${local_tip}" || true
     return 0
@@ -1205,6 +1210,16 @@ while true; do
       log_health "generate-paused streak=${health_failure_streak}/${HEALTH_RESTART_THRESHOLD}"
       if refresh_mininginfo; then
         reason="$(jq -r '.chain_guard.reason // "unknown"' <<<"${LAST_MININGINFO_JSON}")"
+        pause="$(jq -r '.chain_guard.should_pause_mining // true' <<<"${LAST_MININGINFO_JSON}")"
+        if [[ "${pause}" == "false" ]]; then
+          health_failure_streak=0
+          last_health_reason="advisory:${reason}"
+          same_reason_streak=0
+          log_health "generate-chain-guard-advisory reason=${reason}"
+          rm -f "${tmp_out}" "${tmp_err}"
+          sleep "${SLEEP_SECS}"
+          continue
+        fi
         recommended_action="$(jq -r '.chain_guard.recommended_action // empty' <<<"${LAST_MININGINFO_JSON}")"
         if [[ -z "${recommended_action}" ]]; then
           recommended_action="$(derive_recommended_action "${reason}")"

@@ -24,9 +24,11 @@ BOOST_AUTO_TEST_CASE(disabled_guard_does_not_pause_mining)
 
     BOOST_CHECK(status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "disabled");
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue");
 }
 
-BOOST_AUTO_TEST_CASE(initial_block_download_pauses_mining)
+BOOST_AUTO_TEST_CASE(initial_block_download_is_advisory)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
@@ -40,9 +42,11 @@ BOOST_AUTO_TEST_CASE(initial_block_download_pauses_mining)
 
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "initial_block_download");
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "catch_up");
 }
 
-BOOST_AUTO_TEST_CASE(insufficient_peer_consensus_pauses_mining)
+BOOST_AUTO_TEST_CASE(insufficient_peer_consensus_is_advisory)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
@@ -57,6 +61,8 @@ BOOST_AUTO_TEST_CASE(insufficient_peer_consensus_pauses_mining)
 
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
 }
 
 BOOST_AUTO_TEST_CASE(default_guard_requires_three_peers)
@@ -65,6 +71,8 @@ BOOST_AUTO_TEST_CASE(default_guard_requires_three_peers)
     options.enabled = true;
 
     BOOST_CHECK_EQUAL(options.min_peer_count, 3);
+    BOOST_CHECK_EQUAL(options.max_median_tip_gap, 2);
+    BOOST_CHECK_EQUAL(options.stale_peer_seconds, 120);
 
     const auto status = node::EvaluateMiningChainGuard(
         /*local_tip_height=*/100,
@@ -76,9 +84,11 @@ BOOST_AUTO_TEST_CASE(default_guard_requires_three_peers)
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
     BOOST_CHECK_EQUAL(status.min_peer_count, 3);
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
 }
 
-BOOST_AUTO_TEST_CASE(local_tip_ahead_of_peer_median_pauses_mining)
+BOOST_AUTO_TEST_CASE(local_tip_ahead_of_peer_median_is_advisory)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
@@ -93,9 +103,11 @@ BOOST_AUTO_TEST_CASE(local_tip_ahead_of_peer_median_pauses_mining)
 
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "local_tip_ahead_of_peer_median");
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
 }
 
-BOOST_AUTO_TEST_CASE(local_tip_behind_peer_median_pauses_mining)
+BOOST_AUTO_TEST_CASE(local_tip_behind_peer_median_is_advisory)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
@@ -110,12 +122,15 @@ BOOST_AUTO_TEST_CASE(local_tip_behind_peer_median_pauses_mining)
 
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "local_tip_behind_peer_median");
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
 }
 
-BOOST_AUTO_TEST_CASE(near_tip_peer_quorum_pauses_mining)
+BOOST_AUTO_TEST_CASE(near_tip_peer_quorum_is_advisory)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
+    options.max_median_tip_gap = 4;
 
     BOOST_CHECK_EQUAL(options.min_near_tip_peers, 2);
     BOOST_CHECK_EQUAL(options.near_tip_window, 2);
@@ -131,6 +146,8 @@ BOOST_AUTO_TEST_CASE(near_tip_peer_quorum_pauses_mining)
     BOOST_CHECK_EQUAL(status.reason, "insufficient_near_tip_peers");
     BOOST_CHECK_EQUAL(status.near_tip_peers, 1);
     BOOST_CHECK_EQUAL(status.min_near_tip_peers, 2);
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
 }
 
 BOOST_AUTO_TEST_CASE(median_majority_close_to_tip_keeps_mining_enabled)
@@ -150,6 +167,8 @@ BOOST_AUTO_TEST_CASE(median_majority_close_to_tip_keeps_mining_enabled)
     BOOST_CHECK_EQUAL(status.reason, "healthy");
     BOOST_CHECK_EQUAL(status.median_peer_tip, 120);
     BOOST_CHECK_EQUAL(status.near_tip_peers, 4);
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue");
 }
 
 BOOST_AUTO_TEST_CASE(stale_lagging_peers_are_filtered_out_before_median_check)
@@ -190,6 +209,8 @@ BOOST_AUTO_TEST_CASE(stale_lagging_peers_are_filtered_out_before_median_check)
 
     BOOST_CHECK(status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "healthy");
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue");
 }
 
 BOOST_AUTO_TEST_CASE(recently_active_lagging_peers_still_count_for_fork_safety)
@@ -227,6 +248,26 @@ BOOST_AUTO_TEST_CASE(recently_active_lagging_peers_still_count_for_fork_safety)
 
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "local_tip_ahead_of_peer_median");
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
+}
+
+BOOST_AUTO_TEST_CASE(network_inactive_pauses_only_for_local_state)
+{
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+
+    const auto status = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/100,
+        /*initial_block_download=*/false,
+        /*network_active=*/false,
+        std::vector<int>{100, 100, 100},
+        options);
+
+    BOOST_CHECK(!status.healthy);
+    BOOST_CHECK_EQUAL(status.reason, "network_inactive");
+    BOOST_CHECK(node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "enable_network");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

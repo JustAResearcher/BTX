@@ -8,6 +8,7 @@
 #include <node/miner.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,13 +31,15 @@ std::vector<std::shared_ptr<CBlock>> CreateBlockChain(size_t total_height, const
 [[nodiscard]] bool MineHeaderForConsensus(CBlockHeader& header,
                                           uint32_t block_height,
                                           const Consensus::Params& consensus,
-                                          uint64_t max_tries = 5'000'000);
+                                          uint64_t max_tries = 5'000'000,
+                                          std::optional<int64_t> parent_median_time_past = std::nullopt);
 
 /** Mine a full block for the active consensus PoW algorithm. */
 [[nodiscard]] bool MineHeaderForConsensus(CBlock& block,
                                           uint32_t block_height,
                                           const Consensus::Params& consensus,
-                                          uint64_t max_tries = 5'000'000);
+                                          uint64_t max_tries = 5'000'000,
+                                          std::optional<int64_t> parent_median_time_past = std::nullopt);
 
 /** Returns the generated coin */
 COutPoint MineBlock(const node::NodeContext&,

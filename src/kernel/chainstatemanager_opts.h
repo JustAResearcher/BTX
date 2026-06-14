@@ -40,17 +40,15 @@ enum class MatMulValidationMode {
 //! What a node does when an incoming branch would reorg the active chain deeper
 //! than the configured deep-reorg threshold.
 //!
-//! WARN (-parkdeepreorg=0, or a profile such as standard/archive): emit a loud warning +
-//!   RPC/notification and still follow the most-work chain. This buys
-//!   operators/exchanges response time WITHOUT introducing any finality
-//!   assumption, so every honest node, regardless of how it was partitioned,
-//!   still converges on the single most-work chain.
+//! WARN (-parkdeepreorg=0): emit a loud warning + RPC/notification and still
+//!   follow the most-work chain once automated hysteresis/extra-work rules are
+//!   satisfied. This avoids a manual-intervention split while still making
+//!   private-branch behavior visible.
 //!
-//! PARK (default emergency profile, strict profile, or -parkdeepreorg=1): refuse to
-//!   auto-switch to the deeper branch and stay on the current tip pending
-//!   operator action, while still tracking the branch in the block index. This
-//!   protects ordinary nodes from silently following a deep rewrite, but it is
-//!   still a LOCAL FINALITY assumption: see the split-risk memo at the call site.
+//! PARK (-parkdeepreorg=1): refuse to auto-switch to the deeper branch and stay
+//!   on the current tip pending explicit unpark/reconsider action, while still
+//!   tracking the branch in the block index. This is intentionally no longer a
+//!   default profile behavior because most miners are unattended.
 enum class DeepReorgAction {
     WARN,
     PARK,
@@ -69,6 +67,8 @@ struct ReorgProtectionProfileSettings {
     uint32_t warn_depth{3};
     uint32_t park_depth{std::numeric_limits<uint32_t>::max()};
     uint32_t finality_depth{12};
+    uint32_t hysteresis_depth{std::numeric_limits<uint32_t>::max()};
+    uint32_t hysteresis_work_margin{0};
 };
 
 inline constexpr uint32_t REORG_PROTECTION_DEPTH_DISABLED{std::numeric_limits<uint32_t>::max()};
@@ -80,8 +80,10 @@ inline ReorgProtectionProfileSettings GetReorgProtectionProfileSettings(ReorgPro
         return {
             .action = DeepReorgAction::WARN,
             .warn_depth = 3,
-            .park_depth = 12,
+            .park_depth = REORG_PROTECTION_DEPTH_DISABLED,
             .finality_depth = 12,
+            .hysteresis_depth = 0,
+            .hysteresis_work_margin = 2,
         };
     case ReorgProtectionProfile::ARCHIVE:
         return {
@@ -89,27 +91,35 @@ inline ReorgProtectionProfileSettings GetReorgProtectionProfileSettings(ReorgPro
             .warn_depth = 72,
             .park_depth = REORG_PROTECTION_DEPTH_DISABLED,
             .finality_depth = 72,
+            .hysteresis_depth = 0,
+            .hysteresis_work_margin = 2,
         };
     case ReorgProtectionProfile::BALANCED:
         return {
-            .action = DeepReorgAction::PARK,
+            .action = DeepReorgAction::WARN,
             .warn_depth = 12,
-            .park_depth = 48,
+            .park_depth = REORG_PROTECTION_DEPTH_DISABLED,
             .finality_depth = 48,
+            .hysteresis_depth = 0,
+            .hysteresis_work_margin = 2,
         };
     case ReorgProtectionProfile::STRICT:
         return {
-            .action = DeepReorgAction::PARK,
+            .action = DeepReorgAction::WARN,
             .warn_depth = 3,
-            .park_depth = 12,
+            .park_depth = REORG_PROTECTION_DEPTH_DISABLED,
             .finality_depth = 12,
+            .hysteresis_depth = 0,
+            .hysteresis_work_margin = 2,
         };
     case ReorgProtectionProfile::EMERGENCY:
         return {
-            .action = DeepReorgAction::PARK,
+            .action = DeepReorgAction::WARN,
             .warn_depth = 3,
-            .park_depth = 12,
+            .park_depth = REORG_PROTECTION_DEPTH_DISABLED,
             .finality_depth = 12,
+            .hysteresis_depth = 0,
+            .hysteresis_work_margin = 2,
         };
     }
     return {};
@@ -166,11 +176,12 @@ struct ChainstateManagerOpts {
     //! (-allowunpinnedshieldedsnapshot=1) only for explicitly trusted repair/bootstrap material.
     bool allow_unpinned_shielded_snapshot{DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT};
     //! Action taken when a candidate branch would reorg deeper than the
-    //! deep-reorg threshold. BTX's emergency default parks deep private releases
-    //! instead of silently following them.
-    DeepReorgAction deep_reorg_action{DeepReorgAction::PARK};
+    //! deep-reorg threshold. Default is automated WARN + hysteresis; manual
+    //! parking is opt-in only.
+    DeepReorgAction deep_reorg_action{DeepReorgAction::WARN};
     //! Named reorg/finality policy. EMERGENCY is the default while the network
-    //! is fragmented: warn at shallow depth and park deeper private releases.
+    //! is fragmented: warn at shallow depth and require extra work before
+    //! following late private releases.
     ReorgProtectionProfile reorg_protection_profile{ReorgProtectionProfile::EMERGENCY};
     //! Operator override for the deep-reorg threshold, in blocks. When unset the
     //! active reorg protection profile controls the warning depth.
@@ -182,6 +193,15 @@ struct ChainstateManagerOpts {
     //! is not consensus finality; it is an operator safety signal surfaced by
     //! RPCs and release policy.
     std::optional<uint32_t> local_finality_depth{};
+    //! Operator override for shallow-reorg hysteresis. Candidate branches that
+    //! would rewrite more than this many blocks must exceed the active tip by
+    //! the configured work margin before automatic activation. This is local
+    //! fork-choice policy only; blocks remain valid and can become eligible
+    //! once they accumulate enough work.
+    std::optional<uint32_t> reorg_hysteresis_depth{};
+    //! Required extra work margin expressed in current-tip block equivalents.
+    //! Zero disables the hysteresis margin.
+    std::optional<uint32_t> reorg_hysteresis_work_margin{};
     DBOptions coins_db{};
     CoinsViewOptions coins_view{};
     Notifications& notifications;

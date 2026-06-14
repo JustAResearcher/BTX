@@ -111,9 +111,9 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         opts.allow_unpinned_shielded_snapshot = *value;
     }
 
-    // Deep-reorg defense. These are PER-NODE, NON-CONSENSUS operator controls.
-    // The named profile supplies warn/park/finality depths; individual knobs
-    // override those defaults when an operator has a better local risk model.
+    // Deep-reorg defense. These are PER-NODE, NON-CONSENSUS fork-choice
+    // controls. The named profile supplies warn/finality/hysteresis depths;
+    // manual parking remains an explicit opt-in.
     if (auto value{args.GetArg("-reorgprotectionprofile")}) {
         const auto profile = ParseReorgProtectionProfile(*value);
         if (!profile) {
@@ -147,6 +147,25 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         auto parsed = ParsePositiveDepthArg("-localfinalitydepth", *value);
         if (!parsed) return util::Error{util::ErrorString(parsed)};
         opts.local_finality_depth = *parsed;
+    }
+
+    if (auto value{args.GetIntArg("-reorghysteresisdepth")}) {
+        if (*value < 0) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -reorghysteresisdepth value (%d), must be at least 0", *value))};
+        }
+        opts.reorg_hysteresis_depth =
+            *value == 0 ? kernel::REORG_PROTECTION_DEPTH_DISABLED
+                        : static_cast<uint32_t>(std::min<int64_t>(*value, std::numeric_limits<uint32_t>::max()));
+    }
+
+    if (auto value{args.GetIntArg("-reorghysteresisworkmargin")}) {
+        if (*value < 0) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -reorghysteresisworkmargin value (%d), must be at least 0", *value))};
+        }
+        opts.reorg_hysteresis_work_margin =
+            static_cast<uint32_t>(std::min<int64_t>(*value, std::numeric_limits<uint32_t>::max()));
     }
 
     ReadDatabaseArgs(args, opts.coins_db);

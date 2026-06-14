@@ -13,14 +13,14 @@ and the `issuematmulservicechallengeprofile` issuance path.
 
 Included scripts:
 - `start-live-mining.sh`: starts the health-aware local mining supervisor in the background after preflighting `jq`, and now auto-creates / loads the mining wallet plus address file when you do not pass `--address` or `--address-file`. Use `--foreground` when a service manager such as launchd, systemd, or tmux should supervise the loop process directly.
-- `live-mining-loop.sh`: continuously mines to a configured address while watching `getmininginfo.chain_guard` and an optional local idleness gate.
+- `live-mining-loop.sh`: continuously mines to a configured address while logging `getmininginfo.chain_guard` warnings and honoring only local no-tip / network-disabled pause states plus an optional local idleness gate.
 - `live-mining-loop.py`: a leaner RPC-keepalive variant of `live-mining-loop.sh`. A single long-running Python process holds one HTTP connection to the JSON-RPC endpoint instead of forking `btx-cli` once per iteration. Use this when the per-spawn cost of the shell loop is the dominant operational concern — for example, on macOS hosts where every fork triggers `syspolicyd` and `XprotectService` malware checks, which at one-second cadence can keep those system services warm continuously and induce thermal throttling. It does not include the supervisor's chain-guard reaction, peer remediation, or daemon restart logic, so it expects a separately-monitored healthy node.
 - `stop-live-mining.sh`: stops the supervisor and any lingering `generatetoaddress` worker.
 - `backup-wallet.sh`: wraps `backupwallet` and exports descriptors + wallet metadata with a checksum.
 - `test-live-mining-loop-health.sh`: deterministic self-test for the supervisor restart path.
 
 Best practices:
-- Mine only when the node is healthy and near tip. Watch `getmininginfo.chain_guard`.
+- Keep unattended miners asking for work whenever the local node can build valid templates. Watch `getmininginfo.chain_guard` and `getmininginfo.fork_health` for warnings, but do not turn peer disagreement or fork pressure into an automatic mining stop.
 - On Apple Silicon mining hosts, the supervisor now defaults to the strict
   optimized Metal posture: `BTX_MATMUL_BACKEND=metal`,
   `BTX_MATMUL_REQUIRE_BACKEND=metal`, `BTX_MATMUL_GPU_INPUTS=1`,
@@ -58,12 +58,12 @@ Best practices:
   starts; it records its child PID and forces that child to start from
   `--launch-cwd` or the results directory so it does not inherit an unusable
   working directory from a stale terminal, mount, or macOS privacy boundary.
-- `live-mining-loop.sh` now treats chain-guard reasons differently: it still
-  pauses mining when consensus is weak or the node is behind tip, but it no
-  longer thrashes the daemon just because peer consensus is temporarily weak or
-  the node is still syncing. Instead it waits for sync progress, retries
-  optional bootstrap peers, reuses the last healthy outbound peers it saw, and
-  only restarts when the node has genuinely stalled.
+- `live-mining-loop.sh` now treats chain-guard reasons as advisory unless the
+  node has no active tip or networking has been explicitly disabled. Peer
+  disagreement, local-ahead/local-behind observations, and fork pressure are
+  logged and may trigger optional peer refreshes, but they do not stop mining
+  by themselves. The supervisor only restarts for real RPC/node stalls or
+  local pause states that persist past the configured thresholds.
 - For service-gateway or agentic challenge workloads, use the fast-start
   service preset and inspect the profile's `operator_capacity` estimates when
   deciding whether one node, a shared registry, or a wider deployment is the
@@ -121,11 +121,12 @@ If you want the supervisor to actively re-seed peer discovery when
 to a comma-separated host list such as
 `node1.example:19335,node2.example:19335`. The loop will issue
 `disconnectnode` calls for obviously stale manual peers followed by
-`addnode ... onetry` refreshes after repeated weak-peer observations. If the
-node still does not make tip progress for `BTX_MINING_SYNC_STALL_RESTART_SECS`,
-the supervisor escalates to a daemon restart so startup recovery can rebuild
-local state instead of sitting paused indefinitely. Once the node has been healthy,
-the loop caches its last healthy outbound peers in
+`addnode ... onetry` refreshes after repeated weak-peer observations while
+continuing to mine if templates remain available. If the node still does not
+make tip progress for `BTX_MINING_SYNC_STALL_RESTART_SECS`, the supervisor
+escalates to a daemon restart so startup recovery can rebuild local state
+instead of sitting on a stuck process. Once the node has been healthy, the loop
+caches its last healthy outbound peers in
 `$RESULTS_DIR/live-peer-cache.txt`, ranks public/full-relay low-latency peers
 ahead of private/manual ones, and retries those first during later
 peer-consensus recovery. Healthy runs also re-top-off the peer set when the

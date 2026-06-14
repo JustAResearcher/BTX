@@ -1020,13 +1020,6 @@ public:
 	                        std::optional<uint64_t> nonce64,
 	                        std::optional<uint256> mix_hash) override
 	    {
-	        const auto chain_guard_status = GetMiningChainGuardStatus(m_node);
-	        if (ShouldPauseMiningByChainGuard(chain_guard_status)) {
-	            LogWarning("submitSolution: rejecting solution while mining is paused by chain guard: %s\n",
-	                       DescribeMiningChainGuardStatus(chain_guard_status));
-	            return false;
-	        }
-
 	        const auto& consensus{chainman().GetParams().GetConsensus()};
 	        CBlock block{m_block_template->block};
 
@@ -1050,6 +1043,7 @@ public:
 
 	        if (consensus.fMatMulPOW) {
 	            int next_height{-1};
+	            int64_t parent_median_time_past{0};
 	            {
 	                LOCK(::cs_main);
 	                const CBlockIndex* const prev_index = chainman().m_blockman.LookupBlockIndex(block.hashPrevBlock);
@@ -1063,6 +1057,7 @@ public:
 	                    return false;
 	                }
 	                next_height = prev_index->nHeight + 1;
+	                parent_median_time_past = prev_index->GetMedianTimePast();
 	                if (block.GetBlockTime() < node::GetMinimumTime(prev_index, consensus)) {
 	                    LogWarning("submitSolution: rejecting MatMul solution with timestamp below minimum\n");
 	                    return false;
@@ -1081,7 +1076,15 @@ public:
 	            // External miners targeting MatMul chains should use the
 	            // submitblock RPC with fully-formed block data instead.
 	            uint64_t tries{1};
-	            if (!SolveMatMul(block, consensus, tries, next_height)) {
+	            if (!SolveMatMul(
+	                    block,
+	                    consensus,
+	                    tries,
+	                    next_height,
+	                    nullptr,
+	                    nullptr,
+	                    nullptr,
+	                    parent_median_time_past)) {
 	                LogWarning("submitSolution: SolveMatMul failed for nonce=%llu; external miners should use submitblock for MatMul chains\n",
 	                           static_cast<unsigned long long>(block.nNonce64));
 	                return false;
@@ -1171,7 +1174,7 @@ public:
         }
         if (!assemble_options.bypass_chain_guard) {
             const auto chain_guard_status = GetMiningChainGuardStatus(m_node);
-            if (chain_guard_status.enabled && !chain_guard_status.healthy) {
+            if (ShouldPauseMiningByChainGuard(chain_guard_status)) {
                 throw std::runtime_error(
                     "mining paused by chain guard: " + DescribeMiningChainGuardStatus(chain_guard_status));
             }

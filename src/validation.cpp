@@ -143,6 +143,14 @@ std::atomic<int32_t> g_reorg_protection_last_rejected_tip_height{0};
 std::atomic<int32_t> g_reorg_protection_last_rejected_fork_height{0};
 std::atomic<int32_t> g_reorg_protection_last_rejected_candidate_height{0};
 std::atomic<int64_t> g_reorg_protection_last_rejected_unix{0};
+std::atomic<uint64_t> g_reorg_protection_deferred_reorgs{0};
+std::atomic<uint32_t> g_reorg_protection_deepest_deferred_reorg_depth{0};
+std::atomic<uint32_t> g_reorg_protection_last_deferred_reorg_depth{0};
+std::atomic<uint32_t> g_reorg_protection_last_deferred_required_work_margin{0};
+std::atomic<int32_t> g_reorg_protection_last_deferred_tip_height{0};
+std::atomic<int32_t> g_reorg_protection_last_deferred_fork_height{0};
+std::atomic<int32_t> g_reorg_protection_last_deferred_candidate_height{0};
+std::atomic<int64_t> g_reorg_protection_last_deferred_unix{0};
 
 [[nodiscard]] bool UseNoncedShieldedBridgeTags(const Consensus::Params& consensus, int32_t height)
 {
@@ -809,6 +817,14 @@ ReorgProtectionRuntimeStats ProbeReorgProtectionRuntimeStats()
         .last_rejected_fork_height = g_reorg_protection_last_rejected_fork_height.load(std::memory_order_relaxed),
         .last_rejected_candidate_height = g_reorg_protection_last_rejected_candidate_height.load(std::memory_order_relaxed),
         .last_rejected_unix = g_reorg_protection_last_rejected_unix.load(std::memory_order_relaxed),
+        .deferred_reorgs = g_reorg_protection_deferred_reorgs.load(std::memory_order_relaxed),
+        .deepest_deferred_reorg_depth = g_reorg_protection_deepest_deferred_reorg_depth.load(std::memory_order_relaxed),
+        .last_deferred_reorg_depth = g_reorg_protection_last_deferred_reorg_depth.load(std::memory_order_relaxed),
+        .last_deferred_required_work_margin = g_reorg_protection_last_deferred_required_work_margin.load(std::memory_order_relaxed),
+        .last_deferred_tip_height = g_reorg_protection_last_deferred_tip_height.load(std::memory_order_relaxed),
+        .last_deferred_fork_height = g_reorg_protection_last_deferred_fork_height.load(std::memory_order_relaxed),
+        .last_deferred_candidate_height = g_reorg_protection_last_deferred_candidate_height.load(std::memory_order_relaxed),
+        .last_deferred_unix = g_reorg_protection_last_deferred_unix.load(std::memory_order_relaxed),
     };
 }
 
@@ -829,6 +845,14 @@ void ResetReorgProtectionRuntimeStats()
     g_reorg_protection_last_rejected_fork_height.store(0, std::memory_order_relaxed);
     g_reorg_protection_last_rejected_candidate_height.store(0, std::memory_order_relaxed);
     g_reorg_protection_last_rejected_unix.store(0, std::memory_order_relaxed);
+    g_reorg_protection_deferred_reorgs.store(0, std::memory_order_relaxed);
+    g_reorg_protection_deepest_deferred_reorg_depth.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_reorg_depth.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_required_work_margin.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_tip_height.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_fork_height.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_candidate_height.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_unix.store(0, std::memory_order_relaxed);
 }
 
 void RecordObservedReorgDepth(
@@ -874,11 +898,39 @@ void RecordRejectedReorgDepth(
     }
 
     g_reorg_protection_last_rejected_reorg_depth.store(reorg_depth, std::memory_order_relaxed);
-    g_reorg_protection_last_rejected_max_reorg_depth.store(max_reorg_depth, std::memory_order_relaxed);
+    g_reorg_protection_last_rejected_max_reorg_depth.store(
+        max_reorg_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED ? max_reorg_depth : 0,
+        std::memory_order_relaxed);
     g_reorg_protection_last_rejected_tip_height.store(old_tip_height, std::memory_order_relaxed);
     g_reorg_protection_last_rejected_fork_height.store(fork_height, std::memory_order_relaxed);
     g_reorg_protection_last_rejected_candidate_height.store(candidate_height, std::memory_order_relaxed);
     g_reorg_protection_last_rejected_unix.store(GetTime(), std::memory_order_relaxed);
+}
+
+void RecordDeferredReorgDepth(
+    const uint32_t reorg_depth,
+    const uint32_t required_work_margin,
+    const int32_t old_tip_height,
+    const int32_t fork_height,
+    const int32_t candidate_height)
+{
+    g_reorg_protection_deferred_reorgs.fetch_add(1, std::memory_order_relaxed);
+
+    uint32_t deepest_seen = g_reorg_protection_deepest_deferred_reorg_depth.load(std::memory_order_relaxed);
+    while (reorg_depth > deepest_seen &&
+           !g_reorg_protection_deepest_deferred_reorg_depth.compare_exchange_weak(
+               deepest_seen,
+               reorg_depth,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+    }
+
+    g_reorg_protection_last_deferred_reorg_depth.store(reorg_depth, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_required_work_margin.store(required_work_margin, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_tip_height.store(old_tip_height, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_fork_height.store(fork_height, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_candidate_height.store(candidate_height, std::memory_order_relaxed);
+    g_reorg_protection_last_deferred_unix.store(GetTime(), std::memory_order_relaxed);
 }
 
 TRACEPOINT_SEMAPHORE(validation, block_connected);
@@ -5746,9 +5798,18 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
 CAmount GetBlockSubsidyForBlock(int nHeight, const CBlock& block, const CBlockIndex* pindexPrev, const Consensus::Params& consensusParams)
 {
     const CAmount base_subsidy{GetBlockSubsidy(nHeight, consensusParams)};
+    // Consensus can objectively detect coinbase-only blocks. It cannot prove a
+    // non-coinbase transaction came from the public mempool rather than the
+    // miner, so subsidy penalties deliberately avoid "real tx" heuristics that
+    // would incentivize self-spam.
     if (nHeight < consensusParams.nEmptyBlockSubsidyPenaltyHeight || block.vtx.size() != 1 ||
         base_subsidy <= 0 || consensusParams.nEmptyBlockSubsidyMaxHalvings == 0) {
         return base_subsidy;
+    }
+
+    if (nHeight >= consensusParams.nEmptyBlockSubsidyStrictPenaltyHeight) {
+        const bool follows_empty_block{pindexPrev != nullptr && pindexPrev->nTx == 1};
+        return follows_empty_block ? base_subsidy / 4 : base_subsidy / 2;
     }
 
     uint32_t consecutive_empty_ancestors{0};
@@ -8327,14 +8388,24 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
 CBlockIndex* Chainstate::FindMostWorkChain()
 {
     AssertLockHeld(::cs_main);
+    std::vector<CBlockIndex*> hysteresis_deferred_candidates;
+    const auto restore_hysteresis_deferred_candidates = [&]() {
+        for (CBlockIndex* candidate : hysteresis_deferred_candidates) {
+            setBlockIndexCandidates.insert(candidate);
+        }
+        hysteresis_deferred_candidates.clear();
+    };
+
     do {
         CBlockIndex *pindexNew = nullptr;
 
         // Find the best candidate header.
         {
             std::set<CBlockIndex*, CBlockIndexWorkComparator>::reverse_iterator it = setBlockIndexCandidates.rbegin();
-            if (it == setBlockIndexCandidates.rend())
+            if (it == setBlockIndexCandidates.rend()) {
+                restore_hysteresis_deferred_candidates();
                 return nullptr;
+            }
             pindexNew = *it;
         }
 
@@ -8383,8 +8454,57 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             }
             pindexTest = pindexTest->pprev;
         }
-        if (!fInvalidAncestor)
+        if (!fInvalidAncestor) {
+            const CBlockIndex* old_tip = m_chain.Tip();
+            const CBlockIndex* fork = old_tip != nullptr ? m_chain.FindFork(pindexNew) : nullptr;
+            const auto& consensus_params = m_chainman.GetConsensus();
+            const auto& cm_opts = m_chainman.m_options;
+            const auto profile_settings = kernel::GetReorgProtectionProfileSettings(cm_opts.reorg_protection_profile);
+            const uint32_t park_depth = cm_opts.max_reorg_depth_park.value_or(profile_settings.park_depth);
+            const uint32_t hysteresis_depth =
+                cm_opts.reorg_hysteresis_depth.value_or(profile_settings.hysteresis_depth);
+            const uint32_t hysteresis_work_margin =
+                cm_opts.reorg_hysteresis_work_margin.value_or(profile_settings.hysteresis_work_margin);
+            if (old_tip != nullptr &&
+                fork != nullptr &&
+                fork != old_tip &&
+                old_tip->nHeight >= consensus_params.nReorgProtectionStartHeight &&
+                hysteresis_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
+                hysteresis_work_margin > 0) {
+                const int reorg_depth = old_tip->nHeight - fork->nHeight;
+                const bool candidate_would_park =
+                    cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK &&
+                    park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
+                    reorg_depth > static_cast<int>(park_depth);
+                const arith_uint256 tip_work = GetBlockProof(*old_tip);
+                if (!candidate_would_park &&
+                    reorg_depth > static_cast<int>(hysteresis_depth) &&
+                    tip_work > 0) {
+                    const arith_uint256 required_work =
+                        old_tip->nChainWork + tip_work * hysteresis_work_margin;
+                    if (pindexNew->nChainWork < required_work) {
+                        RecordDeferredReorgDepth(
+                            static_cast<uint32_t>(reorg_depth),
+                            hysteresis_work_margin,
+                            old_tip->nHeight,
+                            fork->nHeight,
+                            pindexNew->nHeight);
+                        LogWarning("Shallow reorg hysteresis deferred branch hash=%s depth=%d "
+                                   "candidate_height=%d tip_height=%d required_work_margin=%u\n",
+                                   pindexNew->GetBlockHash().ToString(),
+                                   reorg_depth,
+                                   pindexNew->nHeight,
+                                   old_tip->nHeight,
+                                   hysteresis_work_margin);
+                        setBlockIndexCandidates.erase(pindexNew);
+                        hysteresis_deferred_candidates.push_back(pindexNew);
+                        continue;
+                    }
+                }
+            }
+            restore_hysteresis_deferred_candidates();
             return pindexNew;
+        }
     } while(true);
 }
 
@@ -8455,14 +8575,16 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
     //   (e.g. a checkpoint/finalization protocol every side agrees on). BTX has no
     //   such gadget, so we DO NOT impose a hard cap as default behavior.
     //
-    // What we do instead, gated on operator policy (m_chainman.m_options):
+    // What we do instead, as default-on local fork-choice policy:
     //   - Warn early when a branch would rewrite more than the profile warning
     //     depth. This gives operators and mining infrastructure fast visibility.
-    //   - In the current emergency profile, park deeper branches by default so
-    //     nodes stop silently following late private releases.
-    //   - Operators can still select standard/archive profiles to follow most
-    //     work after warning when liveness and automatic convergence are more
-    //     important than local finality.
+    //   - Apply shallow hysteresis: late branches past the profile hysteresis
+    //     depth must carry extra work before this node auto-switches to them.
+    //   - Keep following most-work automatically once the branch satisfies the
+    //     extra-work rule, avoiding an unattended-miner/manual-review stall.
+    //   - Allow explicit operator parking with -parkdeepreorg=1 and
+    //     -maxreorgdepthpark=N for deployments that intentionally prefer a
+    //     local halt over automatic convergence.
     //
     // Profiles are explicit because one overloaded "max reorg" value is too
     // crude for a fragmented network: mining needs early warning, wallets and
@@ -9639,7 +9761,11 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     // Skip when fSkipMatMulValidation is true (default regtest without -test=matmulstrict).
     if (consensusParams.fMatMulPOW && !consensusParams.fSkipMatMulValidation && !block.hashPrevBlock.IsNull()) {
         CBlockHeader expected_header{block};
-        SetDeterministicMatMulSeeds(expected_header, consensusParams, nHeight);
+        if (!SetDeterministicMatMulSeeds(expected_header, consensusParams, nHeight, pindexPrev->GetMedianTimePast())) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                 "bad-matmul-seeds",
+                                 "matmul parent context unavailable for deterministic seed derivation");
+        }
         if (block.seed_a != expected_header.seed_a || block.seed_b != expected_header.seed_b) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                                  "bad-matmul-seeds",

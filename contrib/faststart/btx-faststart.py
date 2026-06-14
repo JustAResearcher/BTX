@@ -46,8 +46,10 @@ PRESET_CONF = {
         "coinstatsindex=1",
         "# keep shielded commitment index on disk (faster restart; default).",
         "retainshieldedcommitmentindex=1",
-        "miningminoutboundpeers=2",
-        "miningminsyncedoutboundpeers=1",
+        "# chain guard peer checks are advisory; unattended miners should keep asking for work.",
+        "miningchainguard=1",
+        "miningminoutboundpeers=0",
+        "miningminsyncedoutboundpeers=0",
         "miningmaxheaderlag=8",
     ],
     "service": [

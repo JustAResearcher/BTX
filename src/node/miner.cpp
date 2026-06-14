@@ -1002,7 +1002,13 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     pblock->mix_hash.SetNull();
     if (chainparams.GetConsensus().fMatMulPOW) {
         pblock->matmul_dim = static_cast<uint16_t>(chainparams.GetConsensus().nMatMulDimension);
-        SetDeterministicMatMulSeeds(*pblock, chainparams.GetConsensus(), nHeight);
+        if (!SetDeterministicMatMulSeeds(
+                *pblock,
+                chainparams.GetConsensus(),
+                nHeight,
+                pindexPrev->GetMedianTimePast())) {
+            throw std::runtime_error("CreateNewBlock(): unable to derive deterministic MatMul seeds");
+        }
         pblock->matmul_digest.SetNull();
         // v1 uses seed-derived matrices; do not store full matrices in block body.
         // Validators regenerate A and B from seed_a/seed_b on demand.

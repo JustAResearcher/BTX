@@ -223,7 +223,8 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
 
 namespace node {
 
-// Randomized equal-work tie-breaking state (see blockstorage.h). Default OFF.
+// Randomized equal-work tie-breaking state (see blockstorage.h). Default ON
+// through startup argument handling, with explicit opt-out for legacy behavior.
 // These are set once at startup via SetRandomTiebreak() and then treated as
 // immutable for the life of the process, which is what makes the comparator a
 // stable strict-weak-ordering safe for use as a std::set comparator.

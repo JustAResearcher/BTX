@@ -70,8 +70,10 @@ blockfilterindex=1
 coinstatsindex=1
 # keep shielded commitment index on disk (faster restart; default).
 retainshieldedcommitmentindex=1
-miningminoutboundpeers=2
-miningminsyncedoutboundpeers=1
+# chain guard peer checks are advisory; unattended miners should keep asking for work.
+miningchainguard=1
+miningminoutboundpeers=0
+miningminsyncedoutboundpeers=0
 miningmaxheaderlag=8
 ```
 
@@ -79,8 +81,9 @@ Use DNS names rather than hard-coded peer IP addresses in configs and runbooks.
 Peer IPs can change or disappear; DNS bootstrap names can be updated without
 requiring every miner to edit local config. Avoid `connect=`-only production
 mining topologies because they bypass normal peer diversity and can increase
-stale block risk. The mining guard will keep `getblocktemplate` paused until
-the node is caught up and has enough useful outbound peer context.
+stale block risk. Mining-chain guard peer checks are advisory in v0.32.10:
+they surface bad peer context in RPCs, but they do not stop unattended miners
+from requesting work when the local node can build a template.
 
 For horizontally scaled service gateways, add
 `--matmul-service-challenge-file=/shared/path/matmul_service_challenges.dat`

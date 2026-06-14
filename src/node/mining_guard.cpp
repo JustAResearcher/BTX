@@ -268,19 +268,31 @@ std::string DescribeMiningChainGuardStatus(const MiningChainGuardStatus& status)
 
 bool ShouldPauseMiningByChainGuard(const MiningChainGuardStatus& status)
 {
-    return status.enabled && !status.healthy;
+    if (!status.enabled) return false;
+
+    // Peer-derived health and IBD are advisory only. A malicious peer set,
+    // partition, long header chain, or DDoS should not be able to make honest
+    // unattended miners stop producing valid work. Only "no active tip" and
+    // locally disabled networking pause mining.
+    return status.reason == "tip_uninitialized" ||
+           status.reason == "network_inactive";
 }
 
 const char* GetMiningChainGuardRecommendedAction(const MiningChainGuardStatus& status)
 {
-    if (!ShouldPauseMiningByChainGuard(status)) return "continue";
-
-    if (status.reason == "initial_block_download" ||
-        status.reason == "local_tip_ahead_of_peer_median" ||
-        status.reason == "local_tip_behind_peer_median") {
+    if (status.reason == "tip_uninitialized" ||
+        status.reason == "initial_block_download") {
         return "catch_up";
     }
 
-    return "pause";
+    if (status.reason == "network_inactive") {
+        return "enable_network";
+    }
+
+    if (!status.healthy) {
+        return "continue_with_warning";
+    }
+
+    return "continue";
 }
 } // namespace node

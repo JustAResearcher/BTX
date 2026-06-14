@@ -3825,11 +3825,13 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     // test deep-reorg defense profiles, defaults, and overrides
     const auto default_reorg_opts = get_valid_opts({});
     BOOST_CHECK(default_reorg_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY);
-    BOOST_CHECK(default_reorg_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
-    const auto standard_profile = kernel::GetReorgProtectionProfileSettings(default_reorg_opts.reorg_protection_profile);
-    BOOST_CHECK_EQUAL(standard_profile.warn_depth, 3U);
-    BOOST_CHECK_EQUAL(standard_profile.park_depth, 12U);
-    BOOST_CHECK_EQUAL(standard_profile.finality_depth, 12U);
+    BOOST_CHECK(default_reorg_opts.deep_reorg_action == kernel::DeepReorgAction::WARN);
+    const auto default_profile = kernel::GetReorgProtectionProfileSettings(default_reorg_opts.reorg_protection_profile);
+    BOOST_CHECK_EQUAL(default_profile.warn_depth, 3U);
+    BOOST_CHECK_EQUAL(default_profile.park_depth, kernel::REORG_PROTECTION_DEPTH_DISABLED);
+    BOOST_CHECK_EQUAL(default_profile.finality_depth, 12U);
+    BOOST_CHECK_EQUAL(default_profile.hysteresis_depth, 0U);
+    BOOST_CHECK_EQUAL(default_profile.hysteresis_work_margin, 2U);
 
     const auto standard_opts = get_valid_opts({"-reorgprotectionprofile=standard"});
     BOOST_CHECK(standard_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::STANDARD);
@@ -3845,30 +3847,38 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK_EQUAL(archive_profile.warn_depth, 72U);
     BOOST_CHECK_EQUAL(archive_profile.park_depth, kernel::REORG_PROTECTION_DEPTH_DISABLED);
     BOOST_CHECK_EQUAL(archive_profile.finality_depth, 72U);
+    BOOST_CHECK_EQUAL(archive_profile.hysteresis_depth, 0U);
+    BOOST_CHECK_EQUAL(archive_profile.hysteresis_work_margin, 2U);
 
     const auto balanced_opts = get_valid_opts({"-reorgprotectionprofile=balanced"});
     BOOST_CHECK(balanced_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::BALANCED);
-    BOOST_CHECK(balanced_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
+    BOOST_CHECK(balanced_opts.deep_reorg_action == kernel::DeepReorgAction::WARN);
     const auto balanced_profile = kernel::GetReorgProtectionProfileSettings(balanced_opts.reorg_protection_profile);
     BOOST_CHECK_EQUAL(balanced_profile.warn_depth, 12U);
-    BOOST_CHECK_EQUAL(balanced_profile.park_depth, 48U);
+    BOOST_CHECK_EQUAL(balanced_profile.park_depth, kernel::REORG_PROTECTION_DEPTH_DISABLED);
     BOOST_CHECK_EQUAL(balanced_profile.finality_depth, 48U);
+    BOOST_CHECK_EQUAL(balanced_profile.hysteresis_depth, 0U);
+    BOOST_CHECK_EQUAL(balanced_profile.hysteresis_work_margin, 2U);
 
     const auto strict_opts = get_valid_opts({"-reorgprotectionprofile=STRICT"});
     BOOST_CHECK(strict_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::STRICT);
-    BOOST_CHECK(strict_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
+    BOOST_CHECK(strict_opts.deep_reorg_action == kernel::DeepReorgAction::WARN);
     const auto strict_profile = kernel::GetReorgProtectionProfileSettings(strict_opts.reorg_protection_profile);
     BOOST_CHECK_EQUAL(strict_profile.warn_depth, 3U);
-    BOOST_CHECK_EQUAL(strict_profile.park_depth, 12U);
+    BOOST_CHECK_EQUAL(strict_profile.park_depth, kernel::REORG_PROTECTION_DEPTH_DISABLED);
     BOOST_CHECK_EQUAL(strict_profile.finality_depth, 12U);
+    BOOST_CHECK_EQUAL(strict_profile.hysteresis_depth, 0U);
+    BOOST_CHECK_EQUAL(strict_profile.hysteresis_work_margin, 2U);
 
     const auto emergency_opts = get_valid_opts({"-reorgprotectionprofile=emergency"});
     BOOST_CHECK(emergency_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY);
-    BOOST_CHECK(emergency_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
+    BOOST_CHECK(emergency_opts.deep_reorg_action == kernel::DeepReorgAction::WARN);
     const auto emergency_profile = kernel::GetReorgProtectionProfileSettings(emergency_opts.reorg_protection_profile);
     BOOST_CHECK_EQUAL(emergency_profile.warn_depth, 3U);
-    BOOST_CHECK_EQUAL(emergency_profile.park_depth, 12U);
+    BOOST_CHECK_EQUAL(emergency_profile.park_depth, kernel::REORG_PROTECTION_DEPTH_DISABLED);
     BOOST_CHECK_EQUAL(emergency_profile.finality_depth, 12U);
+    BOOST_CHECK_EQUAL(emergency_profile.hysteresis_depth, 0U);
+    BOOST_CHECK_EQUAL(emergency_profile.hysteresis_work_margin, 2U);
 
     BOOST_CHECK(get_valid_opts({"-reorgprotectionprofile=archive", "-parkdeepreorg=1"}).deep_reorg_action == kernel::DeepReorgAction::PARK);
     BOOST_CHECK(get_valid_opts({"-parkdeepreorg=1"}).deep_reorg_action == kernel::DeepReorgAction::PARK);
@@ -3877,13 +3887,25 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK(!default_reorg_opts.max_reorg_depth_warn.has_value());
     BOOST_CHECK(!default_reorg_opts.max_reorg_depth_park.has_value());
     BOOST_CHECK(!default_reorg_opts.local_finality_depth.has_value());
-    const auto max_reorg_opts = get_valid_opts({"-maxreorgdepthwarn=48", "-maxreorgdepthpark=96", "-localfinalitydepth=120"});
+    BOOST_CHECK(!default_reorg_opts.reorg_hysteresis_depth.has_value());
+    BOOST_CHECK(!default_reorg_opts.reorg_hysteresis_work_margin.has_value());
+    const auto max_reorg_opts = get_valid_opts({
+        "-maxreorgdepthwarn=48",
+        "-maxreorgdepthpark=96",
+        "-localfinalitydepth=120",
+        "-reorghysteresisdepth=4",
+        "-reorghysteresisworkmargin=3",
+    });
     BOOST_REQUIRE(max_reorg_opts.max_reorg_depth_warn.has_value());
     BOOST_REQUIRE(max_reorg_opts.max_reorg_depth_park.has_value());
     BOOST_REQUIRE(max_reorg_opts.local_finality_depth.has_value());
+    BOOST_REQUIRE(max_reorg_opts.reorg_hysteresis_depth.has_value());
+    BOOST_REQUIRE(max_reorg_opts.reorg_hysteresis_work_margin.has_value());
     BOOST_CHECK_EQUAL(*max_reorg_opts.max_reorg_depth_warn, 48U);
     BOOST_CHECK_EQUAL(*max_reorg_opts.max_reorg_depth_park, 96U);
     BOOST_CHECK_EQUAL(*max_reorg_opts.local_finality_depth, 120U);
+    BOOST_CHECK_EQUAL(*max_reorg_opts.reorg_hysteresis_depth, 4U);
+    BOOST_CHECK_EQUAL(*max_reorg_opts.reorg_hysteresis_work_margin, 3U);
     BOOST_CHECK(!get_opts({"-reorgprotectionprofile=invalid"}));
     BOOST_CHECK(!get_opts({"-maxreorgdepthwarn=0"}));
     BOOST_CHECK(!get_opts({"-maxreorgdepthwarn=-1"}));
@@ -3891,6 +3913,13 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK(!get_opts({"-maxreorgdepthpark=-1"}));
     BOOST_CHECK(!get_opts({"-localfinalitydepth=0"}));
     BOOST_CHECK(!get_opts({"-localfinalitydepth=-1"}));
+    BOOST_REQUIRE(get_valid_opts({"-reorghysteresisdepth=0"}).reorg_hysteresis_depth.has_value());
+    BOOST_CHECK_EQUAL(
+        *get_valid_opts({"-reorghysteresisdepth=0"}).reorg_hysteresis_depth,
+        kernel::REORG_PROTECTION_DEPTH_DISABLED);
+    BOOST_CHECK(!get_opts({"-reorghysteresisdepth=-1"}));
+    BOOST_CHECK(get_valid_opts({"-reorghysteresisworkmargin=0"}).reorg_hysteresis_work_margin.has_value());
+    BOOST_CHECK(!get_opts({"-reorghysteresisworkmargin=-1"}));
 
     // TEST: tier_config_flag_sets_behavior
     // TEST: mining_node_implicitly_tier0
