@@ -147,7 +147,12 @@ uint256 DeterministicMatMulSeed(const uint256& prev_block_hash,
                                 uint8_t which,
                                 std::optional<uint64_t> nonce = std::nullopt);
 uint256 DeterministicMatMulSeedV2(const CBlockHeader& block, uint32_t height, uint8_t which);
-void SetDeterministicMatMulSeeds(CBlockHeader& block, const Consensus::Params& params, int32_t block_height);
+uint256 DeterministicMatMulSeedV3(const CBlockHeader& block, uint32_t height, int64_t parent_median_time_past, uint8_t which);
+[[nodiscard]] bool SetDeterministicMatMulSeeds(
+    CBlockHeader& block,
+    const Consensus::Params& params,
+    int32_t block_height,
+    std::optional<int64_t> parent_median_time_past = std::nullopt);
 bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::Params& params);
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height);
 bool CheckMatMulProofOfWork_Phase2(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height = -1);
@@ -246,7 +251,8 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
                  //! and every share is a genuine block candidate. Pass nullptr (default) for solo/consensus
                  //! mining — behaviour is then identical to mining against the block target. A zero target
                  //! is rejected (returns false).
-                 const uint256* share_target_override = nullptr);
+                 const uint256* share_target_override = nullptr,
+                 std::optional<int64_t> parent_median_time_past = std::nullopt);
 bool CheckKAWPOWProofOfWork(const CBlockHeader& block, uint32_t block_height, const Consensus::Params&);
 bool SolveKAWPOW(CBlockHeader& block, uint32_t block_height, const Consensus::Params& params, uint64_t& max_tries);
 

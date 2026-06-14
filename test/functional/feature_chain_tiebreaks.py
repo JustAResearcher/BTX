@@ -14,6 +14,7 @@ class ChainTiebreaksTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
         self.setup_clean_chain = True
+        self.extra_args = [["-randomtiebreak=0"], ["-randomtiebreak=0"]]
 
     @staticmethod
     def send_headers(node, blocks):

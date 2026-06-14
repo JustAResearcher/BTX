@@ -14,9 +14,9 @@ struct NodeContext;
 
 static constexpr int DEFAULT_MINING_CHAIN_GUARD_MIN_PEERS{3};
 static constexpr int DEFAULT_MINING_CHAIN_GUARD_MIN_NEAR_TIP_PEERS{2};
-static constexpr int DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP{4};
+static constexpr int DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP{2};
 static constexpr int DEFAULT_MINING_CHAIN_GUARD_NEAR_TIP_WINDOW{2};
-static constexpr int DEFAULT_MINING_CHAIN_GUARD_STALE_PEER_SECONDS{300};
+static constexpr int DEFAULT_MINING_CHAIN_GUARD_STALE_PEER_SECONDS{120};
 
 struct MiningChainGuardOptions {
     bool enabled{false};

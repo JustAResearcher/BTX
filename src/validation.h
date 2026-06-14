@@ -140,6 +140,14 @@ struct ReorgProtectionRuntimeStats {
     int32_t last_rejected_fork_height{0};
     int32_t last_rejected_candidate_height{0};
     int64_t last_rejected_unix{0};
+    uint64_t deferred_reorgs{0};
+    uint32_t deepest_deferred_reorg_depth{0};
+    uint32_t last_deferred_reorg_depth{0};
+    uint32_t last_deferred_required_work_margin{0};
+    int32_t last_deferred_tip_height{0};
+    int32_t last_deferred_fork_height{0};
+    int32_t last_deferred_candidate_height{0};
+    int64_t last_deferred_unix{0};
 };
 
 ReorgProtectionRuntimeStats ProbeReorgProtectionRuntimeStats();
@@ -152,6 +160,12 @@ void RecordObservedReorgDepth(
 void RecordRejectedReorgDepth(
     uint32_t reorg_depth,
     uint32_t max_reorg_depth,
+    int32_t old_tip_height,
+    int32_t fork_height,
+    int32_t candidate_height);
+void RecordDeferredReorgDepth(
+    uint32_t reorg_depth,
+    uint32_t required_work_margin,
     int32_t old_tip_height,
     int32_t fork_height,
     int32_t candidate_height);

@@ -124,8 +124,9 @@ using BlockMap = std::unordered_map<uint256, CBlockIndex, BlockHasher>;
  *     the next block that extends one branch with strictly more work. No fork
  *     activation height is required.
  *
- * Default OFF for bit-for-bit compatibility with upstream behavior; opt in with
- * -randomtiebreak. When OFF, the legacy nSequenceId tie-break is used unchanged.
+ * Default ON through -randomtiebreak=1 during normal startup. Operators and
+ * legacy-ordering tests can disable it with -randomtiebreak=0; when disabled,
+ * the legacy nSequenceId tie-break is used unchanged.
  */
 extern bool g_random_tiebreak_enabled;
 extern uint256 g_tiebreak_seed;

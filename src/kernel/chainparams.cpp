@@ -43,6 +43,7 @@ static constexpr int32_t BTX_SHIELDED_SUNSET_HEIGHT{125'000};
 static constexpr int32_t BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT{BTX_SHIELDED_SUNSET_HEIGHT};
 static constexpr int32_t BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT{128'000};
 static constexpr int32_t BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT{130'000};
+static constexpr int32_t BTX_V03210_HARDENING_HEIGHT{130'500};
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
                                  const CScript& genesisOutputScript,
@@ -179,6 +180,7 @@ public:
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
+        consensus.nEmptyBlockSubsidyStrictPenaltyHeight = BTX_V03210_HARDENING_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         // Fast-phase bootstrap scale for heights [0, nFastMineHeight). Effective
         // ease is bounded by powLimit; keep this >1 so fast bootstrap can
@@ -228,6 +230,10 @@ public:
         // bound to the mutable header so miners cannot reuse one fixed A/B
         // instance across nonce attempts.
         consensus.nMatMulNonceSeedHeight = 125'000;
+        // v0.32.10 hardening: bind MatMul seeds to the actual parent MTP so
+        // templates cannot be prebuilt against one parent and replayed across
+        // alternate withheld parents.
+        consensus.nMatMulParentMtpSeedHeight = BTX_V03210_HARDENING_HEIGHT;
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -424,6 +430,14 @@ public:
                 .blockhash = consteval_ctor(uint256{"d95c8b565fefcda79efe47acad98648b0a24899f22facba9eedeb02c8bffd4d2"}),
                 .shielded_state_commitment = uint256{"827f8bf52ddf6de1e780a0917179dac715abeb428580744505dc30fbd6be5f9d"},
             },
+            {
+                // main assumeutxo snapshot at height 130'089
+                .height = 130'089,
+                .hash_serialized = AssumeutxoHash{uint256{"8c0b10247fe9a6a95a28744b7d80b96f1647db71bbc8cc5ba67f766ecd667310"}},
+                .m_chain_tx_count = 161'703,
+                .blockhash = consteval_ctor(uint256{"e3820082934a2b239142896d9d1f72fd23cd8930105073d792048a04f95bf3ba"}),
+                .shielded_state_commitment = uint256{"7b9fce2384229984f916cdab106d6d29c2b38e206ff1045eb82b882d6adf28b2"},
+            },
         };
         chainTxData = ChainTxData{
             .nTime = 1781271685,
@@ -480,6 +494,7 @@ public:
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
+        consensus.nEmptyBlockSubsidyStrictPenaltyHeight = BTX_V03210_HARDENING_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -506,6 +521,7 @@ public:
         consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = 61'000;
         consensus.nMatMulPreHashEpsilonBitsUpgrade = 18;
         consensus.nMatMulNonceSeedHeight = 125'000;
+        consensus.nMatMulParentMtpSeedHeight = BTX_V03210_HARDENING_HEIGHT;
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -656,6 +672,7 @@ public:
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
+        consensus.nEmptyBlockSubsidyStrictPenaltyHeight = BTX_V03210_HARDENING_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -682,6 +699,7 @@ public:
         consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = 61'000;
         consensus.nMatMulPreHashEpsilonBitsUpgrade = 18;
         consensus.nMatMulNonceSeedHeight = 125'000;
+        consensus.nMatMulParentMtpSeedHeight = BTX_V03210_HARDENING_HEIGHT;
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -862,6 +880,7 @@ public:
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
+        consensus.nEmptyBlockSubsidyStrictPenaltyHeight = BTX_V03210_HARDENING_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -888,6 +907,7 @@ public:
         consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = 61'000;
         consensus.nMatMulPreHashEpsilonBitsUpgrade = 18;
         consensus.nMatMulNonceSeedHeight = 125'000;
+        consensus.nMatMulParentMtpSeedHeight = BTX_V03210_HARDENING_HEIGHT;
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -1061,6 +1081,9 @@ public:
         if (opts.matmul_nonce_seed_height.has_value()) {
             consensus.nMatMulNonceSeedHeight = *opts.matmul_nonce_seed_height;
         }
+        if (opts.matmul_parent_mtp_seed_height.has_value()) {
+            consensus.nMatMulParentMtpSeedHeight = *opts.matmul_parent_mtp_seed_height;
+        }
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -1158,6 +1181,7 @@ public:
             opts.matmul_asert_half_life.has_value() ||
             opts.matmul_asert_half_life_upgrade_height.has_value() ||
             opts.matmul_nonce_seed_height.has_value() ||
+            opts.matmul_parent_mtp_seed_height.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||
             opts.shielded_smile_rice_codec_disable_height.has_value() ||

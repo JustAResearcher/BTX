@@ -273,6 +273,141 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_rejection_prunes_candidate_branch,
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(chainstate_shallow_reorg_hysteresis_defers_until_work_margin, TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& deep_reorg_action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    auto& max_reorg_depth_park = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& hysteresis_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_depth);
+    auto& hysteresis_work_margin = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
+    struct RestoreReorgOptions
+    {
+        Consensus::Params& consensus;
+        int32_t saved_reorg_start_height;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        std::optional<uint32_t>& hysteresis_depth;
+        std::optional<uint32_t> saved_hysteresis_depth;
+        std::optional<uint32_t>& hysteresis_work_margin;
+        std::optional<uint32_t> saved_hysteresis_work_margin;
+        ~RestoreReorgOptions()
+        {
+            consensus.nReorgProtectionStartHeight = saved_reorg_start_height;
+            action = saved_action;
+            park_depth = saved_park_depth;
+            hysteresis_depth = saved_hysteresis_depth;
+            hysteresis_work_margin = saved_hysteresis_work_margin;
+        }
+    } restore{
+        consensus,
+        consensus.nReorgProtectionStartHeight,
+        deep_reorg_action,
+        deep_reorg_action,
+        max_reorg_depth_park,
+        max_reorg_depth_park,
+        hysteresis_depth,
+        hysteresis_depth,
+        hysteresis_work_margin,
+        hysteresis_work_margin};
+
+    consensus.nReorgProtectionStartHeight = 10;
+    deep_reorg_action = kernel::DeepReorgAction::PARK;
+    max_reorg_depth_park = 12;
+    hysteresis_depth = 0;
+    hysteresis_work_margin = 2;
+
+    CBlockIndex* fork{nullptr};
+    CBlockIndex* original_branch_first{nullptr};
+    CBlockIndex* original_tip{nullptr};
+    {
+        LOCK(::cs_main);
+        original_tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(original_tip != nullptr);
+        fork = original_tip->pprev;
+        BOOST_REQUIRE(fork != nullptr);
+        original_branch_first = chainstate.m_chain[fork->nHeight + 1];
+        BOOST_REQUIRE(original_branch_first != nullptr);
+    }
+    const uint256 original_tip_hash = original_tip->GetBlockHash();
+    const int original_height = original_tip->nHeight;
+
+    BlockValidationState original_inval_state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(original_inval_state, original_branch_first));
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip(), fork);
+    }
+
+    CBlockIndex* competing_root{nullptr};
+    CBlockIndex* competing_tip{nullptr};
+    for (int i = 0; i < 2; ++i) {
+        const CBlock competing_block = CreateAndProcessBlock({}, script_pub_key);
+        LOCK(::cs_main);
+        CBlockIndex* tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE_EQUAL(tip->GetBlockHash(), competing_block.GetHash());
+        if (i == 0) competing_root = tip;
+        if (i == 1) competing_tip = tip;
+    }
+    BOOST_REQUIRE(competing_root != nullptr);
+    BOOST_REQUIRE(competing_tip != nullptr);
+    BOOST_REQUIRE_EQUAL(competing_tip->nHeight, original_height + 1);
+
+    BlockValidationState competing_inval_state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(competing_inval_state, competing_root));
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip(), fork);
+        chainstate.ResetBlockFailureFlags(original_branch_first);
+    }
+
+    BlockValidationState restore_original_state;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(restore_original_state));
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_tip_hash);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Height(), original_height);
+        chainstate.ResetBlockFailureFlags(competing_root);
+        BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 1);
+    }
+
+    ResetReorgProtectionRuntimeStats();
+    BlockValidationState deferred_state;
+    BOOST_CHECK(chainstate.ActivateBestChain(deferred_state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_tip_hash);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
+        BOOST_CHECK(!chainman.IsOnParkedReorgBranch(competing_tip));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 1);
+    }
+    auto stats = ProbeReorgProtectionRuntimeStats();
+    BOOST_CHECK_EQUAL(stats.deferred_reorgs, 1U);
+    BOOST_CHECK_EQUAL(stats.last_deferred_reorg_depth, 1U);
+    BOOST_CHECK_EQUAL(stats.last_deferred_required_work_margin, 2U);
+    BOOST_CHECK_EQUAL(stats.rejected_reorgs, 0U);
+
+    hysteresis_work_margin = 1;
+    ResetReorgProtectionRuntimeStats();
+    BlockValidationState adopted_state;
+    BOOST_CHECK(chainstate.ActivateBestChain(adopted_state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), competing_tip->GetBlockHash());
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height + 1);
+    }
+    stats = ProbeReorgProtectionRuntimeStats();
+    BOOST_CHECK_EQUAL(stats.deferred_reorgs, 0U);
+    BOOST_CHECK_EQUAL(stats.observed_reorgs, 1U);
+    BOOST_CHECK_EQUAL(stats.last_observed_reorg_depth, 1U);
+}
+
 //! Explicit WARN deep-reorg handling must follow the most-work chain -- a deep
 //! reorg is NOT refused, so the node stays Nakamoto-consistent when an operator
 //! deliberately selects a warn-only profile. The deep reorg must still be loudly
@@ -293,6 +428,7 @@ BOOST_FIXTURE_TEST_CASE(chainstate_warn_profile_deep_reorg_follows_most_work, Te
     auto& deep_reorg_action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
     auto& max_reorg_depth_warn = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_warn);
     auto& max_reorg_depth_park = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& hysteresis_work_margin = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
     struct RestoreParams
     {
         Consensus::Params& consensus;
@@ -303,17 +439,21 @@ BOOST_FIXTURE_TEST_CASE(chainstate_warn_profile_deep_reorg_follows_most_work, Te
         std::optional<uint32_t> saved_warn_depth;
         std::optional<uint32_t>& park_depth;
         std::optional<uint32_t> saved_park_depth;
+        std::optional<uint32_t>& hysteresis_work_margin;
+        std::optional<uint32_t> saved_hysteresis_work_margin;
         ~RestoreParams()
         {
             consensus.nReorgProtectionStartHeight = reorg_start_height;
             deep_reorg_action = saved_deep_reorg_action;
             warn_depth = saved_warn_depth;
             park_depth = saved_park_depth;
+            hysteresis_work_margin = saved_hysteresis_work_margin;
         }
     } restore{consensus, consensus.nReorgProtectionStartHeight,
               deep_reorg_action, deep_reorg_action,
               max_reorg_depth_warn, max_reorg_depth_warn,
-              max_reorg_depth_park, max_reorg_depth_park};
+              max_reorg_depth_park, max_reorg_depth_park,
+              hysteresis_work_margin, hysteresis_work_margin};
     deep_reorg_action = kernel::DeepReorgAction::WARN;
     BOOST_REQUIRE(chainman.m_options.deep_reorg_action == kernel::DeepReorgAction::WARN);
 
@@ -321,6 +461,9 @@ BOOST_FIXTURE_TEST_CASE(chainstate_warn_profile_deep_reorg_follows_most_work, Te
     consensus.nReorgProtectionStartHeight = 10;
     max_reorg_depth_warn = 1;
     max_reorg_depth_park = 1;
+    // This test isolates WARN-mode deep-reorg behavior. Production defaults
+    // keep hysteresis on so shallow late branches need extra work first.
+    hysteresis_work_margin = 0;
 
     // Fork point: three blocks below the current tip. The ORIGINAL branch
     // (fork+1, fork+2, fork+3) stays our reference heavier branch.

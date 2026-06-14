@@ -36,15 +36,30 @@ COutPoint generatetoaddress(const NodeContext& node, const std::string& address)
 bool MineHeaderForConsensus(CBlockHeader& header,
                             uint32_t block_height,
                             const Consensus::Params& consensus,
-                            uint64_t max_tries)
+                            uint64_t max_tries,
+                            std::optional<int64_t> parent_median_time_past)
 {
     if (consensus.fMatMulPOW) {
         if (header.matmul_dim == 0) {
             header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
         }
-        SetDeterministicMatMulSeeds(header, consensus, static_cast<int32_t>(block_height));
+        if (!SetDeterministicMatMulSeeds(
+                header,
+                consensus,
+                static_cast<int32_t>(block_height),
+                parent_median_time_past)) {
+            return false;
+        }
         header.mix_hash.SetNull();
-        return SolveMatMul(header, consensus, max_tries, static_cast<int32_t>(block_height));
+        return SolveMatMul(
+            header,
+            consensus,
+            max_tries,
+            static_cast<int32_t>(block_height),
+            nullptr,
+            nullptr,
+            nullptr,
+            parent_median_time_past);
     }
 
     const bool kawpow_active{consensus.fKAWPOW && consensus.nKAWPOWHeight <= static_cast<int>(block_height)};
@@ -81,9 +96,15 @@ bool MineHeaderForConsensus(CBlockHeader& header,
 bool MineHeaderForConsensus(CBlock& block,
                             uint32_t block_height,
                             const Consensus::Params& consensus,
-                            uint64_t max_tries)
+                            uint64_t max_tries,
+                            std::optional<int64_t> parent_median_time_past)
 {
-    if (!MineHeaderForConsensus(static_cast<CBlockHeader&>(block), block_height, consensus, max_tries)) {
+    if (!MineHeaderForConsensus(
+            static_cast<CBlockHeader&>(block),
+            block_height,
+            consensus,
+            max_tries,
+            parent_median_time_past)) {
         return false;
     }
 
@@ -151,7 +172,12 @@ COutPoint MineBlock(const NodeContext& node, std::shared_ptr<CBlock>& block)
     auto& chainman{*Assert(node.chainman)};
     const CBlockIndex* prev_index{WITH_LOCK(cs_main, return chainman.m_blockman.LookupBlockIndex(block->hashPrevBlock))};
     const uint32_t block_height{prev_index ? static_cast<uint32_t>(prev_index->nHeight + 1) : 0};
-    assert(MineHeaderForConsensus(*block, block_height, Params().GetConsensus()));
+    assert(MineHeaderForConsensus(
+        *block,
+        block_height,
+        Params().GetConsensus(),
+        5'000'000,
+        prev_index ? std::optional<int64_t>{prev_index->GetMedianTimePast()} : std::nullopt));
     // Populate Freivalds' product matrix payload for O(n^2) verification.
     PopulateFreivaldsPayload(*block, Params().GetConsensus());
 

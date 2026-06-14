@@ -165,6 +165,10 @@ struct Params {
      *  nBits, dimension, and version so every attempted header has a distinct
      *  matrix instance. */
     int32_t nMatMulNonceSeedHeight{std::numeric_limits<int32_t>::max()};
+    /** Height at which nonce/header-bound MatMul seeds additionally commit to
+     *  the parent median-time-past. This V3 seed rule must only be activated
+     *  above already-mined history. */
+    int32_t nMatMulParentMtpSeedHeight{std::numeric_limits<int32_t>::max()};
     /** Maximum Phase 2 verifications per minute across ALL peers combined.
      *  With n=512 each costs ~5ms, so 512/min ≈ 2.56s CPU/min. */
     uint32_t nMatMulGlobalVerifyBudgetPerMin{512};
@@ -201,6 +205,10 @@ struct Params {
      * configured maximum number of halvings. This is deterministic from
      * block/chain data and intentionally ignores mempool contents. */
     int32_t nEmptyBlockSubsidyPenaltyHeight{std::numeric_limits<int32_t>::max()};
+    /** v0.32.10 explicit schedule height. At and above this height,
+     * coinbase-only blocks are capped at base/2 after a non-empty block and
+     * base/4 after another empty block. */
+    int32_t nEmptyBlockSubsidyStrictPenaltyHeight{std::numeric_limits<int32_t>::max()};
     uint32_t nEmptyBlockSubsidyMaxHalvings{2};
 
     // Target spacing schedule.
@@ -387,6 +395,13 @@ struct Params {
             height >= 0 &&
             nMatMulNonceSeedHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulNonceSeedHeight;
+    }
+    bool IsMatMulParentMtpSeedActive(int32_t height) const
+    {
+        return fMatMulPOW &&
+            height >= 0 &&
+            nMatMulParentMtpSeedHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nMatMulParentMtpSeedHeight;
     }
     bool IsMatMulMaxFutureMtpDriftActive(int32_t height) const
     {

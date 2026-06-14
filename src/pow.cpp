@@ -82,21 +82,53 @@ uint256 DeterministicMatMulSeedV2(const CBlockHeader& block, uint32_t height, ui
     return hw.GetSHA256();
 }
 
-void SetDeterministicMatMulSeeds(CBlockHeader& block, const Consensus::Params& params, int32_t block_height)
+uint256 DeterministicMatMulSeedV3(const CBlockHeader& block, uint32_t height, int64_t parent_median_time_past, uint8_t which)
+{
+    HashWriter hw;
+    hw << std::string{"BTX_MATMUL_SEED_V3"}
+       << block.hashPrevBlock
+       << parent_median_time_past
+       << height
+       << block.nVersion
+       << block.hashMerkleRoot
+       << block.nTime
+       << block.nBits
+       << block.nNonce64
+       << block.matmul_dim
+       << which;
+    return hw.GetSHA256();
+}
+
+bool SetDeterministicMatMulSeeds(
+    CBlockHeader& block,
+    const Consensus::Params& params,
+    int32_t block_height,
+    std::optional<int64_t> parent_median_time_past)
 {
     if (block_height < 0) {
         block.seed_a.SetNull();
         block.seed_b.SetNull();
-        return;
+        return true;
+    }
+    if (params.IsMatMulParentMtpSeedActive(block_height)) {
+        if (!parent_median_time_past.has_value()) {
+            block.seed_a.SetNull();
+            block.seed_b.SetNull();
+            return false;
+        }
+        block.seed_a = DeterministicMatMulSeedV3(block, static_cast<uint32_t>(block_height), *parent_median_time_past, 0);
+        block.seed_b = DeterministicMatMulSeedV3(block, static_cast<uint32_t>(block_height), *parent_median_time_past, 1);
+        return true;
     }
     if (params.IsMatMulNonceSeedActive(block_height)) {
         block.seed_a = DeterministicMatMulSeedV2(block, static_cast<uint32_t>(block_height), 0);
         block.seed_b = DeterministicMatMulSeedV2(block, static_cast<uint32_t>(block_height), 1);
-        return;
+        return true;
     }
 
     block.seed_a = DeterministicMatMulSeed(block.hashPrevBlock, static_cast<uint32_t>(block_height), 0);
     block.seed_b = DeterministicMatMulSeed(block.hashPrevBlock, static_cast<uint32_t>(block_height), 1);
+    return true;
 }
 
 namespace {
@@ -1477,7 +1509,8 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
     uint32_t header_time_refresh_interval,
     bool allow_min_difficulty)
 {
-    if (configured_batch_size == 0 || pre_hash_epsilon_bits == 0 || block_height < 0) {
+    if (configured_batch_size == 0 || pre_hash_epsilon_bits == 0 || block_height < 0 ||
+        params.IsMatMulParentMtpSeedActive(block_height)) {
         return std::nullopt;
     }
 
@@ -1576,7 +1609,9 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
         CBlockHeader header{block};
         header.nNonce64 = block.nNonce64 + i;
         header.nNonce = static_cast<uint32_t>(header.nNonce64);
-        SetDeterministicMatMulSeeds(header, params, block_height);
+        if (!SetDeterministicMatMulSeeds(header, params, block_height)) {
+            return std::nullopt;
+        }
         header.matmul_digest.SetNull();
         if (!CheckMatMulPreHashGate(header, params, block_height)) {
             continue;
@@ -3116,7 +3151,8 @@ bool SolveMatMulNonceSeeded(CBlockHeader& block,
                             int32_t block_height,
                             const std::atomic<bool>* abort_flag,
                             std::vector<uint32_t>* freivalds_payload_out,
-                            const uint256* share_target_override)
+                            const uint256* share_target_override,
+                            std::optional<int64_t> parent_median_time_past)
 {
     if (freivalds_payload_out != nullptr) {
         freivalds_payload_out->clear();
@@ -3537,7 +3573,10 @@ bool SolveMatMulNonceSeeded(CBlockHeader& block,
             }
 
             CBlockHeader header{block};
-            SetDeterministicMatMulSeeds(header, params, block_height);
+            if (!SetDeterministicMatMulSeeds(header, params, block_height, parent_median_time_past)) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+                return false;
+            }
             header.matmul_digest.SetNull();
             --max_tries;
 
@@ -3587,7 +3626,8 @@ bool SolveMatMulParallel(CBlockHeader& block,
                          const std::atomic<bool>* abort_flag,
                          std::vector<uint32_t>* freivalds_payload_out,
                          uint32_t solver_threads,
-                         const uint256* share_target_override)
+                         const uint256* share_target_override,
+                         std::optional<int64_t> parent_median_time_past)
 {
     if (freivalds_payload_out != nullptr) {
         freivalds_payload_out->clear();
@@ -3662,7 +3702,8 @@ bool SolveMatMulParallel(CBlockHeader& block,
                 block_height,
                 &shared_abort,
                 freivalds_payload_out != nullptr ? &local_payload : nullptr,
-                share_target_override);
+                share_target_override,
+                parent_median_time_past);
             tries_consumed.fetch_add(chunk_tries - local_tries, std::memory_order_relaxed);
 
             if (!local_solved) {
@@ -3718,7 +3759,8 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
                  int32_t block_height,
                  const std::atomic<bool>* abort_flag,
                  std::vector<uint32_t>* freivalds_payload_out,
-                 const uint256* share_target_override)
+                 const uint256* share_target_override,
+                 std::optional<int64_t> parent_median_time_past)
 {
     if (!params.fMatMulPOW) return false;
     if (freivalds_payload_out != nullptr) {
@@ -3732,8 +3774,10 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
         }
         block.matmul_dim = static_cast<uint16_t>(params.nMatMulDimension);
     }
-    if (params.IsMatMulNonceSeedActive(block_height)) {
-        SetDeterministicMatMulSeeds(block, params, block_height);
+    if (params.IsMatMulNonceSeedActive(block_height) || params.IsMatMulParentMtpSeedActive(block_height)) {
+        if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
+            return false;
+        }
     }
     if (block.seed_a.IsNull() || block.seed_b.IsNull()) return false;
     if (params.nMatMulTranscriptBlockSize == 0) return false;
@@ -3772,7 +3816,8 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
             const bool gpu_nonce_seed_scan_enabled =
                 (active_backend == matmul::backend::Kind::CUDA ||
                  active_backend == matmul::backend::Kind::METAL) &&
-                pre_hash_epsilon_bits > 0;
+                pre_hash_epsilon_bits > 0 &&
+                !params.IsMatMulParentMtpSeedActive(block_height);
             const uint32_t nonce_seed_batch_size = gpu_nonce_seed_scan_enabled
                 ? ResolveGpuNonceSeedBatchSize(
                     active_backend,
@@ -3800,7 +3845,7 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
             if (parallel_solver_enabled) {
                 return SolveMatMulParallel(
                     block, params, max_tries, block_height, abort_flag,
-                    freivalds_payload_out, solver_threads, share_target_override);
+                    freivalds_payload_out, solver_threads, share_target_override, parent_median_time_past);
             }
         }
         return SolveMatMulNonceSeeded(
@@ -3810,7 +3855,8 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
             block_height,
             abort_flag,
             freivalds_payload_out,
-            share_target_override);
+            share_target_override,
+            parent_median_time_past);
     }
 
     const uint32_t n = block.matmul_dim;
@@ -3840,7 +3886,8 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
             abort_flag,
             freivalds_payload_out,
             solver_threads,
-            share_target_override);
+            share_target_override,
+            parent_median_time_past);
     }
 
     const bool mem_diag_enabled = []() {

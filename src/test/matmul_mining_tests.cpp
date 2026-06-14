@@ -443,16 +443,15 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_includes_matmul_params)
     BOOST_CHECK(!saw_prevblock);
 }
 
-BOOST_AUTO_TEST_CASE(getblocktemplate_reports_chain_guard_pause_for_external_miners)
+BOOST_AUTO_TEST_CASE(getblocktemplate_reports_chain_guard_advisory_without_pausing_external_miners)
 {
     SetMiningChainGuard(true);
 
-    BOOST_CHECK_EXCEPTION(
-        CallRPC("getblocktemplate", GBTParams()),
-        std::runtime_error,
-        [](const std::runtime_error& e) {
-            return RuntimeErrorContains(e, "mining paused by chain guard");
-        });
+    const auto tmpl = CallRPC("getblocktemplate", GBTParams()).get_obj();
+    const auto chain_guard = tmpl.find_value("chain_guard").get_obj();
+    BOOST_CHECK(!chain_guard.find_value("healthy").get_bool());
+    BOOST_CHECK(!chain_guard.find_value("should_pause_mining").get_bool());
+    BOOST_CHECK_EQUAL(chain_guard.find_value("recommended_action").get_str(), "catch_up");
 }
 
 // TEST: rpc_getmininginfo_algorithm
@@ -476,6 +475,16 @@ BOOST_AUTO_TEST_CASE(getmininginfo_reports_matmul_algorithm)
     BOOST_CHECK_EQUAL(info.find_value("matmul_n").getInt<int>(), static_cast<int>(consensus.nMatMulDimension));
     BOOST_CHECK_EQUAL(info.find_value("matmul_b").getInt<int>(), static_cast<int>(consensus.nMatMulTranscriptBlockSize));
     BOOST_CHECK_EQUAL(info.find_value("matmul_r").getInt<int>(), static_cast<int>(consensus.nMatMulNoiseRank));
+
+    const auto fork_health = info.find_value("fork_health").get_obj();
+    BOOST_CHECK_EQUAL(fork_health.find_value("active_height").getInt<int>(), ActiveHeight());
+    BOOST_CHECK(fork_health.find_value("active_hash").isStr());
+    BOOST_CHECK_EQUAL(fork_health.find_value("total_tips").getInt<int64_t>(), 1);
+    const auto fork_status_counts = fork_health.find_value("by_status").get_obj();
+    BOOST_CHECK_EQUAL(fork_status_counts.find_value("active").getInt<int64_t>(), 1);
+    BOOST_CHECK_EQUAL(fork_health.find_value("max_headers_only_branch_length").getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(fork_health.find_value("max_invalid_branch_length").getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(fork_health.find_value("max_validated_fork_branch_length").getInt<int64_t>(), 0);
 
     const auto backend_runtime = info.find_value("backend_runtime").get_obj();
     BOOST_CHECK(backend_runtime.find_value("requested_backend").isStr());
@@ -512,16 +521,15 @@ BOOST_AUTO_TEST_CASE(getmatmulchallenge_reports_chain_guard_and_time_policy)
     }
 }
 
-BOOST_AUTO_TEST_CASE(getmatmulchallenge_pauses_when_chain_guard_requests_stop)
+BOOST_AUTO_TEST_CASE(getmatmulchallenge_reports_chain_guard_advisory_without_pausing)
 {
     SetMiningChainGuard(true);
 
-    BOOST_CHECK_EXCEPTION(
-        CallRPC("getmatmulchallenge"),
-        std::runtime_error,
-        [](const std::runtime_error& e) {
-            return RuntimeErrorContains(e, "mining paused by chain guard");
-        });
+    const auto challenge = CallRPC("getmatmulchallenge").get_obj();
+    const auto chain_guard = challenge.find_value("chain_guard").get_obj();
+    BOOST_CHECK(!chain_guard.find_value("healthy").get_bool());
+    BOOST_CHECK(!chain_guard.find_value("should_pause_mining").get_bool());
+    BOOST_CHECK_EQUAL(chain_guard.find_value("recommended_action").get_str(), "catch_up");
 }
 
 // TEST: mining_generate_block
@@ -574,7 +582,7 @@ BOOST_AUTO_TEST_CASE(submitblock_accepts_valid_matmul_block)
     BOOST_CHECK_EQUAL(generated.find_value("hash").get_str(), ActiveTipHash().GetHex());
 }
 
-BOOST_AUTO_TEST_CASE(submitblock_pauses_when_chain_guard_requests_stop)
+BOOST_AUTO_TEST_CASE(submitblock_decodes_even_when_chain_guard_is_unhealthy)
 {
     SetMiningChainGuard(false);
     const int old_height = ActiveHeight();
@@ -583,10 +591,13 @@ BOOST_AUTO_TEST_CASE(submitblock_pauses_when_chain_guard_requests_stop)
 
     UniValue submit_params{UniValue::VARR};
     submit_params.push_back("00");
-    const UniValue submit_result = CallRPC("submitblock", std::move(submit_params));
 
-    BOOST_CHECK(submit_result.isStr());
-    BOOST_CHECK_EQUAL(submit_result.get_str(), "paused-chain-guard-catch_up");
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("submitblock", std::move(submit_params)),
+        std::runtime_error,
+        [](const std::runtime_error& e) {
+            return RuntimeErrorContains(e, "Block decode failed");
+        });
     BOOST_CHECK_EQUAL(ActiveHeight(), old_height);
 }
 
@@ -824,10 +835,14 @@ BOOST_AUTO_TEST_CASE(matmul_service_profile_reports_measured_runtime_and_network
     BOOST_CHECK_EQUAL(reorg_protection.find_value("current_tip_height").getInt<int>(), ActiveHeight());
     BOOST_CHECK_EQUAL(reorg_protection.find_value("start_height").getInt<int>(), 0);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("warn_depth").getInt<int>(), static_cast<int>(emergency_profile.warn_depth));
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("park_depth").getInt<int>(), static_cast<int>(emergency_profile.park_depth));
+    BOOST_CHECK(!reorg_protection.find_value("parking_enabled").get_bool());
+    BOOST_CHECK(reorg_protection.find_value("follows_most_work").get_bool());
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("park_depth").getInt<int>(), 0);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("local_finality_depth").getInt<int>(), static_cast<int>(emergency_profile.finality_depth));
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("hysteresis_depth").getInt<int>(), static_cast<int>(emergency_profile.hysteresis_depth));
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("hysteresis_work_margin").getInt<int>(), static_cast<int>(emergency_profile.hysteresis_work_margin));
     BOOST_CHECK_EQUAL(reorg_protection.find_value("locally_finalized_height").getInt<int>(), 0);
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("max_reorg_depth").getInt<int>(), static_cast<int>(emergency_profile.park_depth));
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("max_reorg_depth").getInt<int>(), 0);
     const int64_t expected_consensus_max_reorg_depth{
         consensus.nMaxReorgDepth != std::numeric_limits<uint32_t>::max()
             ? static_cast<int64_t>(consensus.nMaxReorgDepth)
@@ -836,7 +851,10 @@ BOOST_AUTO_TEST_CASE(matmul_service_profile_reports_measured_runtime_and_network
     BOOST_CHECK_EQUAL(reorg_protection.find_value("rejected_reorgs").getInt<uint64_t>(), 1U);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("deepest_rejected_reorg_depth").getInt<int>(), 248);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_reorg_depth").getInt<int>(), 248);
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_max_reorg_depth").getInt<int>(), static_cast<int>(emergency_profile.park_depth));
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_max_reorg_depth").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("deferred_reorgs").getInt<uint64_t>(), 0U);
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("deepest_deferred_reorg_depth").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("last_deferred_required_work_margin").getInt<int>(), 0);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_tip_height").getInt<int>(), 53'086);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_fork_height").getInt<int>(), 52'838);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_candidate_height").getInt<int>(), 53'347);

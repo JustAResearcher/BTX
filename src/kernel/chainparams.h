@@ -205,6 +205,7 @@ public:
         std::optional<int32_t> matmul_pre_hash_epsilon_bits_upgrade_height{};
         std::optional<uint32_t> matmul_pre_hash_epsilon_bits_upgrade{};
         std::optional<int32_t> matmul_nonce_seed_height{};
+        std::optional<int32_t> matmul_parent_mtp_seed_height{};
         bool fastprune{false};
         bool enforce_bip94{false};
         bool matmul_strict{false};

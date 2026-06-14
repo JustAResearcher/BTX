@@ -288,6 +288,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_nonce_seed_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestmatmulnonceseedheight");
     }
+    if (args.IsArgSet("-regtestmatmulparentmtpseedheight")) {
+        options.matmul_parent_mtp_seed_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestmatmulparentmtpseedheight");
+    }
 
     for (const std::string& arg : args.GetArgs("-testactivationheight")) {
         const auto found{arg.find('@')};
