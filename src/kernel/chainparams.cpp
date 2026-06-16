@@ -42,9 +42,16 @@ auto consteval_ctor(auto&& input) { return input; }
 static constexpr int32_t BTX_SHIELDED_SUNSET_HEIGHT{125'000};
 static constexpr int32_t BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT{BTX_SHIELDED_SUNSET_HEIGHT};
 static constexpr int32_t BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT{128'000};
+// Future consensus-bundle activation point for post-sunset zero-output V2_SEND
+// exact exits. Keep disabled until the release that coordinates this with the
+// other shielded-exit consensus changes. When that height is chosen, set this
+// constant for the production-like networks and keep it >= BTX_SHIELDED_SUNSET_HEIGHT.
+static constexpr int32_t BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT{
+    std::numeric_limits<int32_t>::max()};
 static constexpr int32_t BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT{130'000};
 static constexpr int32_t BTX_V03210_HARDENING_HEIGHT{130'500};
 static constexpr int32_t BTX_V03211_HARDENING_HEIGHT{132'000};
+static constexpr int32_t BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT{135'000};
 static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
@@ -255,14 +262,15 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight =
+            BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
-        // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
-        // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
-        // post-fork regime. Aligned to the 125,000 sunset (DS-4 hardening): the cap activates at the
-        // same block the outflow-only rule engages, so there is no uncapped window between the sunset and
-        // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
-        // before it bites.
+        // v0.32.0-v0.32.12: shielded unshield (z->t) velocity cap from the 125,000
+        // sunset through block 134,999. The v0.32.11 minimum-cap floor still starts at
+        // 132,000, and v0.32.12 ends the quota at 135,000 after the recovery window has
+        // matured so remaining legacy exits are no longer rate-limited.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedUnshieldVelocityEndHeight = BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCap = BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP;
         consensus.nShieldedSettlementAnchorMaturity = 6;
@@ -328,8 +336,12 @@ public:
         fDefaultConsistencyChecks = false;
         m_is_mockable_chain = false;
 
-        // Primary live bootstrap DNS seed for mainnet peer discovery.
+        // Live bootstrap DNS seeds for mainnet peer discovery. Keep these as
+        // DNS names, not hard-coded IPs, so archive-node rotation does not
+        // require a binary update.
         vSeeds.clear();
+        vSeeds.emplace_back("node.btx.dev.");
+        vSeeds.emplace_back("node.btxchain.org.");
         vSeeds.emplace_back("node.btx.tools.");
 
         // Fixed seeds mirror the public BTX infrastructure endpoints so nodes
@@ -451,6 +463,30 @@ public:
                 .blockhash = consteval_ctor(uint256{"1304900157e110b987ed7aab72d5d00d87046866a6fd80b3992721e3fd48f851"}),
                 .shielded_state_commitment = uint256{"be3840420a5081b209567c31124a291d43290e9f8842dd5f47dc306ae05a68a1"},
             },
+            {
+                // main assumeutxo snapshot at height 132'142 (snapshot v9)
+                .height = 132'142,
+                .hash_serialized = AssumeutxoHash{uint256{"b8d8e09ed5a87ef2395013f4f9d7a2e1e45ae207c30ca6f9e349187926f8afdf"}},
+                .m_chain_tx_count = 169'351,
+                .blockhash = consteval_ctor(uint256{"6622f5f045e13160716e743255dd77684284c68d1feeab02844a8f5cb467ce3f"}),
+                .shielded_state_commitment = uint256{"5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792"},
+            },
+            {
+                // main assumeutxo snapshot at height 132'173 (snapshot v9)
+                .height = 132'173,
+                .hash_serialized = AssumeutxoHash{uint256{"088b124e34af88441ce485deb0418d92c090983253956cb6c7c0d8249a747be2"}},
+                .m_chain_tx_count = 169'410,
+                .blockhash = consteval_ctor(uint256{"010aad22cd3c10caf33c049b08c34c46c86ec812c74ec5962a477916850ffb5b"}),
+                .shielded_state_commitment = uint256{"5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792"},
+            },
+            {
+                // main assumeutxo snapshot at height 132'209 (snapshot v9)
+                .height = 132'209,
+                .hash_serialized = AssumeutxoHash{uint256{"56139bf25e3749650ec9f5608b417b0842fb99775b61b7433cfdee1768e40a0e"}},
+                .m_chain_tx_count = 169'454,
+                .blockhash = consteval_ctor(uint256{"9e6776ee8c5e8dceefcb108b429838be8bda3d66a6553d8b4c8cef613840c940"}),
+                .shielded_state_commitment = uint256{"5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792"},
+            },
         };
         chainTxData = ChainTxData{
             .nTime = 1781271685,
@@ -554,14 +590,15 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight =
+            BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
-        // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
-        // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
-        // post-fork regime. Aligned to the 125,000 sunset (DS-4 hardening): the cap activates at the
-        // same block the outflow-only rule engages, so there is no uncapped window between the sunset and
-        // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
-        // before it bites.
+        // v0.32.0-v0.32.12: shielded unshield (z->t) velocity cap from the 125,000
+        // sunset through block 134,999. The v0.32.11 minimum-cap floor still starts at
+        // 132,000, and v0.32.12 ends the quota at 135,000 after the recovery window has
+        // matured so remaining legacy exits are no longer rate-limited.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedUnshieldVelocityEndHeight = BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCap = BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP;
         consensus.nShieldedSettlementAnchorMaturity = 6;
@@ -735,14 +772,15 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight =
+            BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
-        // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
-        // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
-        // post-fork regime. Aligned to the 125,000 sunset (DS-4 hardening): the cap activates at the
-        // same block the outflow-only rule engages, so there is no uncapped window between the sunset and
-        // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
-        // before it bites.
+        // v0.32.0-v0.32.12: shielded unshield (z->t) velocity cap from the 125,000
+        // sunset through block 134,999. The v0.32.11 minimum-cap floor still starts at
+        // 132,000, and v0.32.12 ends the quota at 135,000 after the recovery window has
+        // matured so remaining legacy exits are no longer rate-limited.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedUnshieldVelocityEndHeight = BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCap = BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP;
         consensus.nShieldedSettlementAnchorMaturity = 6;
@@ -946,14 +984,15 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight =
+            BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
-        // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
-        // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
-        // post-fork regime. Aligned to the 125,000 sunset (DS-4 hardening): the cap activates at the
-        // same block the outflow-only rule engages, so there is no uncapped window between the sunset and
-        // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
-        // before it bites.
+        // v0.32.0-v0.32.12: shielded unshield (z->t) velocity cap from the 125,000
+        // sunset through block 134,999. The v0.32.11 minimum-cap floor still starts at
+        // 132,000, and v0.32.12 ends the quota at 135,000 after the recovery window has
+        // matured so remaining legacy exits are no longer rate-limited.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedUnshieldVelocityEndHeight = BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCap = BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP;
         consensus.nShieldedSettlementAnchorMaturity = 6;
@@ -1131,6 +1170,8 @@ public:
         // a functional test lowers it via -regtestshieldedunshieldvelocityactivationheight to exercise it.
         consensus.nShieldedUnshieldVelocityActivationHeight =
             opts.shielded_unshield_velocity_activation_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nShieldedUnshieldVelocityEndHeight =
+            opts.shielded_unshield_velocity_end_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedUnshieldVelocityMinCapHeight =
             opts.shielded_unshield_velocity_min_cap_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedUnshieldVelocityMinCap =
@@ -1143,6 +1184,8 @@ public:
             opts.shielded_sunset_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedDirectSendPublicFlowDisableHeight =
             opts.shielded_direct_send_public_flow_disable_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight =
+            opts.shielded_v2_send_zero_output_exit_activation_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedRecoveryExitActivationHeight =
             opts.shielded_recovery_exit_activation_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedRecoveryExitFrozenRoot =
@@ -1220,6 +1263,7 @@ public:
             opts.shielded_pool_credit_disable_height.has_value() ||
             opts.shielded_sunset_height.has_value() ||
             opts.shielded_direct_send_public_flow_disable_height.has_value() ||
+            opts.shielded_v2_send_zero_output_exit_activation_height.has_value() ||
             opts.reorg_protection_start_height.has_value() ||
             opts.empty_block_subsidy_penalty_height.has_value() ||
             opts.mldsa_disable_height.has_value();
@@ -1403,14 +1447,15 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight =
+            BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
-        // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
-        // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
-        // post-fork regime. Aligned to the 125,000 sunset (DS-4 hardening): the cap activates at the
-        // same block the outflow-only rule engages, so there is no uncapped window between the sunset and
-        // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
-        // before it bites.
+        // v0.32.0-v0.32.12: shielded unshield (z->t) velocity cap from the 125,000
+        // sunset through block 134,999. The v0.32.11 minimum-cap floor still starts at
+        // 132,000, and v0.32.12 ends the quota at 135,000 after the recovery window has
+        // matured so remaining legacy exits are no longer rate-limited.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedUnshieldVelocityEndHeight = BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCap = BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP;
         consensus.nShieldedSettlementAnchorMaturity = 6;
