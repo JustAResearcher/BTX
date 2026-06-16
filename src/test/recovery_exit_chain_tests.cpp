@@ -492,6 +492,49 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_mined_block_debits_pool_and_retires_identi
     BOOST_CHECK(chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
 }
 
+BOOST_FIXTURE_TEST_CASE(recovery_exit_disconnect_unwinds_retired_identifiers, RecoveryExitChainSetup)
+{
+    const ReVectors& v = Vectors();
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+
+    const CAmount initial_pool = 2 * v.note.value;
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(initial_pool));
+        BOOST_REQUIRE(!chainman.IsShieldedNullifierSpent(v.nullifier));
+        BOOST_REQUIRE(!chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
+    }
+
+    const CMutableTransaction rtx = BuildRecoveryExitTx();
+    const CBlock recovery_block = CreateAndProcessBlock({rtx},
+                                                        CScript() << OP_TRUE,
+                                                        /*chainstate=*/nullptr,
+                                                        /*use_mempool=*/false);
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveChain().Height(), kSunsetHeight);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveChain().Tip()->GetBlockHash(), recovery_block.GetHash());
+        BOOST_REQUIRE_EQUAL(chainman.GetShieldedPoolBalance(), initial_pool - v.note.value);
+        BOOST_REQUIRE(chainman.IsShieldedNullifierSpent(v.nullifier));
+        BOOST_REQUIRE(chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
+    }
+
+    BlockValidationState invalidate_state;
+    CBlockIndex* recovery_index = WITH_LOCK(cs_main,
+        return chainman.m_blockman.LookupBlockIndex(recovery_block.GetHash()));
+    BOOST_REQUIRE(recovery_index != nullptr);
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(invalidate_state, recovery_index));
+    BOOST_REQUIRE(invalidate_state.IsValid());
+
+    LOCK(cs_main);
+    BOOST_CHECK_EQUAL(chainman.ActiveChain().Height(), kSunsetHeight - 1);
+    BOOST_CHECK_EQUAL(chainman.GetShieldedPoolBalance(), initial_pool);
+    BOOST_CHECK(!chainman.IsShieldedNullifierSpent(v.nullifier));
+    BOOST_CHECK(!chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
+}
+
 BOOST_FIXTURE_TEST_CASE(recovery_exit_rebuild_preserves_retired_identifiers, RecoveryExitRebuildSetup)
 {
     const ReVectors& v = Vectors();
