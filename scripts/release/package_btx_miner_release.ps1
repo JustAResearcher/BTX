@@ -206,10 +206,18 @@ BTX_WORKER_PREFIX=my-rig
 BTX_SOLVER_THREADS=1
 BTX_PREPARE_WORKERS=2
 BTX_BATCH_SIZE=512
+BTX_CUDA_POOL_SLOTS=
 BTX_PREFETCH=8
 BTX_GPU_INPUTS=1
+BTX_WORKERS_PER_GPU=1
 BTX_NONCES_PER_SLICE=100000000000
 BTX_LOG_LEVEL=INFO
+
+# Local RTX 5090 safe desktop profile measured on CUDA 13 / SM120:
+#   BTX_SOLVER_THREADS=2
+#   BTX_BATCH_SIZE=768
+#   BTX_CUDA_POOL_SLOTS=4
+#   BTX_WORKERS_PER_GPU=3
 "@
 
     Write-Utf8NoBom (Join-Path $Dest "config.example.yaml") @"
@@ -277,7 +285,24 @@ CUDA_VISIBLE_DEVICES per process. Worker names are:
 
 <BTX_WORKER_PREFIX>-gpu0, <BTX_WORKER_PREFIX>-gpu1, ...
 
+Set BTX_WORKERS_PER_GPU to run multiple miner processes against each visible
+GPU. When BTX_WORKERS_PER_GPU is greater than 1, worker names are:
+
+<BTX_WORKER_PREFIX>-gpu0w0, <BTX_WORKER_PREFIX>-gpu0w1, ...
+
 Set BTX_SINGLE_GPU=1 to run only the current process/GPU.
+
+## RTX 5090 Tuning
+
+A local RTX 5090 desktop test reached about 341K N/s with:
+
+BTX_SOLVER_THREADS=2
+BTX_BATCH_SIZE=768
+BTX_CUDA_POOL_SLOTS=4
+BTX_WORKERS_PER_GPU=3
+
+Four workers measured only about 0.6% higher and was not worth the extra
+desktop load. Do not jump to high worker counts on an interactive PC.
 
 ## Binaries
 
@@ -334,6 +359,7 @@ BTX_WORKER="${BTX_WORKER:-${BTX_WORKER_PREFIX:-$(hostname)}-gpu${CUDA_VISIBLE_DE
 BTX_SOLVER_THREADS="${BTX_SOLVER_THREADS:-1}"
 BTX_PREPARE_WORKERS="${BTX_PREPARE_WORKERS:-2}"
 BTX_BATCH_SIZE="${BTX_BATCH_SIZE:-512}"
+BTX_CUDA_POOL_SLOTS="${BTX_CUDA_POOL_SLOTS:-}"
 BTX_PREFETCH="${BTX_PREFETCH:-8}"
 BTX_GPU_INPUTS="${BTX_GPU_INPUTS:-1}"
 BTX_NONCES_PER_SLICE="${BTX_NONCES_PER_SLICE:-100000000000}"
@@ -348,6 +374,9 @@ export DEXBTX_NO_SOLVER_AUTOUPDATE=1
 export DEXBTX_NO_WRAPPER_AUTOUPDATE=1
 export DEXBTX_NO_SOLVER_RECHECK=1
 export PYTHONPATH="$DIR/python${PYTHONPATH:+:$PYTHONPATH}"
+if [ -n "$BTX_CUDA_POOL_SLOTS" ]; then
+  export BTX_MATMUL_CUDA_POOL_SLOTS="$BTX_CUDA_POOL_SLOTS"
+fi
 
 exec python3 -m dexbtx_miner \
   --pool "$BTX_POOL" \
@@ -376,6 +405,17 @@ fi
 
 mkdir -p "$DIR/logs"
 prefix="${BTX_WORKER_PREFIX:-$(hostname)}"
+workers_per_gpu="${BTX_WORKERS_PER_GPU:-1}"
+case "$workers_per_gpu" in
+  ''|*[!0-9]*)
+    echo "BTX_WORKERS_PER_GPU must be a positive integer." >&2
+    exit 2
+    ;;
+esac
+if [ "$workers_per_gpu" -lt 1 ]; then
+  echo "BTX_WORKERS_PER_GPU must be at least 1." >&2
+  exit 2
+fi
 
 if command -v nvidia-smi >/dev/null 2>&1; then
   gpu_count="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)"
@@ -397,17 +437,30 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 i=0
+started=0
 while [ "$i" -lt "$gpu_count" ]; do
-  (
-    export CUDA_VISIBLE_DEVICES="$i"
-    export BTX_WORKER="${prefix}-gpu${i}"
-    exec "$DIR/run-one.sh"
-  ) >> "$DIR/logs/gpu${i}.log" 2>&1 &
-  pids="$pids $!"
+  w=0
+  while [ "$w" -lt "$workers_per_gpu" ]; do
+    if [ "$workers_per_gpu" -eq 1 ]; then
+      worker="${prefix}-gpu${i}"
+      log_name="gpu${i}"
+    else
+      worker="${prefix}-gpu${i}w${w}"
+      log_name="gpu${i}w${w}"
+    fi
+    (
+      export CUDA_VISIBLE_DEVICES="$i"
+      export BTX_WORKER="$worker"
+      exec "$DIR/run-one.sh"
+    ) >> "$DIR/logs/${log_name}.log" 2>&1 &
+    pids="$pids $!"
+    started=$((started + 1))
+    w=$((w + 1))
+  done
   i=$((i + 1))
 done
 
-echo "Started $gpu_count BTX miner process(es). Logs are in $DIR/logs."
+echo "Started $started BTX miner process(es) across $gpu_count GPU(s). Logs are in $DIR/logs."
 wait -n
 status=$?
 cleanup
@@ -457,8 +510,10 @@ BTX_WORKER_PREFIX=$worker
 BTX_SOLVER_THREADS=${BTX_SOLVER_THREADS:-1}
 BTX_PREPARE_WORKERS=${BTX_PREPARE_WORKERS:-2}
 BTX_BATCH_SIZE=${BTX_BATCH_SIZE:-512}
+BTX_CUDA_POOL_SLOTS=${BTX_CUDA_POOL_SLOTS:-}
 BTX_PREFETCH=${BTX_PREFETCH:-8}
 BTX_GPU_INPUTS=${BTX_GPU_INPUTS:-1}
+BTX_WORKERS_PER_GPU=${BTX_WORKERS_PER_GPU:-1}
 BTX_NONCES_PER_SLICE=${BTX_NONCES_PER_SLICE:-100000000000}
 BTX_LOG_LEVEL=${BTX_LOG_LEVEL:-INFO}
 EOF
@@ -529,6 +584,7 @@ param(
     [int]$Threads = $(if ($env:BTX_SOLVER_THREADS) { [int]$env:BTX_SOLVER_THREADS } else { 1 }),
     [int]$PrepareWorkers = $(if ($env:BTX_PREPARE_WORKERS) { [int]$env:BTX_PREPARE_WORKERS } else { 2 }),
     [int]$BatchSize = $(if ($env:BTX_BATCH_SIZE) { [int]$env:BTX_BATCH_SIZE } else { 512 }),
+    [string]$CudaPoolSlots = $env:BTX_CUDA_POOL_SLOTS,
     [int]$Prefetch = $(if ($env:BTX_PREFETCH) { [int]$env:BTX_PREFETCH } else { 8 }),
     [int]$GpuInputs = $(if ($env:BTX_GPU_INPUTS) { [int]$env:BTX_GPU_INPUTS } else { 1 }),
     [string]$NoncesPerSlice = $(if ($env:BTX_NONCES_PER_SLICE) { $env:BTX_NONCES_PER_SLICE } else { "100000000000" }),
@@ -557,6 +613,7 @@ if (!$Worker) {
     $Worker = "$prefix-gpu$suffix"
 }
 if ($Gpu) { $env:CUDA_VISIBLE_DEVICES = $Gpu }
+if ($CudaPoolSlots) { $env:BTX_MATMUL_CUDA_POOL_SLOTS = $CudaPoolSlots }
 
 $env:DEXBTX_NO_SOLVER_AUTOUPDATE = "1"
 $env:DEXBTX_NO_WRAPPER_AUTOUPDATE = "1"
@@ -592,6 +649,7 @@ param(
     [string]$Wallet = $env:BTX_WALLET,
     [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "stratum.minebtx.com:3333" }),
     [string]$WorkerPrefix = $env:BTX_WORKER_PREFIX,
+    [int]$WorkersPerGpu = $(if ($env:BTX_WORKERS_PER_GPU) { [int]$env:BTX_WORKERS_PER_GPU } else { 1 }),
     [switch]$SingleGpu
 )
 
@@ -608,9 +666,11 @@ if (Test-Path $envFile) {
     if (!$Wallet) { $Wallet = $env:BTX_WALLET }
     if (!$WorkerPrefix) { $WorkerPrefix = $env:BTX_WORKER_PREFIX }
     if ($env:BTX_POOL) { $Pool = $env:BTX_POOL }
+    if ($env:BTX_WORKERS_PER_GPU) { $WorkersPerGpu = [int]$env:BTX_WORKERS_PER_GPU }
 }
 if (!$Wallet) { throw "Set BTX_WALLET in miner.env or pass -Wallet." }
 if (!$WorkerPrefix) { $WorkerPrefix = $env:COMPUTERNAME.ToLowerInvariant() }
+if ($WorkersPerGpu -lt 1) { throw "BTX_WORKERS_PER_GPU must be at least 1." }
 
 if ($SingleGpu -or $env:BTX_SINGLE_GPU -eq "1") {
     & (Join-Path $root "run-one.ps1") -Wallet $Wallet -Pool $Pool -Worker "$WorkerPrefix-gpu0"
@@ -632,19 +692,28 @@ $logs = Join-Path $root "logs"
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
 $procs = @()
 for ($i = 0; $i -lt $gpuLines.Count; $i++) {
-    $out = Join-Path $logs "gpu$i.log"
-    $err = Join-Path $logs "gpu$i.err.log"
-    $args = @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", "`"$(Join-Path $root 'run-one.ps1')`"",
-        "-Wallet", "`"$Wallet`"",
-        "-Pool", "`"$Pool`"",
-        "-Worker", "`"$WorkerPrefix-gpu$i`"",
-        "-Gpu", "`"$i`""
-    )
-    $procs += Start-Process -FilePath "powershell.exe" -ArgumentList $args -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -WindowStyle Hidden
+    for ($w = 0; $w -lt $WorkersPerGpu; $w++) {
+        if ($WorkersPerGpu -eq 1) {
+            $worker = "$WorkerPrefix-gpu$i"
+            $logName = "gpu$i"
+        } else {
+            $worker = "${WorkerPrefix}-gpu${i}w$w"
+            $logName = "gpu${i}w$w"
+        }
+        $out = Join-Path $logs "$logName.log"
+        $err = Join-Path $logs "$logName.err.log"
+        $args = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", "`"$(Join-Path $root 'run-one.ps1')`"",
+            "-Wallet", "`"$Wallet`"",
+            "-Pool", "`"$Pool`"",
+            "-Worker", "`"$worker`"",
+            "-Gpu", "`"$i`""
+        )
+        $procs += Start-Process -FilePath "powershell.exe" -ArgumentList $args -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -WindowStyle Hidden
+    }
 }
-Write-Host "Started $($procs.Count) BTX miner process(es). Logs are in $logs."
+Write-Host "Started $($procs.Count) BTX miner process(es) across $($gpuLines.Count) GPU(s). Logs are in $logs."
 try {
     Wait-Process -Id ($procs.Id)
 } finally {
@@ -700,8 +769,25 @@ Pool endpoint: stratum+tcp://stratum.minebtx.com:3333
 
 CUDA target: Linux/HiveOS $LinuxCudaLabel / Windows $WindowsCudaLabel / $ArchDisplay
 
-The launchers start one miner process per visible NVIDIA GPU and name workers
-as <BTX_WORKER_PREFIX>-gpuN.
+## GPU Coverage
+
+- NVIDIA 30-series Ampere support via SM86 device code.
+- NVIDIA 40-series Ada support via SM89 device code, including the optimized
+  4070 Ti SUPER work and default 40-series launcher profile.
+- NVIDIA 50-series Blackwell support via SM120 device code, plus the documented
+  RTX 5090 safe desktop profile.
+
+The launchers start one miner process per visible NVIDIA GPU by default and
+name workers as <BTX_WORKER_PREFIX>-gpuN. Set BTX_WORKERS_PER_GPU to run
+multiple processes per GPU; those workers are named
+<BTX_WORKER_PREFIX>-gpuNwM.
+
+Local RTX 5090 safe desktop profile:
+
+- BTX_SOLVER_THREADS=2
+- BTX_BATCH_SIZE=768
+- BTX_CUDA_POOL_SLOTS=4
+- BTX_WORKERS_PER_GPU=3
 
 ## Validation
 
