@@ -919,6 +919,22 @@ if(BUILD_UTIL)
   endif()
   install_binary_component(btx-matmul-cost-bench)
 
+  add_executable(btx-gbt-solve btx-gbt-solve.cpp)
+  target_include_directories(btx-gbt-solve PRIVATE
+    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
+  )
+  target_link_libraries(btx-gbt-solve
+    core_interface
+  )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(btx-gbt-solve -Wl,--whole-archive bitcoin_common -Wl,--no-whole-archive ${BTX_NODE_ARCHIVES})
+  else()
+    target_link_libraries(btx-gbt-solve
+      bitcoin_shielded
+    )
+  endif()
+  install_binary_component(btx-gbt-solve)
+
   add_executable(btx-genesis btx-genesis.cpp)
   target_link_libraries(btx-genesis
     core_interface

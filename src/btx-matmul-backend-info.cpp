@@ -262,6 +262,8 @@ int main(int argc, char* argv[])
     cuda_kernel_obj.pushKV("device_prepared_inputs_supported", cuda_kernel_profile.device_prepared_inputs_supported);
     cuda_kernel_obj.pushKV("device_prepared_inputs_default", cuda_kernel_profile.device_prepared_inputs_default);
     cuda_kernel_obj.pushKV("device_prepared_inputs_enabled", cuda_kernel_profile.device_prepared_inputs_enabled);
+    cuda_kernel_obj.pushKV("shared_compress_rhs_supported", cuda_kernel_profile.shared_compress_rhs_supported);
+    cuda_kernel_obj.pushKV("shared_compress_rhs_enabled", cuda_kernel_profile.shared_compress_rhs_enabled);
     cuda_kernel_obj.pushKV("execution_model", cuda_kernel_profile.execution_model);
     cuda_kernel_obj.pushKV("staging_strategy", cuda_kernel_profile.staging_strategy);
     cuda_kernel_obj.pushKV("device_prepared_inputs_policy", cuda_kernel_profile.device_prepared_inputs_policy);

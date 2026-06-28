@@ -6,6 +6,7 @@
 #include <chainparams.h>
 #include <common/args.h>
 #include <cuda/matmul_accel.h>
+#include <cuda/oracle_accel.h>
 #include <matmul/backend_capabilities.h>
 #include <matmul/accelerated_solver.h>
 #include <metal/matmul_accel.h>
@@ -41,6 +42,7 @@ constexpr uint32_t MAINNET_LIVE_LIKE_NBITS{0x1e063c74U};
 
 struct Options {
     uint32_t iterations{8};
+    uint32_t warmup_iterations{0};
     uint64_t max_tries{2048};
     uint32_t n{512};
     uint32_t b{16};
@@ -62,6 +64,7 @@ struct Options {
     std::optional<std::string> prepare_workers_override;
     std::optional<std::string> pool_slots_override;
     std::optional<std::string> solver_threads_override;
+    bool per_iteration{false};
 };
 
 std::optional<uint64_t> ParseUintArg(std::string_view text)
@@ -97,7 +100,7 @@ uint256 ParseUint256(std::string_view hex)
 void PrintUsage(std::ostream& out)
 {
     out << "Usage: btx-matmul-solve-bench"
-        << " [--iterations <count>] [--tries <count>]"
+        << " [--iterations <count>] [--warmup <count>] [--tries <count>]"
         << " [--n <dim>] [--b <block>] [--r <rank>]"
         << " [--nbits <compact>] [--epsilon-bits <count>]"
         << " [--block-height <height>] [--nonce-seed-height <height>]"
@@ -107,7 +110,8 @@ void PrintUsage(std::ostream& out)
         << " [--backend <cpu|metal|cuda|mlx>]"
         << " [--async <0|1>] [--gpu-inputs <0|1>]"
         << " [--batch-size <count>] [--digest-slice-size <count>] [--prefetch-depth <count>] [--prepare-workers <count>]"
-        << " [--pool-slots <count>] [--solver-threads <count>]" << std::endl;
+        << " [--pool-slots <count>] [--solver-threads <count>]"
+        << " [--per-iteration]" << std::endl;
 }
 
 bool ParseArgs(int argc, char* argv[], Options& options)
@@ -185,6 +189,9 @@ bool ParseArgs(int argc, char* argv[], Options& options)
         if (arg == "--iterations" || arg.rfind("--iterations=", 0) == 0) {
             consumed = true;
             if (!parse_kv("--iterations", [&](std::string_view value) { return parse_uint32("--iterations", value, options.iterations); })) return false;
+        } else if (arg == "--warmup" || arg.rfind("--warmup=", 0) == 0) {
+            consumed = true;
+            if (!parse_kv("--warmup", [&](std::string_view value) { return parse_uint32_allow_zero("--warmup", value, options.warmup_iterations); })) return false;
         } else if (arg == "--tries" || arg.rfind("--tries=", 0) == 0) {
             consumed = true;
             if (!parse_kv("--tries", [&](std::string_view value) { return parse_uint64("--tries", value, options.max_tries); })) return false;
@@ -316,6 +323,9 @@ bool ParseArgs(int argc, char* argv[], Options& options)
                     options.solver_threads_override = std::string{value};
                     return true;
                 })) return false;
+        } else if (arg == "--per-iteration") {
+            consumed = true;
+            options.per_iteration = true;
         }
 
         if (!consumed) {
@@ -409,6 +419,331 @@ UniValue SummarizeSeries(const std::vector<double>& values)
     return out;
 }
 
+double PerSecond(uint64_t count, double elapsed_s)
+{
+    return elapsed_s > 0.0 ? static_cast<double>(count) / elapsed_s : 0.0;
+}
+
+uint64_t CounterDelta(uint64_t before, uint64_t after)
+{
+    return after >= before ? after - before : after;
+}
+
+MatMulGpuPreHashScanStats DeltaGpuPreHashScanStats(const MatMulGpuPreHashScanStats& before,
+                                                   const MatMulGpuPreHashScanStats& after)
+{
+    MatMulGpuPreHashScanStats out;
+    out.attempts = CounterDelta(before.attempts, after.attempts);
+    out.successes = CounterDelta(before.successes, after.successes);
+    out.failures = CounterDelta(before.failures, after.failures);
+    out.metal_fallbacks_to_cpu = CounterDelta(before.metal_fallbacks_to_cpu, after.metal_fallbacks_to_cpu);
+    out.cuda_fallbacks_to_cpu = CounterDelta(before.cuda_fallbacks_to_cpu, after.cuda_fallbacks_to_cpu);
+    out.total_elapsed_us = CounterDelta(before.total_elapsed_us, after.total_elapsed_us);
+    out.last_elapsed_us = after.last_elapsed_us;
+    out.max_elapsed_us = after.max_elapsed_us;
+    out.total_scanned_count = CounterDelta(before.total_scanned_count, after.total_scanned_count);
+    out.last_scanned_count = after.last_scanned_count;
+    out.total_pass_flags = CounterDelta(before.total_pass_flags, after.total_pass_flags);
+    out.last_pass_flags = after.last_pass_flags;
+    out.total_selected_headers = CounterDelta(before.total_selected_headers, after.total_selected_headers);
+    out.last_selected_headers = after.last_selected_headers;
+    out.last_scan_limit = after.last_scan_limit;
+    out.last_backend = after.last_backend;
+    out.last_error = after.last_error;
+    return out;
+}
+
+MatMulDigestCompareStats DeltaDigestCompareStats(const MatMulDigestCompareStats& before,
+                                                 const MatMulDigestCompareStats& after)
+{
+    MatMulDigestCompareStats out;
+    out.enabled = after.enabled;
+    out.compared_attempts = CounterDelta(before.compared_attempts, after.compared_attempts);
+    out.first_divergence_captured = after.first_divergence_captured && !before.first_divergence_captured;
+    if (out.first_divergence_captured) {
+        out.first_divergence_nonce64 = after.first_divergence_nonce64;
+        out.first_divergence_nonce32 = after.first_divergence_nonce32;
+        out.first_divergence_header_hash = after.first_divergence_header_hash;
+        out.first_divergence_backend_digest = after.first_divergence_backend_digest;
+        out.first_divergence_cpu_digest = after.first_divergence_cpu_digest;
+    }
+    return out;
+}
+
+matmul::accelerated::BackendRuntimeStats DeltaBackendRuntimeStats(
+    const matmul::accelerated::BackendRuntimeStats& before,
+    const matmul::accelerated::BackendRuntimeStats& after)
+{
+    matmul::accelerated::BackendRuntimeStats out;
+    out.digest_requests = CounterDelta(before.digest_requests, after.digest_requests);
+    out.requested_cpu = CounterDelta(before.requested_cpu, after.requested_cpu);
+    out.requested_metal = CounterDelta(before.requested_metal, after.requested_metal);
+    out.requested_cuda = CounterDelta(before.requested_cuda, after.requested_cuda);
+    out.requested_unknown = CounterDelta(before.requested_unknown, after.requested_unknown);
+    out.metal_successes = CounterDelta(before.metal_successes, after.metal_successes);
+    out.metal_fallbacks_to_cpu = CounterDelta(before.metal_fallbacks_to_cpu, after.metal_fallbacks_to_cpu);
+    out.metal_digest_mismatches = CounterDelta(before.metal_digest_mismatches, after.metal_digest_mismatches);
+    out.metal_retry_without_uploaded_base_attempts = CounterDelta(before.metal_retry_without_uploaded_base_attempts, after.metal_retry_without_uploaded_base_attempts);
+    out.metal_retry_without_uploaded_base_successes = CounterDelta(before.metal_retry_without_uploaded_base_successes, after.metal_retry_without_uploaded_base_successes);
+    out.cuda_successes = CounterDelta(before.cuda_successes, after.cuda_successes);
+    out.cuda_fallbacks_to_cpu = CounterDelta(before.cuda_fallbacks_to_cpu, after.cuda_fallbacks_to_cpu);
+    out.gpu_input_generation_attempts = CounterDelta(before.gpu_input_generation_attempts, after.gpu_input_generation_attempts);
+    out.gpu_input_generation_successes = CounterDelta(before.gpu_input_generation_successes, after.gpu_input_generation_successes);
+    out.gpu_input_generation_failures = CounterDelta(before.gpu_input_generation_failures, after.gpu_input_generation_failures);
+    out.gpu_input_auto_disabled_skips = CounterDelta(before.gpu_input_auto_disabled_skips, after.gpu_input_auto_disabled_skips);
+    out.cuda_variable_base_batches = CounterDelta(before.cuda_variable_base_batches, after.cuda_variable_base_batches);
+    out.cuda_variable_base_last_device_us = after.cuda_variable_base_last_device_us;
+    out.cuda_variable_base_last_host_digest_us = after.cuda_variable_base_last_host_digest_us;
+    out.cuda_variable_base_total_host_digest_us = CounterDelta(before.cuda_variable_base_total_host_digest_us, after.cuda_variable_base_total_host_digest_us);
+    out.gpu_input_auto_disabled = after.gpu_input_auto_disabled;
+    out.last_metal_fallback_error = after.last_metal_fallback_error;
+    out.last_cuda_fallback_error = after.last_cuda_fallback_error;
+    out.last_gpu_input_error = after.last_gpu_input_error;
+    return out;
+}
+
+UniValue BuildPipelineStatsObject(const MatMulSolvePipelineStats& stats)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("parallel_solver_enabled", stats.parallel_solver_enabled);
+    obj.pushKV("parallel_solver_threads", stats.parallel_solver_threads);
+    obj.pushKV("async_prepare_enabled", stats.async_prepare_enabled);
+    obj.pushKV("cpu_confirm_candidates", stats.cpu_confirm_candidates);
+    obj.pushKV("prepared_inputs", stats.prepared_inputs);
+    obj.pushKV("overlapped_prepares", stats.overlapped_prepares);
+    obj.pushKV("prefetched_batches", stats.prefetched_batches);
+    obj.pushKV("prefetched_inputs", stats.prefetched_inputs);
+    obj.pushKV("prefetch_depth", stats.prefetch_depth);
+    obj.pushKV("async_prepare_submissions", stats.async_prepare_submissions);
+    obj.pushKV("async_prepare_completions", stats.async_prepare_completions);
+    obj.pushKV("async_prepare_worker_threads", stats.async_prepare_worker_threads);
+    obj.pushKV("batch_size", stats.batch_size);
+    obj.pushKV("batched_digest_requests", stats.batched_digest_requests);
+    obj.pushKV("batched_nonce_attempts", stats.batched_nonce_attempts);
+    return obj;
+}
+
+UniValue BuildRuntimeStatsObject(const MatMulSolveRuntimeStats& stats)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("attempts", stats.attempts);
+    obj.pushKV("solved_attempts", stats.solved_attempts);
+    obj.pushKV("failed_attempts", stats.failed_attempts);
+    obj.pushKV("total_elapsed_us", stats.total_elapsed_us);
+    obj.pushKV("last_elapsed_us", stats.last_elapsed_us);
+    obj.pushKV("max_elapsed_us", stats.max_elapsed_us);
+    return obj;
+}
+
+UniValue BuildDigestCompareStatsObject(const MatMulDigestCompareStats& stats)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("enabled", stats.enabled);
+    obj.pushKV("compared_attempts", stats.compared_attempts);
+    obj.pushKV("first_divergence_captured", stats.first_divergence_captured);
+    obj.pushKV("first_divergence_nonce64", stats.first_divergence_nonce64);
+    obj.pushKV("first_divergence_nonce32", stats.first_divergence_nonce32);
+    obj.pushKV("first_divergence_header_hash", stats.first_divergence_header_hash);
+    obj.pushKV("first_divergence_backend_digest", stats.first_divergence_backend_digest);
+    obj.pushKV("first_divergence_cpu_digest", stats.first_divergence_cpu_digest);
+    return obj;
+}
+
+UniValue BuildGpuPreHashScanStatsObject(const MatMulGpuPreHashScanStats& stats)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("attempts", stats.attempts);
+    obj.pushKV("successes", stats.successes);
+    obj.pushKV("failures", stats.failures);
+    obj.pushKV("metal_fallbacks_to_cpu", stats.metal_fallbacks_to_cpu);
+    obj.pushKV("cuda_fallbacks_to_cpu", stats.cuda_fallbacks_to_cpu);
+    obj.pushKV("total_elapsed_us", stats.total_elapsed_us);
+    obj.pushKV("last_elapsed_us", stats.last_elapsed_us);
+    obj.pushKV("max_elapsed_us", stats.max_elapsed_us);
+    obj.pushKV("total_scanned_count", stats.total_scanned_count);
+    obj.pushKV("last_scanned_count", stats.last_scanned_count);
+    obj.pushKV("total_pass_flags", stats.total_pass_flags);
+    obj.pushKV("last_pass_flags", stats.last_pass_flags);
+    obj.pushKV("total_selected_headers", stats.total_selected_headers);
+    obj.pushKV("last_selected_headers", stats.last_selected_headers);
+    obj.pushKV("last_scan_limit", stats.last_scan_limit);
+    obj.pushKV("last_backend", stats.last_backend);
+    obj.pushKV("last_error", stats.last_error);
+    return obj;
+}
+
+UniValue BuildBackendRuntimeStatsObject(const matmul::accelerated::BackendRuntimeStats& stats)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("digest_requests", stats.digest_requests);
+    obj.pushKV("requested_cpu", stats.requested_cpu);
+    obj.pushKV("requested_metal", stats.requested_metal);
+    obj.pushKV("requested_cuda", stats.requested_cuda);
+    obj.pushKV("requested_unknown", stats.requested_unknown);
+    obj.pushKV("metal_successes", stats.metal_successes);
+    obj.pushKV("metal_fallbacks_to_cpu", stats.metal_fallbacks_to_cpu);
+    obj.pushKV("metal_digest_mismatches", stats.metal_digest_mismatches);
+    obj.pushKV("metal_retry_without_uploaded_base_attempts", stats.metal_retry_without_uploaded_base_attempts);
+    obj.pushKV("metal_retry_without_uploaded_base_successes", stats.metal_retry_without_uploaded_base_successes);
+    obj.pushKV("cuda_successes", stats.cuda_successes);
+    obj.pushKV("cuda_fallbacks_to_cpu", stats.cuda_fallbacks_to_cpu);
+    obj.pushKV("gpu_input_generation_attempts", stats.gpu_input_generation_attempts);
+    obj.pushKV("gpu_input_generation_successes", stats.gpu_input_generation_successes);
+    obj.pushKV("gpu_input_generation_failures", stats.gpu_input_generation_failures);
+    obj.pushKV("gpu_input_auto_disabled_skips", stats.gpu_input_auto_disabled_skips);
+    obj.pushKV("gpu_input_auto_disabled", stats.gpu_input_auto_disabled);
+    obj.pushKV("cuda_variable_base_batches", stats.cuda_variable_base_batches);
+    obj.pushKV("cuda_variable_base_last_device_us", stats.cuda_variable_base_last_device_us);
+    obj.pushKV("cuda_variable_base_last_host_digest_us", stats.cuda_variable_base_last_host_digest_us);
+    obj.pushKV("cuda_variable_base_total_host_digest_us", stats.cuda_variable_base_total_host_digest_us);
+    obj.pushKV("last_metal_fallback_error", stats.last_metal_fallback_error);
+    obj.pushKV("last_cuda_fallback_error", stats.last_cuda_fallback_error);
+    obj.pushKV("last_gpu_input_error", stats.last_gpu_input_error);
+    return obj;
+}
+
+UniValue BuildCudaProfilingStatsObject(const btx::cuda::MatMulProfilingStats& stats)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("available", stats.available);
+    obj.pushKV("samples", stats.samples);
+    obj.pushKV("last_n", stats.last_n);
+    obj.pushKV("last_b", stats.last_b);
+    obj.pushKV("last_r", stats.last_r);
+    obj.pushKV("last_batch_size", stats.last_batch_size);
+    obj.pushKV("last_host_stage_us", stats.last_host_stage_us);
+    obj.pushKV("last_submit_h2d_us", stats.last_submit_h2d_us);
+    obj.pushKV("last_submit_d2d_us", stats.last_submit_d2d_us);
+    obj.pushKV("last_stream_wait_event_us", stats.last_stream_wait_event_us);
+    obj.pushKV("last_launch_build_perturbed_us", stats.last_launch_build_perturbed_us);
+    obj.pushKV("last_launch_finalize_us", stats.last_launch_finalize_us);
+    obj.pushKV("last_submit_d2h_us", stats.last_submit_d2h_us);
+    obj.pushKV("last_stream_sync_us", stats.last_stream_sync_us);
+    obj.pushKV("last_total_wall_ms", stats.last_total_wall_ms);
+    obj.pushKV("last_event_build_a_device_us", stats.last_event_build_a_device_us);
+    obj.pushKV("last_event_build_b_midstate_device_us", stats.last_event_build_b_midstate_device_us);
+    obj.pushKV("last_event_rhs_device_us", stats.last_event_rhs_device_us);
+    obj.pushKV("last_event_words_device_us", stats.last_event_words_device_us);
+    obj.pushKV("last_event_digest_device_us", stats.last_event_digest_device_us);
+    obj.pushKV("last_used_low_rank_path", stats.last_used_low_rank_path);
+    obj.pushKV("last_used_device_prepared_inputs", stats.last_used_device_prepared_inputs);
+    obj.pushKV("last_used_pinned_host_staging", stats.last_used_pinned_host_staging);
+    obj.pushKV("last_base_matrix_cache_hit", stats.last_base_matrix_cache_hit);
+    obj.pushKV("last_mode", stats.last_mode);
+    obj.pushKV("reason", stats.reason);
+    return obj;
+}
+
+UniValue BuildCudaOracleProfileObject(const btx::cuda::MatMulInputGenerationProfile& stats)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("available", stats.available);
+    obj.pushKV("pool_initialized", stats.pool_initialized);
+    obj.pushKV("samples", stats.samples);
+    obj.pushKV("allocation_events", stats.allocation_events);
+    obj.pushKV("reuse_events", stats.reuse_events);
+    obj.pushKV("last_encode_noise_us", stats.last_encode_noise_us);
+    obj.pushKV("last_encode_compress_us", stats.last_encode_compress_us);
+    obj.pushKV("last_submit_wait_us", stats.last_submit_wait_us);
+    obj.pushKV("last_gpu_generation_ms", stats.last_gpu_generation_ms);
+    obj.pushKV("library_source", stats.library_source);
+    obj.pushKV("reason", stats.reason);
+    return obj;
+}
+
+void AddPipelineStats(MatMulSolvePipelineStats& total, const MatMulSolvePipelineStats& stats)
+{
+    total.parallel_solver_enabled = total.parallel_solver_enabled || stats.parallel_solver_enabled;
+    total.parallel_solver_threads = stats.parallel_solver_threads;
+    total.async_prepare_enabled = total.async_prepare_enabled || stats.async_prepare_enabled;
+    total.cpu_confirm_candidates = total.cpu_confirm_candidates || stats.cpu_confirm_candidates;
+    total.prepared_inputs += stats.prepared_inputs;
+    total.overlapped_prepares += stats.overlapped_prepares;
+    total.prefetched_batches += stats.prefetched_batches;
+    total.prefetched_inputs += stats.prefetched_inputs;
+    total.async_prepare_submissions += stats.async_prepare_submissions;
+    total.async_prepare_completions += stats.async_prepare_completions;
+    total.async_prepare_worker_threads = stats.async_prepare_worker_threads;
+    total.prefetch_depth = stats.prefetch_depth;
+    total.batch_size = stats.batch_size;
+    total.batched_digest_requests += stats.batched_digest_requests;
+    total.batched_nonce_attempts += stats.batched_nonce_attempts;
+}
+
+void AddRuntimeStats(MatMulSolveRuntimeStats& total, const MatMulSolveRuntimeStats& stats)
+{
+    total.attempts += stats.attempts;
+    total.solved_attempts += stats.solved_attempts;
+    total.failed_attempts += stats.failed_attempts;
+    total.total_elapsed_us += stats.total_elapsed_us;
+    total.last_elapsed_us = stats.last_elapsed_us;
+    total.max_elapsed_us = std::max(total.max_elapsed_us, stats.max_elapsed_us);
+}
+
+void AddGpuPreHashScanStats(MatMulGpuPreHashScanStats& total, const MatMulGpuPreHashScanStats& stats)
+{
+    total.attempts += stats.attempts;
+    total.successes += stats.successes;
+    total.failures += stats.failures;
+    total.metal_fallbacks_to_cpu += stats.metal_fallbacks_to_cpu;
+    total.cuda_fallbacks_to_cpu += stats.cuda_fallbacks_to_cpu;
+    total.total_elapsed_us += stats.total_elapsed_us;
+    total.last_elapsed_us = stats.last_elapsed_us;
+    total.max_elapsed_us = std::max(total.max_elapsed_us, stats.max_elapsed_us);
+    total.total_scanned_count += stats.total_scanned_count;
+    total.last_scanned_count = stats.last_scanned_count;
+    total.total_pass_flags += stats.total_pass_flags;
+    total.last_pass_flags = stats.last_pass_flags;
+    total.total_selected_headers += stats.total_selected_headers;
+    total.last_selected_headers = stats.last_selected_headers;
+    total.last_scan_limit = stats.last_scan_limit;
+    total.last_backend = stats.last_backend;
+    total.last_error = stats.last_error;
+}
+
+void AddDigestCompareStats(MatMulDigestCompareStats& total, const MatMulDigestCompareStats& stats)
+{
+    total.enabled = total.enabled || stats.enabled;
+    total.compared_attempts += stats.compared_attempts;
+    if (!total.first_divergence_captured && stats.first_divergence_captured) {
+        total.first_divergence_captured = true;
+        total.first_divergence_nonce64 = stats.first_divergence_nonce64;
+        total.first_divergence_nonce32 = stats.first_divergence_nonce32;
+        total.first_divergence_header_hash = stats.first_divergence_header_hash;
+        total.first_divergence_backend_digest = stats.first_divergence_backend_digest;
+        total.first_divergence_cpu_digest = stats.first_divergence_cpu_digest;
+    }
+}
+
+void AddBackendRuntimeStats(matmul::accelerated::BackendRuntimeStats& total,
+                            const matmul::accelerated::BackendRuntimeStats& stats)
+{
+    total.digest_requests += stats.digest_requests;
+    total.requested_cpu += stats.requested_cpu;
+    total.requested_metal += stats.requested_metal;
+    total.requested_cuda += stats.requested_cuda;
+    total.requested_unknown += stats.requested_unknown;
+    total.metal_successes += stats.metal_successes;
+    total.metal_fallbacks_to_cpu += stats.metal_fallbacks_to_cpu;
+    total.metal_digest_mismatches += stats.metal_digest_mismatches;
+    total.metal_retry_without_uploaded_base_attempts += stats.metal_retry_without_uploaded_base_attempts;
+    total.metal_retry_without_uploaded_base_successes += stats.metal_retry_without_uploaded_base_successes;
+    total.cuda_successes += stats.cuda_successes;
+    total.cuda_fallbacks_to_cpu += stats.cuda_fallbacks_to_cpu;
+    total.gpu_input_generation_attempts += stats.gpu_input_generation_attempts;
+    total.gpu_input_generation_successes += stats.gpu_input_generation_successes;
+    total.gpu_input_generation_failures += stats.gpu_input_generation_failures;
+    total.gpu_input_auto_disabled_skips += stats.gpu_input_auto_disabled_skips;
+    total.cuda_variable_base_batches += stats.cuda_variable_base_batches;
+    total.cuda_variable_base_last_device_us = stats.cuda_variable_base_last_device_us;
+    total.cuda_variable_base_last_host_digest_us = stats.cuda_variable_base_last_host_digest_us;
+    total.cuda_variable_base_total_host_digest_us += stats.cuda_variable_base_total_host_digest_us;
+    total.gpu_input_auto_disabled = total.gpu_input_auto_disabled || stats.gpu_input_auto_disabled;
+    total.last_metal_fallback_error = stats.last_metal_fallback_error;
+    total.last_cuda_fallback_error = stats.last_cuda_fallback_error;
+    total.last_gpu_input_error = stats.last_gpu_input_error;
+}
+
 CBlockHeader BuildCandidateHeader(uint32_t n, uint32_t nbits, uint64_t nonce64)
 {
     CBlockHeader candidate{};
@@ -429,11 +764,29 @@ CBlockHeader BuildCandidateHeader(uint32_t n, uint32_t nbits, uint64_t nonce64)
 struct IterationResult {
     double elapsed_s{0.0};
     double nonces_per_sec{0.0};
+    uint64_t attempts{0};
     uint64_t solved_count{0};
+    MatMulSolvePipelineStats pipeline{};
+    MatMulSolveRuntimeStats runtime{};
+    MatMulGpuPreHashScanStats gpu_prehash_scan{};
+    MatMulDigestCompareStats digest_compare{};
+    matmul::accelerated::BackendRuntimeStats backend_runtime{};
+    btx::cuda::MatMulProfilingStats cuda_profiling{};
+    uint64_t cuda_profiling_sample_delta{0};
+    btx::cuda::MatMulInputGenerationProfile cuda_oracle_profile{};
+    uint64_t cuda_oracle_sample_delta{0};
+    uint64_t cuda_oracle_allocation_delta{0};
+    uint64_t cuda_oracle_reuse_delta{0};
 };
 
 IterationResult RunSolveIteration(const Options& options, const Consensus::Params& consensus, uint32_t iteration_index)
 {
+    const auto prehash_before = ProbeMatMulGpuPreHashScanStats();
+    const auto digest_compare_before = ProbeMatMulDigestCompareStats();
+    const auto backend_runtime_before = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+    const auto cuda_profiling_before = btx::cuda::ProbeMatMulProfilingStats();
+    const auto cuda_oracle_before = btx::cuda::ProbeMatMulInputGenerationProfile();
+
     ResetMatMulSolvePipelineStats();
     ResetMatMulSolveRuntimeStats();
 
@@ -456,7 +809,8 @@ IterationResult RunSolveIteration(const Options& options, const Consensus::Param
                 options.parent_mtp_override)) {
             ++result.solved_count;
         }
-        result.nonces_per_sec = static_cast<double>(options.max_tries - tries);
+        result.attempts = options.max_tries - tries;
+        result.nonces_per_sec = static_cast<double>(result.attempts);
     } else {
         std::vector<uint64_t> attempts_used(options.parallel, 0);
         std::vector<uint64_t> solved_counts(options.parallel, 0);
@@ -490,6 +844,7 @@ IterationResult RunSolveIteration(const Options& options, const Consensus::Param
 
         const uint64_t total_attempts = std::accumulate(attempts_used.begin(), attempts_used.end(), uint64_t{0});
         result.solved_count = std::accumulate(solved_counts.begin(), solved_counts.end(), uint64_t{0});
+        result.attempts = total_attempts;
         result.nonces_per_sec = static_cast<double>(total_attempts);
     }
     const auto stop = std::chrono::steady_clock::now();
@@ -499,6 +854,19 @@ IterationResult RunSolveIteration(const Options& options, const Consensus::Param
     } else {
         result.nonces_per_sec = 0.0;
     }
+    result.pipeline = ProbeMatMulSolvePipelineStats();
+    result.runtime = ProbeMatMulSolveRuntimeStats();
+    result.gpu_prehash_scan = DeltaGpuPreHashScanStats(prehash_before, ProbeMatMulGpuPreHashScanStats());
+    result.digest_compare = DeltaDigestCompareStats(digest_compare_before, ProbeMatMulDigestCompareStats());
+    result.backend_runtime = DeltaBackendRuntimeStats(
+        backend_runtime_before,
+        matmul::accelerated::ProbeMatMulBackendRuntimeStats());
+    result.cuda_profiling = btx::cuda::ProbeMatMulProfilingStats();
+    result.cuda_profiling_sample_delta = CounterDelta(cuda_profiling_before.samples, result.cuda_profiling.samples);
+    result.cuda_oracle_profile = btx::cuda::ProbeMatMulInputGenerationProfile();
+    result.cuda_oracle_sample_delta = CounterDelta(cuda_oracle_before.samples, result.cuda_oracle_profile.samples);
+    result.cuda_oracle_allocation_delta = CounterDelta(cuda_oracle_before.allocation_events, result.cuda_oracle_profile.allocation_events);
+    result.cuda_oracle_reuse_delta = CounterDelta(cuda_oracle_before.reuse_events, result.cuda_oracle_profile.reuse_events);
     return result;
 }
 
@@ -533,6 +901,7 @@ int main(int argc, char* argv[])
     ArgsManager args;
     auto consensus = CreateChainParams(args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
+    consensus.fSkipMatMulValidation = false;
     consensus.nMatMulDimension = options.n;
     consensus.nMatMulTranscriptBlockSize = options.b;
     consensus.nMatMulNoiseRank = options.r;
@@ -550,27 +919,74 @@ int main(int argc, char* argv[])
 
     std::vector<double> elapsed_s_values;
     std::vector<double> nonces_per_sec_values;
+    std::vector<double> attempts_values;
+    std::vector<IterationResult> iteration_results;
     elapsed_s_values.reserve(options.iterations);
     nonces_per_sec_values.reserve(options.iterations);
+    attempts_values.reserve(options.iterations);
+    iteration_results.reserve(options.iterations);
+
+    uint64_t warmup_attempts{0};
+    double warmup_elapsed_s{0.0};
+    for (uint32_t i = 0; i < options.warmup_iterations; ++i) {
+        const IterationResult warmup = RunSolveIteration(options, consensus, i);
+        warmup_attempts += warmup.attempts;
+        warmup_elapsed_s += warmup.elapsed_s;
+    }
 
     uint64_t solved_count{0};
+    uint64_t total_attempts{0};
     MatMulSolvePipelineStats last_pipeline{};
     MatMulSolveRuntimeStats last_runtime{};
+    MatMulGpuPreHashScanStats last_gpu_prehash_scan{};
+    MatMulDigestCompareStats last_digest_compare{};
     matmul::accelerated::BackendRuntimeStats last_backend_runtime{};
+    btx::cuda::MatMulProfilingStats last_cuda_profiling{};
+    btx::cuda::MatMulInputGenerationProfile last_cuda_oracle_profile{};
+    uint64_t total_cuda_profiling_sample_delta{0};
+    uint64_t total_cuda_oracle_sample_delta{0};
+    uint64_t total_cuda_oracle_allocation_delta{0};
+    uint64_t total_cuda_oracle_reuse_delta{0};
 
+    MatMulSolvePipelineStats total_pipeline{};
+    MatMulSolveRuntimeStats total_runtime{};
+    MatMulGpuPreHashScanStats total_gpu_prehash_scan{};
+    MatMulDigestCompareStats total_digest_compare{};
+    matmul::accelerated::BackendRuntimeStats total_backend_runtime{};
+
+    const auto measured_start = std::chrono::steady_clock::now();
     for (uint32_t i = 0; i < options.iterations; ++i) {
-        const IterationResult iteration = RunSolveIteration(options, consensus, i);
+        const IterationResult iteration = RunSolveIteration(options, consensus, options.warmup_iterations + i);
+        iteration_results.push_back(iteration);
         elapsed_s_values.push_back(iteration.elapsed_s);
         nonces_per_sec_values.push_back(iteration.nonces_per_sec);
+        attempts_values.push_back(static_cast<double>(iteration.attempts));
+        total_attempts += iteration.attempts;
         solved_count += iteration.solved_count;
-        last_pipeline = ProbeMatMulSolvePipelineStats();
-        last_runtime = ProbeMatMulSolveRuntimeStats();
-        last_backend_runtime = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+        last_pipeline = iteration.pipeline;
+        last_runtime = iteration.runtime;
+        last_gpu_prehash_scan = iteration.gpu_prehash_scan;
+        last_digest_compare = iteration.digest_compare;
+        last_backend_runtime = iteration.backend_runtime;
+        last_cuda_profiling = iteration.cuda_profiling;
+        last_cuda_oracle_profile = iteration.cuda_oracle_profile;
+        total_cuda_profiling_sample_delta += iteration.cuda_profiling_sample_delta;
+        total_cuda_oracle_sample_delta += iteration.cuda_oracle_sample_delta;
+        total_cuda_oracle_allocation_delta += iteration.cuda_oracle_allocation_delta;
+        total_cuda_oracle_reuse_delta += iteration.cuda_oracle_reuse_delta;
+        AddPipelineStats(total_pipeline, iteration.pipeline);
+        AddRuntimeStats(total_runtime, iteration.runtime);
+        AddGpuPreHashScanStats(total_gpu_prehash_scan, iteration.gpu_prehash_scan);
+        AddDigestCompareStats(total_digest_compare, iteration.digest_compare);
+        AddBackendRuntimeStats(total_backend_runtime, iteration.backend_runtime);
     }
+    const auto measured_stop = std::chrono::steady_clock::now();
+    const double measured_elapsed_s = std::chrono::duration<double>(measured_stop - measured_start).count();
 
     UniValue output(UniValue::VOBJ);
     UniValue options_obj(UniValue::VOBJ);
     options_obj.pushKV("iterations", options.iterations);
+    options_obj.pushKV("warmup_iterations", options.warmup_iterations);
     options_obj.pushKV("max_tries", options.max_tries);
     options_obj.pushKV("n", options.n);
     options_obj.pushKV("b", options.b);
@@ -595,11 +1011,61 @@ int main(int argc, char* argv[])
     options_obj.pushKV("prepare_workers_override", options.prepare_workers_override.has_value() ? UniValue(*options.prepare_workers_override) : UniValue());
     options_obj.pushKV("pool_slots_override", options.pool_slots_override.has_value() ? UniValue(*options.pool_slots_override) : UniValue());
     options_obj.pushKV("solver_threads_override", options.solver_threads_override.has_value() ? UniValue(*options.solver_threads_override) : UniValue());
+    options_obj.pushKV("per_iteration", options.per_iteration);
     output.pushKV("options", std::move(options_obj));
 
     output.pushKV("solved_count", solved_count);
+    output.pushKV("total_attempts", total_attempts);
     output.pushKV("elapsed_s", SummarizeSeries(elapsed_s_values));
     output.pushKV("nonces_per_sec", SummarizeSeries(nonces_per_sec_values));
+    output.pushKV("attempts", SummarizeSeries(attempts_values));
+
+    UniValue measured_obj(UniValue::VOBJ);
+    measured_obj.pushKV("iterations", options.iterations);
+    measured_obj.pushKV("total_attempts", total_attempts);
+    measured_obj.pushKV("total_elapsed_s", measured_elapsed_s);
+    measured_obj.pushKV("aggregate_nonces_per_sec", PerSecond(total_attempts, measured_elapsed_s));
+    measured_obj.pushKV("solved_count", solved_count);
+    measured_obj.pushKV("warmup_iterations", options.warmup_iterations);
+    measured_obj.pushKV("warmup_attempts", warmup_attempts);
+    measured_obj.pushKV("warmup_elapsed_s", warmup_elapsed_s);
+    measured_obj.pushKV("pipeline", BuildPipelineStatsObject(total_pipeline));
+    measured_obj.pushKV("runtime", BuildRuntimeStatsObject(total_runtime));
+    measured_obj.pushKV("gpu_prehash_scan", BuildGpuPreHashScanStatsObject(total_gpu_prehash_scan));
+    measured_obj.pushKV("digest_compare", BuildDigestCompareStatsObject(total_digest_compare));
+    measured_obj.pushKV("backend_runtime", BuildBackendRuntimeStatsObject(total_backend_runtime));
+    measured_obj.pushKV("cuda_profiling_sample_delta", total_cuda_profiling_sample_delta);
+    measured_obj.pushKV("cuda_oracle_sample_delta", total_cuda_oracle_sample_delta);
+    measured_obj.pushKV("cuda_oracle_allocation_delta", total_cuda_oracle_allocation_delta);
+    measured_obj.pushKV("cuda_oracle_reuse_delta", total_cuda_oracle_reuse_delta);
+    output.pushKV("measured_totals", std::move(measured_obj));
+
+    if (options.per_iteration) {
+        UniValue iterations_arr(UniValue::VARR);
+        for (uint32_t i = 0; i < iteration_results.size(); ++i) {
+            const auto& iteration = iteration_results[i];
+            UniValue iteration_obj(UniValue::VOBJ);
+            iteration_obj.pushKV("index", i);
+            iteration_obj.pushKV("nonce_range_index", options.warmup_iterations + i);
+            iteration_obj.pushKV("elapsed_s", iteration.elapsed_s);
+            iteration_obj.pushKV("attempts", iteration.attempts);
+            iteration_obj.pushKV("nonces_per_sec", iteration.nonces_per_sec);
+            iteration_obj.pushKV("solved_count", iteration.solved_count);
+            iteration_obj.pushKV("pipeline", BuildPipelineStatsObject(iteration.pipeline));
+            iteration_obj.pushKV("runtime", BuildRuntimeStatsObject(iteration.runtime));
+            iteration_obj.pushKV("gpu_prehash_scan", BuildGpuPreHashScanStatsObject(iteration.gpu_prehash_scan));
+            iteration_obj.pushKV("digest_compare", BuildDigestCompareStatsObject(iteration.digest_compare));
+            iteration_obj.pushKV("backend_runtime", BuildBackendRuntimeStatsObject(iteration.backend_runtime));
+            iteration_obj.pushKV("cuda_profiling_sample_delta", iteration.cuda_profiling_sample_delta);
+            iteration_obj.pushKV("cuda_profiling", BuildCudaProfilingStatsObject(iteration.cuda_profiling));
+            iteration_obj.pushKV("cuda_oracle_sample_delta", iteration.cuda_oracle_sample_delta);
+            iteration_obj.pushKV("cuda_oracle_allocation_delta", iteration.cuda_oracle_allocation_delta);
+            iteration_obj.pushKV("cuda_oracle_reuse_delta", iteration.cuda_oracle_reuse_delta);
+            iteration_obj.pushKV("cuda_oracle_profile", BuildCudaOracleProfileObject(iteration.cuda_oracle_profile));
+            iterations_arr.push_back(std::move(iteration_obj));
+        }
+        output.pushKV("iterations", std::move(iterations_arr));
+    }
 
     const char* backend_env_value = std::getenv("BTX_MATMUL_BACKEND");
     const std::string requested_backend = backend_env_value != nullptr ? backend_env_value :
@@ -625,55 +1091,17 @@ int main(int argc, char* argv[])
         output.pushKV("metal_device", std::move(metal_device_obj));
     }
 
-    UniValue pipeline_obj(UniValue::VOBJ);
-    pipeline_obj.pushKV("parallel_solver_enabled", last_pipeline.parallel_solver_enabled);
-    pipeline_obj.pushKV("parallel_solver_threads", last_pipeline.parallel_solver_threads);
-    pipeline_obj.pushKV("async_prepare_enabled", last_pipeline.async_prepare_enabled);
-    pipeline_obj.pushKV("cpu_confirm_candidates", last_pipeline.cpu_confirm_candidates);
-    pipeline_obj.pushKV("prepared_inputs", last_pipeline.prepared_inputs);
-    pipeline_obj.pushKV("overlapped_prepares", last_pipeline.overlapped_prepares);
-    pipeline_obj.pushKV("prefetched_batches", last_pipeline.prefetched_batches);
-    pipeline_obj.pushKV("prefetched_inputs", last_pipeline.prefetched_inputs);
-    pipeline_obj.pushKV("prefetch_depth", last_pipeline.prefetch_depth);
-    pipeline_obj.pushKV("async_prepare_submissions", last_pipeline.async_prepare_submissions);
-    pipeline_obj.pushKV("async_prepare_completions", last_pipeline.async_prepare_completions);
-    pipeline_obj.pushKV("async_prepare_worker_threads", last_pipeline.async_prepare_worker_threads);
-    pipeline_obj.pushKV("batch_size", last_pipeline.batch_size);
-    pipeline_obj.pushKV("batched_digest_requests", last_pipeline.batched_digest_requests);
-    pipeline_obj.pushKV("batched_nonce_attempts", last_pipeline.batched_nonce_attempts);
-    output.pushKV("last_pipeline_stats", std::move(pipeline_obj));
+    output.pushKV("last_pipeline_stats", BuildPipelineStatsObject(last_pipeline));
+    output.pushKV("last_runtime_stats", BuildRuntimeStatsObject(last_runtime));
+    output.pushKV("last_digest_compare_stats", BuildDigestCompareStatsObject(last_digest_compare));
+    output.pushKV("last_gpu_prehash_scan_stats", BuildGpuPreHashScanStatsObject(last_gpu_prehash_scan));
+    output.pushKV("last_backend_runtime_stats", BuildBackendRuntimeStatsObject(last_backend_runtime));
 
-    UniValue runtime_obj(UniValue::VOBJ);
-    runtime_obj.pushKV("attempts", last_runtime.attempts);
-    runtime_obj.pushKV("solved_attempts", last_runtime.solved_attempts);
-    runtime_obj.pushKV("failed_attempts", last_runtime.failed_attempts);
-    runtime_obj.pushKV("total_elapsed_us", last_runtime.total_elapsed_us);
-    runtime_obj.pushKV("last_elapsed_us", last_runtime.last_elapsed_us);
-    runtime_obj.pushKV("max_elapsed_us", last_runtime.max_elapsed_us);
-    output.pushKV("last_runtime_stats", std::move(runtime_obj));
-
-    UniValue backend_runtime_obj(UniValue::VOBJ);
-    backend_runtime_obj.pushKV("digest_requests", last_backend_runtime.digest_requests);
-    backend_runtime_obj.pushKV("requested_cpu", last_backend_runtime.requested_cpu);
-    backend_runtime_obj.pushKV("requested_metal", last_backend_runtime.requested_metal);
-    backend_runtime_obj.pushKV("requested_cuda", last_backend_runtime.requested_cuda);
-    backend_runtime_obj.pushKV("requested_unknown", last_backend_runtime.requested_unknown);
-    backend_runtime_obj.pushKV("metal_successes", last_backend_runtime.metal_successes);
-    backend_runtime_obj.pushKV("metal_fallbacks_to_cpu", last_backend_runtime.metal_fallbacks_to_cpu);
-    backend_runtime_obj.pushKV("metal_digest_mismatches", last_backend_runtime.metal_digest_mismatches);
-    backend_runtime_obj.pushKV("metal_retry_without_uploaded_base_attempts", last_backend_runtime.metal_retry_without_uploaded_base_attempts);
-    backend_runtime_obj.pushKV("metal_retry_without_uploaded_base_successes", last_backend_runtime.metal_retry_without_uploaded_base_successes);
-    backend_runtime_obj.pushKV("cuda_successes", last_backend_runtime.cuda_successes);
-    backend_runtime_obj.pushKV("cuda_fallbacks_to_cpu", last_backend_runtime.cuda_fallbacks_to_cpu);
-    backend_runtime_obj.pushKV("gpu_input_generation_attempts", last_backend_runtime.gpu_input_generation_attempts);
-    backend_runtime_obj.pushKV("gpu_input_generation_successes", last_backend_runtime.gpu_input_generation_successes);
-    backend_runtime_obj.pushKV("gpu_input_generation_failures", last_backend_runtime.gpu_input_generation_failures);
-    backend_runtime_obj.pushKV("gpu_input_auto_disabled_skips", last_backend_runtime.gpu_input_auto_disabled_skips);
-    backend_runtime_obj.pushKV("gpu_input_auto_disabled", last_backend_runtime.gpu_input_auto_disabled);
-    backend_runtime_obj.pushKV("last_metal_fallback_error", last_backend_runtime.last_metal_fallback_error);
-    backend_runtime_obj.pushKV("last_cuda_fallback_error", last_backend_runtime.last_cuda_fallback_error);
-    backend_runtime_obj.pushKV("last_gpu_input_error", last_backend_runtime.last_gpu_input_error);
-    output.pushKV("last_backend_runtime_stats", std::move(backend_runtime_obj));
+    if (backend_selection.requested == matmul::backend::Kind::CUDA ||
+        backend_selection.active == matmul::backend::Kind::CUDA) {
+        output.pushKV("cuda_profiling_stats", BuildCudaProfilingStatsObject(last_cuda_profiling));
+        output.pushKV("cuda_oracle_profile", BuildCudaOracleProfileObject(last_cuda_oracle_profile));
+    }
 
     UniValue pool_obj(UniValue::VOBJ);
 

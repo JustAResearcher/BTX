@@ -83,6 +83,46 @@ int MinSupportedComputeCapabilityMajor()
     return resolved;
 }
 
+void ApplyCudaWaitPolicyFromEnv()
+{
+    const char* env = std::getenv("BTX_MATMUL_CUDA_WAIT_POLICY");
+    if (env == nullptr || env[0] == '\0') {
+        return;
+    }
+
+    std::string value = TrimAscii(env);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+
+    unsigned int flags{0};
+    if (value == "blocking" || value == "block" || value == "blocking_sync") {
+        flags = cudaDeviceScheduleBlockingSync;
+    } else if (value == "yield") {
+        flags = cudaDeviceScheduleYield;
+    } else if (value == "spin") {
+        flags = cudaDeviceScheduleSpin;
+    } else if (value == "auto") {
+        flags = cudaDeviceScheduleAuto;
+    } else {
+        LogPrintf("MATMUL WARNING: ignoring invalid BTX_MATMUL_CUDA_WAIT_POLICY=%s "
+                  "(expected blocking, yield, spin, or auto)\n",
+                  value);
+        return;
+    }
+
+    const cudaError_t error = cudaSetDeviceFlags(flags);
+    if (error == cudaSuccess) {
+        LogPrintf("MATMUL NOTE: CUDA wait policy set to %s via "
+                  "BTX_MATMUL_CUDA_WAIT_POLICY\n",
+                  value);
+    } else {
+        LogPrintf("MATMUL WARNING: cudaSetDeviceFlags(%s) failed: %s\n",
+                  value,
+                  cudaGetErrorString(error));
+    }
+}
+
 bool ParseNonNegativeInt(const std::string& value, int& parsed)
 {
     const std::string trimmed = TrimAscii(value);
@@ -186,6 +226,12 @@ CudaTopologyProbe ProbeCudaHardwareTopology()
         return true;
     }();
     (void)cuda_module_loading_pinned;
+
+    static const bool cuda_wait_policy_applied = [] {
+        ApplyCudaWaitPolicyFromEnv();
+        return true;
+    }();
+    (void)cuda_wait_policy_applied;
 
     int runtime_version{0};
     const cudaError_t runtime_version_error = cudaRuntimeGetVersion(&runtime_version);

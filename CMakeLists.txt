@@ -396,10 +396,10 @@ if(WIN32)
       _UNICODE;UNICODE
     )
     target_compile_options(core_interface INTERFACE
-      /utf-8
-      /Zc:preprocessor
-      /Zc:__cplusplus
-      /sdl
+      "$<$<NOT:$<COMPILE_LANGUAGE:CUDA>>:/utf-8>"
+      "$<$<NOT:$<COMPILE_LANGUAGE:CUDA>>:/Zc:preprocessor>"
+      "$<$<NOT:$<COMPILE_LANGUAGE:CUDA>>:/Zc:__cplusplus>"
+      "$<$<NOT:$<COMPILE_LANGUAGE:CUDA>>:/sdl>"
     )
     # Improve parallelism in MSBuild.
     # See: https://devblogs.microsoft.com/cppblog/improved-parallelism-in-msbuild/.

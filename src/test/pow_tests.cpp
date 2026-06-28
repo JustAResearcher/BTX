@@ -5,8 +5,9 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <common/args.h>
-#include <cuda/oracle_accel.h>
 #include <cuda/cuda_scheduler.h>
+#include <cuda/matmul_accel.h>
+#include <cuda/oracle_accel.h>
 #include <matmul/accelerated_solver.h>
 #include <matmul/freivalds.h>
 #include <matmul/matmul_pow.h>
@@ -190,6 +191,58 @@ public:
         _putenv_s("BTX_MATMUL_NONCE_SEED_BATCH_SIZE", "");
 #else
         unsetenv("BTX_MATMUL_NONCE_SEED_BATCH_SIZE");
+#endif
+    }
+};
+
+class ScopedNonceSeedLookaheadEnv
+{
+public:
+    explicit ScopedNonceSeedLookaheadEnv(const char* value)
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_NONCE_SEED_LOOKAHEAD", value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv("BTX_MATMUL_NONCE_SEED_LOOKAHEAD", value, 1);
+        } else {
+            unsetenv("BTX_MATMUL_NONCE_SEED_LOOKAHEAD");
+        }
+#endif
+    }
+
+    ~ScopedNonceSeedLookaheadEnv()
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_NONCE_SEED_LOOKAHEAD", "");
+#else
+        unsetenv("BTX_MATMUL_NONCE_SEED_LOOKAHEAD");
+#endif
+    }
+};
+
+class ScopedCudaDevicePreparedInputsEnv
+{
+public:
+    explicit ScopedCudaDevicePreparedInputsEnv(const char* value)
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS", value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS", value, 1);
+        } else {
+            unsetenv("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS");
+        }
+#endif
+    }
+
+    ~ScopedCudaDevicePreparedInputsEnv()
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS", "");
+#else
+        unsetenv("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS");
 #endif
     }
 };
@@ -1942,6 +1995,101 @@ BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_cuda_solver_uses_gpu_scan_and_variable_
     CBlock block{header};
     block.matrix_c_data = payload;
     BOOST_CHECK(CheckMatMulProofOfWork_ProductCommitted(block, consensus, 2));
+}
+
+BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_cuda_nonce_seed_lookahead_prefetches_only_when_enabled)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::CUDA);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping CUDA nonce-seed lookahead test: CUDA backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    ScopedBackendEnv backend_env("cuda");
+    ScopedBatchSizeEnv solve_batch_env(nullptr);
+    ScopedNonceSeedBatchSizeEnv nonce_seed_batch_env("3");
+    ScopedCpuConfirmEnv cpu_confirm_env("1");
+    ScopedGpuInputsEnv gpu_inputs_env("1");
+    ScopedCudaDevicePreparedInputsEnv device_prepared_env("1");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fSkipMatMulValidation = false;
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 512;
+    consensus.nMatMulMinDimension = 512;
+    consensus.nMatMulTranscriptBlockSize = 16;
+    consensus.nMatMulNoiseRank = 8;
+    consensus.nMatMulPreHashEpsilonBits = 18;
+    consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.nMatMulParentMtpSeedHeight = 2;
+    consensus.nMatMulProductDigestHeight = 2;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    auto make_header = [] {
+        CBlockHeader header{};
+        header.nVersion = 4;
+        header.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000f5"};
+        header.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000f6"};
+        header.nTime = 1'780'000'022U;
+        header.nBits = UintToArith256(uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}).GetCompact();
+        header.nNonce64 = 0;
+        header.nNonce = 0;
+        header.matmul_dim = 512;
+        header.matmul_digest.SetNull();
+        return header;
+    };
+
+    struct LookaheadRunStats {
+        MatMulSolvePipelineStats pipeline;
+        matmul::accelerated::BackendRuntimeStats backend;
+        btx::cuda::MatMulProfilingStats cuda_profile;
+    };
+
+    auto run_with_lookahead = [&](const char* enabled_value) {
+        ScopedNonceSeedLookaheadEnv lookahead_env(enabled_value);
+        CBlockHeader header = make_header();
+        std::vector<uint32_t> payload;
+        uint64_t max_tries{6};
+
+        ResetMatMulSolvePipelineStats();
+        ResetMatMulGpuPreHashScanStats();
+        matmul::accelerated::ResetMatMulBackendRuntimeStats();
+
+        if (!SolveMatMul(header, consensus, max_tries, 2, nullptr, &payload, nullptr, 1'779'999'913)) {
+            throw std::runtime_error("SolveMatMul failed in CUDA nonce-seed lookahead test");
+        }
+        LookaheadRunStats stats{};
+        stats.pipeline = ProbeMatMulSolvePipelineStats();
+        stats.backend = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+        stats.cuda_profile = btx::cuda::ProbeMatMulProfilingStats();
+        return stats;
+    };
+
+    const auto disabled_stats = run_with_lookahead("0");
+    BOOST_CHECK(!disabled_stats.pipeline.async_prepare_enabled);
+    BOOST_CHECK_EQUAL(disabled_stats.pipeline.prefetched_batches, 0U);
+    BOOST_CHECK_EQUAL(disabled_stats.pipeline.prefetched_inputs, 0U);
+    BOOST_CHECK_GT(disabled_stats.backend.requested_cuda, 0U);
+    BOOST_CHECK_EQUAL(disabled_stats.backend.cuda_successes, disabled_stats.backend.requested_cuda);
+    BOOST_CHECK_EQUAL(disabled_stats.backend.cuda_fallbacks_to_cpu, 0U);
+    BOOST_CHECK(disabled_stats.cuda_profile.last_used_device_prepared_inputs);
+    BOOST_CHECK_EQUAL(disabled_stats.cuda_profile.last_n, 512U);
+    BOOST_CHECK_EQUAL(disabled_stats.cuda_profile.last_b, 16U);
+    BOOST_CHECK_EQUAL(disabled_stats.cuda_profile.last_r, 8U);
+
+    const auto enabled_stats = run_with_lookahead("1");
+    BOOST_CHECK(enabled_stats.pipeline.async_prepare_enabled);
+    BOOST_CHECK_GE(enabled_stats.pipeline.prefetched_batches, 1U);
+    BOOST_CHECK_GE(enabled_stats.pipeline.prefetched_inputs, 1U);
+    BOOST_CHECK_GT(enabled_stats.backend.requested_cuda, 0U);
+    BOOST_CHECK_EQUAL(enabled_stats.backend.cuda_successes, enabled_stats.backend.requested_cuda);
+    BOOST_CHECK_EQUAL(enabled_stats.backend.cuda_fallbacks_to_cpu, 0U);
+    BOOST_CHECK(enabled_stats.cuda_profile.last_used_device_prepared_inputs);
+    BOOST_CHECK_EQUAL(enabled_stats.cuda_profile.last_n, 512U);
+    BOOST_CHECK_EQUAL(enabled_stats.cuda_profile.last_b, 16U);
+    BOOST_CHECK_EQUAL(enabled_stats.cuda_profile.last_r, 8U);
 }
 
 BOOST_AUTO_TEST_CASE(MatMulNonceSeed_metal_batch_default_scales_with_gpu_core_count)

@@ -72,6 +72,16 @@ struct MatMulGpuPreHashScanStats {
     uint64_t failures{0};
     uint64_t metal_fallbacks_to_cpu{0};
     uint64_t cuda_fallbacks_to_cpu{0};
+    uint64_t total_elapsed_us{0};
+    uint64_t last_elapsed_us{0};
+    uint64_t max_elapsed_us{0};
+    uint64_t total_scanned_count{0};
+    uint64_t last_scanned_count{0};
+    uint64_t total_pass_flags{0};
+    uint64_t last_pass_flags{0};
+    uint64_t total_selected_headers{0};
+    uint64_t last_selected_headers{0};
+    uint32_t last_scan_limit{0};
     std::string last_backend{};
     std::string last_error{};
 };

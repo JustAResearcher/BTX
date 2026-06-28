@@ -838,6 +838,10 @@ BOOST_AUTO_TEST_CASE(cuda_kernel_profile_reports_streamed_fused_pipeline)
         const char* env = std::getenv("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS");
         return env != nullptr && env[0] != '\0' && env[0] != '0';
     }();
+    const bool shared_compress_env_enabled = [] {
+        const char* env = std::getenv("BTX_MATMUL_CUDA_SHARED_COMPRESS_RHS");
+        return env != nullptr && env[0] != '\0' && env[0] != '0';
+    }();
 
     BOOST_CHECK(profile.low_rank_perturbation_kernel);
     BOOST_CHECK(profile.fused_compressed_words_finalize);
@@ -848,6 +852,8 @@ BOOST_AUTO_TEST_CASE(cuda_kernel_profile_reports_streamed_fused_pipeline)
     BOOST_CHECK(profile.device_prepared_inputs_supported);
     BOOST_CHECK(!profile.device_prepared_inputs_default);
     BOOST_CHECK_EQUAL(profile.device_prepared_inputs_enabled, env_enabled);
+    BOOST_CHECK(profile.shared_compress_rhs_supported);
+    BOOST_CHECK_EQUAL(profile.shared_compress_rhs_enabled, shared_compress_env_enabled);
     BOOST_CHECK_EQUAL(profile.execution_model, "nonblocking_stream_per_device_pool_slot");
     BOOST_CHECK_EQUAL(profile.staging_strategy, "pinned_host_with_pageable_fallback");
     BOOST_CHECK_EQUAL(profile.device_prepared_inputs_policy, "auto_product_digest_shape_plus_env");

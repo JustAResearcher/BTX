@@ -37,6 +37,8 @@ constexpr Element MODULUS = matmul::field::MODULUS;
 constexpr uint32_t REDUCE_INTERVAL{4};
 constexpr uint32_t MAX_BLOCK_THREADS{256};
 constexpr uint32_t WORKSPACE_THREADS{256};
+constexpr uint32_t SEED_MIDSTATE_WORDS{16};
+constexpr uint32_t SEED_PRECOMPUTED_SCHEDULE_WORDS{23};
 
 std::string CudaErrorString(cudaError_t error);
 
@@ -98,6 +100,59 @@ struct DigestWorkspace {
 
     };
 
+    struct HostByteStageBuffer {
+        unsigned char* pinned{nullptr};
+        size_t capacity{0};
+        bool pinned_disabled{false};
+        std::vector<unsigned char> fallback;
+
+        ~HostByteStageBuffer() { cudaFreeHost(pinned); }
+
+        bool Ensure(size_t required, std::string& error)
+        {
+            if (required == 0) {
+                fallback.clear();
+                return true;
+            }
+
+            if (!pinned_disabled && pinned != nullptr && capacity >= required) {
+                return true;
+            }
+
+            if (!pinned_disabled) {
+                cudaFreeHost(pinned);
+                pinned = nullptr;
+                capacity = 0;
+
+                unsigned char* candidate{nullptr};
+                const cudaError_t alloc_error = cudaMallocHost(&candidate, required);
+                if (alloc_error == cudaSuccess) {
+                    pinned = candidate;
+                    capacity = required;
+                    fallback.clear();
+                    return true;
+                }
+
+                pinned_disabled = true;
+                error = "cudaMallocHost byte staging failed:" + CudaErrorString(alloc_error) +
+                    "; falling back to pageable host memory";
+            }
+
+            try {
+                fallback.resize(required);
+            } catch (const std::bad_alloc&) {
+                error = "host byte staging allocation failed";
+                return false;
+            }
+            return true;
+        }
+
+        unsigned char* data()
+        {
+            return pinned != nullptr ? pinned : fallback.data();
+        }
+    };
+
     int device_index{-1};
     cudaStream_t stream{nullptr};
 
@@ -117,8 +172,10 @@ struct DigestWorkspace {
     size_t matrix_b_capacity{0};
     DeviceSeedBytes* device_seed_a{nullptr};
     DeviceSeedBytes* device_seed_b{nullptr};
+    DeviceSeedBytes* device_sigma{nullptr};
     size_t seed_a_capacity{0};
     size_t seed_b_capacity{0};
+    size_t sigma_capacity{0};
 
     Element* device_noise_e_l{nullptr};
     Element* device_noise_e_r{nullptr};
@@ -136,14 +193,19 @@ struct DigestWorkspace {
 
     Element* device_output{nullptr};
     size_t output_capacity{0};
+    unsigned char* device_digest_output{nullptr};
+    size_t digest_output_capacity{0};
+    HostByteStageBuffer host_digest_output;
 
     // Factored-compression staging (PRODUCT_FINAL_BLOCKS path): D[j][x][m]
     // per request - block_size * n * blocks_per_axis words (1 MiB at n=512).
     Element* device_factored_rhs{nullptr};
     size_t factored_rhs_capacity{0};
+    Element* device_a_rhs_projection{nullptr};
+    size_t a_rhs_projection_capacity{0};
 
-    // Per-seed SHA midstates for matrix generation: 16 words/seed (8 packed seed
-    // words + 8 post-round-7 state words). Tiny (batch_size * 64 B).
+    // Per-seed SHA data for matrix generation: packed seed words, post-round-7
+    // state words, and seed-only schedule words 16..22.
     uint32_t* device_seed_midstates{nullptr};
     size_t seed_midstates_capacity{0};
 
@@ -159,7 +221,9 @@ struct DigestWorkspace {
     void ReleaseDeviceBuffers()
     {
         cudaFree(device_seed_midstates);
+        cudaFree(device_a_rhs_projection);
         cudaFree(device_factored_rhs);
+        cudaFree(device_digest_output);
         cudaFree(device_output);
         cudaFree(device_compress);
         cudaFree(device_noise_f_r);
@@ -169,13 +233,16 @@ struct DigestWorkspace {
         cudaFree(device_prepared_input_ptrs);
         cudaFree(device_seed_b);
         cudaFree(device_seed_a);
+        cudaFree(device_sigma);
         cudaFree(device_matrix_b);
         cudaFree(device_matrix_a);
         cudaFree(device_base_b);
         cudaFree(device_base_a);
 
         device_seed_midstates = nullptr;
+        device_a_rhs_projection = nullptr;
         device_factored_rhs = nullptr;
+        device_digest_output = nullptr;
         device_output = nullptr;
         device_compress = nullptr;
         device_noise_f_r = nullptr;
@@ -185,13 +252,16 @@ struct DigestWorkspace {
         device_prepared_input_ptrs = nullptr;
         device_seed_b = nullptr;
         device_seed_a = nullptr;
+        device_sigma = nullptr;
         device_matrix_b = nullptr;
         device_matrix_a = nullptr;
         device_base_b = nullptr;
         device_base_a = nullptr;
 
         seed_midstates_capacity = 0;
+        a_rhs_projection_capacity = 0;
         factored_rhs_capacity = 0;
+        digest_output_capacity = 0;
         output_capacity = 0;
         compress_capacity = 0;
         noise_f_r_capacity = 0;
@@ -201,6 +271,7 @@ struct DigestWorkspace {
         prepared_input_ptr_capacity = 0;
         seed_b_capacity = 0;
         seed_a_capacity = 0;
+        sigma_capacity = 0;
         matrix_b_capacity = 0;
         matrix_a_capacity = 0;
         base_b_capacity = 0;
@@ -269,6 +340,11 @@ struct DigestProfilingSample {
     double submit_d2h_us{0.0};
     double stream_sync_us{0.0};
     double total_wall_ms{0.0};
+    double event_build_a_device_us{0.0};
+    double event_build_b_midstate_device_us{0.0};
+    double event_rhs_device_us{0.0};
+    double event_words_device_us{0.0};
+    double event_digest_device_us{0.0};
     bool used_low_rank_path{false};
     bool used_device_prepared_inputs{false};
     bool used_pinned_host_staging{true};
@@ -292,6 +368,11 @@ struct DigestProfilingContext {
     double last_submit_d2h_us{0.0};
     double last_stream_sync_us{0.0};
     double last_total_wall_ms{0.0};
+    double last_event_build_a_device_us{0.0};
+    double last_event_build_b_midstate_device_us{0.0};
+    double last_event_rhs_device_us{0.0};
+    double last_event_words_device_us{0.0};
+    double last_event_digest_device_us{0.0};
     bool last_used_low_rank_path{false};
     bool last_used_device_prepared_inputs{false};
     bool last_used_pinned_host_staging{false};
@@ -399,6 +480,123 @@ std::optional<uint32_t> ResolveCudaPoolSlotOverride(int device_index)
 
     return std::nullopt;
 }
+
+bool ShouldUseFactoredWords2x4()
+{
+    const char* env = std::getenv("BTX_MATMUL_CUDA_FACTORED_WORD_TILE");
+    return env != nullptr && std::string{env} == "2x4";
+}
+
+bool ShouldUseSharedCompressRhs()
+{
+    const char* env = std::getenv("BTX_MATMUL_CUDA_SHARED_COMPRESS_RHS");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+bool ShouldUseDirectRhs()
+{
+    const char* env = std::getenv("BTX_MATMUL_CUDA_DIRECT_RHS");
+    return env == nullptr || env[0] == '\0' || env[0] != '0';
+}
+
+bool ShouldUseTiledDirectRhs()
+{
+    const char* env = std::getenv("BTX_MATMUL_CUDA_TILED_DIRECT_RHS");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+bool ShouldProfileCudaEvents()
+{
+    const char* env = std::getenv("BTX_MATMUL_CUDA_PROFILE_EVENTS");
+    return env != nullptr && std::string{env} != "0";
+}
+
+bool ShouldUseBaseACorrection()
+{
+    const char* env = std::getenv("BTX_MATMUL_CUDA_BASE_A_CORRECTION");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+bool ShouldUseSpecializedBuildA()
+{
+    const char* env = std::getenv("BTX_MATMUL_CUDA_SPECIALIZED_BUILD_A");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+bool CreateProfileEvent(cudaEvent_t& event)
+{
+    event = nullptr;
+    return cudaEventCreateWithFlags(&event, cudaEventDefault) == cudaSuccess;
+}
+
+void DestroyProfileEvent(cudaEvent_t& event)
+{
+    if (event != nullptr) {
+        cudaEventDestroy(event);
+        event = nullptr;
+    }
+}
+
+double EventElapsedMicros(cudaEvent_t start, cudaEvent_t stop)
+{
+    if (start == nullptr || stop == nullptr) {
+        return 0.0;
+    }
+    float milliseconds{0.0F};
+    if (cudaEventElapsedTime(&milliseconds, start, stop) != cudaSuccess) {
+        return 0.0;
+    }
+    return static_cast<double>(milliseconds) * 1000.0;
+}
+
+struct DirectRhsProfileEvents {
+    cudaEvent_t rhs_start{nullptr};
+    cudaEvent_t rhs_stop{nullptr};
+    cudaEvent_t words_stop{nullptr};
+    cudaEvent_t digest_stop{nullptr};
+
+    ~DirectRhsProfileEvents()
+    {
+        DestroyProfileEvent(rhs_start);
+        DestroyProfileEvent(rhs_stop);
+        DestroyProfileEvent(words_stop);
+        DestroyProfileEvent(digest_stop);
+    }
+
+    bool Create()
+    {
+        if (!CreateProfileEvent(rhs_start) ||
+            !CreateProfileEvent(rhs_stop) ||
+            !CreateProfileEvent(words_stop) ||
+            !CreateProfileEvent(digest_stop)) {
+            return false;
+        }
+        return true;
+    }
+};
+
+struct BuildProfileEvents {
+    cudaEvent_t build_a_start{nullptr};
+    cudaEvent_t build_a_stop{nullptr};
+    cudaEvent_t build_b_stop{nullptr};
+
+    ~BuildProfileEvents()
+    {
+        DestroyProfileEvent(build_a_start);
+        DestroyProfileEvent(build_a_stop);
+        DestroyProfileEvent(build_b_stop);
+    }
+
+    bool Create()
+    {
+        if (!CreateProfileEvent(build_a_start) ||
+            !CreateProfileEvent(build_a_stop) ||
+            !CreateProfileEvent(build_b_stop)) {
+            return false;
+        }
+        return true;
+    }
+};
 
 uint32_t ResolveCudaPoolSlotCount(int device_index)
 {
@@ -519,6 +717,11 @@ void RecordProfilingSample(const DigestProfilingSample& sample)
     context.last_submit_d2h_us = sample.submit_d2h_us;
     context.last_stream_sync_us = sample.stream_sync_us;
     context.last_total_wall_ms = sample.total_wall_ms;
+    context.last_event_build_a_device_us = sample.event_build_a_device_us;
+    context.last_event_build_b_midstate_device_us = sample.event_build_b_midstate_device_us;
+    context.last_event_rhs_device_us = sample.event_rhs_device_us;
+    context.last_event_words_device_us = sample.event_words_device_us;
+    context.last_event_digest_device_us = sample.event_digest_device_us;
     context.last_used_low_rank_path = sample.used_low_rank_path;
     context.last_used_device_prepared_inputs = sample.used_device_prepared_inputs;
     context.last_used_pinned_host_staging = sample.used_pinned_host_staging;
@@ -732,6 +935,12 @@ __device__ __constant__ uint32_t SHA256_K[64] = {
     0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U, 0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U,
 };
 
+__device__ __constant__ uint8_t PRODUCT_DIGEST_TAG_BYTES[24] = {
+    'm', 'a', 't', 'm', 'u', 'l', '-', 'p',
+    'r', 'o', 'd', 'u', 'c', 't', '-', 'd',
+    'i', 'g', 'e', 's', 't', '-', 'v', '3',
+};
+
 __device__ __forceinline__ void SetShaByte(uint32_t w[16], uint32_t offset, uint32_t byte)
 {
     const uint32_t word_index = offset >> 2U;
@@ -745,6 +954,21 @@ __device__ __forceinline__ uint32_t Bswap32(uint32_t x)
         ((x & 0x0000ff00U) << 8U) |
         ((x & 0x00ff0000U) >> 8U) |
         ((x & 0xff000000U) >> 24U);
+}
+
+__device__ __forceinline__ uint8_t ShaWordByte(const uint32_t words[8], uint32_t byte_index)
+{
+    const uint32_t word = words[byte_index >> 2U];
+    const uint32_t shift = (3U - (byte_index & 3U)) * 8U;
+    return static_cast<uint8_t>((word >> shift) & 0xffU);
+}
+
+__device__ __forceinline__ void SetShaLE32(uint32_t w[16], uint32_t offset, uint32_t value)
+{
+    SetShaByte(w, offset, value & 0xffU);
+    SetShaByte(w, offset + 1U, (value >> 8U) & 0xffU);
+    SetShaByte(w, offset + 2U, (value >> 16U) & 0xffU);
+    SetShaByte(w, offset + 3U, (value >> 24U) & 0xffU);
 }
 
 __device__ inline void Sha256Init(uint32_t state[8])
@@ -804,6 +1028,35 @@ __device__ inline void Sha256Compress(uint32_t state[8], uint32_t w[16])
     state[5] += f;
     state[6] += g;
     state[7] += h;
+}
+
+__device__ __forceinline__ void Sha256Digest32(const uint32_t input_words[8], uint32_t out_words[8])
+{
+    uint32_t state[8];
+    Sha256Init(state);
+    uint32_t w[16] = {};
+    #pragma unroll
+    for (uint32_t i = 0; i < 8U; ++i) {
+        w[i] = input_words[i];
+    }
+    w[8] = 0x80000000U;
+    w[15] = 32U * 8U;
+    Sha256Compress(state, w);
+    #pragma unroll
+    for (uint32_t i = 0; i < 8U; ++i) {
+        out_words[i] = state[i];
+    }
+}
+
+__device__ __forceinline__ void StoreShaWords(const uint32_t words[8], unsigned char* out)
+{
+    #pragma unroll
+    for (uint32_t i = 0; i < 8U; ++i) {
+        out[i * 4U + 0U] = static_cast<unsigned char>((words[i] >> 24U) & 0xffU);
+        out[i * 4U + 1U] = static_cast<unsigned char>((words[i] >> 16U) & 0xffU);
+        out[i * 4U + 2U] = static_cast<unsigned char>((words[i] >> 8U) & 0xffU);
+        out[i * 4U + 3U] = static_cast<unsigned char>(words[i] & 0xffU);
+    }
 }
 
 __device__ inline uint32_t CandidateFromSeedAndIndex(const DeviceSeedBytes& seed,
@@ -884,11 +1137,11 @@ __device__ inline uint32_t FromOracle(const DeviceSeedBytes& seed, uint32_t inde
 // Every element of a base matrix hashes seed||index with the SAME 32-byte seed
 // in w[0..7]; SHA-256 rounds 0-7 consume only those words, so the post-round-7
 // state is identical across all 2^18 elements. PrecomputeSeedMidstatesKernel
-// computes it once per seed (one thread each) into a 16-word record (8 packed
-// seed words + 8 state words); the generation kernel loads those as scalars and
-// resumes each element's hash at round 8 - 8 of 64 rounds saved per element,
-// with no per-block barrier (which is why a precompute kernel beats a shared-
-// memory hoist here). Byte-identical to FromOracle's retry==0 result; the
+// computes it once per seed (one thread each) into a compact 16-word record
+// (W7, post-round-7 state, and W16..W22); the generation kernel loads those as
+// scalars and resumes each element's hash at round 8 - 8 of 64 rounds saved per
+// element, with no per-block barrier (which is why a precompute kernel beats a
+// shared-memory hoist here). Byte-identical to FromOracle's retry==0 result; the
 // ~2^-31 retry/fallback case defers to the full FromOracle path.
 
 __device__ inline void PackSeedWords(const DeviceSeedBytes& seed, uint32_t seed_w[8])
@@ -910,21 +1163,57 @@ __global__ void PrecomputeSeedMidstatesKernel(const DeviceSeedBytes* seeds,
     if (i >= seed_count) {
         return;
     }
-    uint32_t w[8];
-    PackSeedWords(seeds[i], w);
+    uint32_t schedule[SEED_PRECOMPUTED_SCHEDULE_WORDS];
+    PackSeedWords(seeds[i], schedule);
     uint32_t a = 0x6a09e667U, b = 0xbb67ae85U, c = 0x3c6ef372U, d = 0xa54ff53aU;
     uint32_t e = 0x510e527fU, f = 0x9b05688cU, g = 0x1f83d9abU, h = 0x5be0cd19U;
     #pragma unroll
     for (uint32_t t = 0; t < 8; ++t) {
-        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + w[t];
+        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + schedule[t];
         const uint32_t t2 = ShaBSig0(a) + ShaMaj(a, b, c);
         h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
     }
-    uint32_t* o = midstates + static_cast<size_t>(i) * 16U;
-    o[0] = w[0]; o[1] = w[1]; o[2] = w[2]; o[3] = w[3];
-    o[4] = w[4]; o[5] = w[5]; o[6] = w[6]; o[7] = w[7];
-    o[8] = a; o[9] = b; o[10] = c; o[11] = d;
-    o[12] = e; o[13] = f; o[14] = g; o[15] = h;
+    #pragma unroll
+    for (uint32_t t = 8; t < 16; ++t) {
+        schedule[t] = 0U;
+    }
+    schedule[9] = 0x80000000U;
+    schedule[15] = 36U * 8U;
+    #pragma unroll
+    for (uint32_t t = 16; t < SEED_PRECOMPUTED_SCHEDULE_WORDS; ++t) {
+        schedule[t] = ShaSSig1(schedule[t - 2U]) + schedule[t - 7U] +
+            ShaSSig0(schedule[t - 15U]) + schedule[t - 16U];
+    }
+
+    uint32_t* o = midstates + static_cast<size_t>(i) * SEED_MIDSTATE_WORDS;
+    o[0] = schedule[7];
+    o[1] = a; o[2] = b; o[3] = c; o[4] = d;
+    o[5] = e; o[6] = f; o[7] = g; o[8] = h;
+    o[9] = schedule[16]; o[10] = schedule[17]; o[11] = schedule[18]; o[12] = schedule[19];
+    o[13] = schedule[20]; o[14] = schedule[21]; o[15] = schedule[22];
+}
+
+__device__ __forceinline__ void Sha256RoundWithWord(uint32_t wt,
+                                                    uint32_t round,
+                                                    uint32_t& a,
+                                                    uint32_t& b,
+                                                    uint32_t& c,
+                                                    uint32_t& d,
+                                                    uint32_t& e,
+                                                    uint32_t& f,
+                                                    uint32_t& g,
+                                                    uint32_t& h)
+{
+    const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[round] + wt;
+    const uint32_t t2 = ShaBSig0(a) + ShaMaj(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
 }
 
 // retry==0 candidate resuming from a precomputed midstate (loaded as scalars so
@@ -932,33 +1221,37 @@ __global__ void PrecomputeSeedMidstatesKernel(const DeviceSeedBytes* seeds,
 __device__ inline uint32_t CandidateFromMidstateScalars(const uint32_t* mb, uint32_t index)
 {
     uint32_t w[16];
-    w[0] = mb[0]; w[1] = mb[1]; w[2] = mb[2]; w[3] = mb[3];
-    w[4] = mb[4]; w[5] = mb[5]; w[6] = mb[6]; w[7] = mb[7];
-    #pragma unroll
-    for (uint32_t i = 8; i < 16; ++i) {
-        w[i] = 0U;
-    }
-    SetShaByte(w, 32U, index & 0xffU);
-    SetShaByte(w, 33U, (index >> 8U) & 0xffU);
-    SetShaByte(w, 34U, (index >> 16U) & 0xffU);
-    SetShaByte(w, 35U, (index >> 24U) & 0xffU);
-    SetShaByte(w, 36U, 0x80U);
+    w[7] = mb[0];
+    // The hot retry==0 message is exactly seed[32] || LE32(index).
+    // Materialize the second SHA block tail directly instead of byte-packing it.
+    w[8] = Bswap32(index);
+    w[9] = 0x80000000U;
+    w[10] = 0U;
+    w[11] = 0U;
+    w[12] = 0U;
+    w[13] = 0U;
+    w[14] = 0U;
     w[15] = 36U * 8U;
 
-    uint32_t a = mb[8], b = mb[9], c = mb[10], d = mb[11];
-    uint32_t e = mb[12], f = mb[13], g = mb[14], h = mb[15];
+    uint32_t a = mb[1], b = mb[2], c = mb[3], d = mb[4];
+    uint32_t e = mb[5], f = mb[6], g = mb[7], h = mb[8];
     #pragma unroll
-    for (uint32_t t = 8; t < 64; ++t) {
-        uint32_t wt;
-        if (t < 16) {
-            wt = w[t];
-        } else {
-            wt = ShaSSig1(w[(t - 2) & 15U]) + w[(t - 7) & 15U] + ShaSSig0(w[(t - 15) & 15U]) + w[(t - 16) & 15U];
-            w[t & 15U] = wt;
-        }
-        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + wt;
-        const uint32_t t2 = ShaBSig0(a) + ShaMaj(a, b, c);
-        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    for (uint32_t t = 8; t < 16; ++t) {
+        Sha256RoundWithWord(w[t], t, a, b, c, d, e, f, g, h);
+    }
+    #pragma unroll
+    for (uint32_t t = 16; t < SEED_PRECOMPUTED_SCHEDULE_WORDS; ++t) {
+        const uint32_t wt = mb[9U + (t - 16U)];
+        w[t & 15U] = wt;
+        Sha256RoundWithWord(wt, t, a, b, c, d, e, f, g, h);
+    }
+    #pragma unroll
+    for (uint32_t t = SEED_PRECOMPUTED_SCHEDULE_WORDS; t < 64; ++t) {
+        const uint32_t wt =
+            ShaSSig1(w[(t - 2U) & 15U]) + w[(t - 7U) & 15U] +
+            ShaSSig0(w[(t - 15U) & 15U]) + w[(t - 16U) & 15U];
+        w[t & 15U] = wt;
+        Sha256RoundWithWord(wt, t, a, b, c, d, e, f, g, h);
     }
     return Bswap32(0x6a09e667U + a) & MODULUS;
 }
@@ -977,11 +1270,166 @@ __global__ void GenerateBaseMatrixFromSeedMidstateKernel(const DeviceSeedBytes* 
     const uint32_t batch_index = static_cast<uint32_t>(gid / matrix_elements);
     const uint32_t local_index = static_cast<uint32_t>(gid % matrix_elements);
     (void)n;
-    const uint32_t* mb = midstates + static_cast<size_t>(batch_index) * 16U;
+    const uint32_t* mb = midstates + static_cast<size_t>(batch_index) * SEED_MIDSTATE_WORDS;
     const uint32_t candidate = CandidateFromMidstateScalars(mb, local_index);
     output_batch[gid] = candidate < MODULUS
         ? candidate
         : FromOracle(seeds[batch_index], local_index);
+}
+
+__device__ __forceinline__ Element LowRankDotR8(const Element* noise_left,
+                                                const Element* noise_right,
+                                                uint32_t row,
+                                                uint32_t col,
+                                                uint32_t n)
+{
+    const Element* left = noise_left + static_cast<size_t>(row) * 8U;
+    const uint64_t acc0 =
+        static_cast<uint64_t>(left[0]) * noise_right[col] +
+        static_cast<uint64_t>(left[1]) * noise_right[n + col] +
+        static_cast<uint64_t>(left[2]) * noise_right[2U * n + col] +
+        static_cast<uint64_t>(left[3]) * noise_right[3U * n + col];
+    const uint64_t acc1 =
+        static_cast<uint64_t>(left[4]) * noise_right[4U * n + col] +
+        static_cast<uint64_t>(left[5]) * noise_right[5U * n + col] +
+        static_cast<uint64_t>(left[6]) * noise_right[6U * n + col] +
+        static_cast<uint64_t>(left[7]) * noise_right[7U * n + col];
+    return FieldAdd(Reduce64(acc0), Reduce64(acc1));
+}
+
+__device__ __forceinline__ Element LowRankDotR8N512SharedLeft(const Element* left,
+                                                              const Element* noise_right,
+                                                              uint32_t col)
+{
+    const uint64_t acc0 =
+        static_cast<uint64_t>(left[0]) * noise_right[col] +
+        static_cast<uint64_t>(left[1]) * noise_right[512U + col] +
+        static_cast<uint64_t>(left[2]) * noise_right[1024U + col] +
+        static_cast<uint64_t>(left[3]) * noise_right[1536U + col];
+    const uint64_t acc1 =
+        static_cast<uint64_t>(left[4]) * noise_right[2048U + col] +
+        static_cast<uint64_t>(left[5]) * noise_right[2560U + col] +
+        static_cast<uint64_t>(left[6]) * noise_right[3072U + col] +
+        static_cast<uint64_t>(left[7]) * noise_right[3584U + col];
+    return FieldAdd(Reduce64(acc0), Reduce64(acc1));
+}
+
+__device__ __noinline__ Element FromOracleRare(const DeviceSeedBytes* __restrict__ seeds,
+                                               uint32_t batch_index,
+                                               uint32_t index)
+{
+    return FromOracle(seeds[batch_index], index);
+}
+
+__device__ __forceinline__ Element BaseFromMidstateOrOracleRare(const DeviceSeedBytes* __restrict__ seeds,
+                                                                const uint32_t* __restrict__ midstate,
+                                                                uint32_t batch_index,
+                                                                uint32_t index)
+{
+    const uint32_t candidate = CandidateFromMidstateScalars(midstate, index);
+    if (candidate == MODULUS) {
+        return FromOracleRare(seeds, batch_index, index);
+    }
+    return candidate;
+}
+
+template <bool ContiguousInputs>
+__global__ void GeneratePerturbedMatrixFromSeedMidstatePackedPointersKernel(
+    const DeviceSeedBytes* seeds,
+    const uint32_t* midstates,
+    const Element* const* packed_input_ptrs,
+    const Element* packed_input_base,
+    uint32_t packed_input_stride_words,
+    uint32_t noise_left_offset_words,
+    uint32_t noise_right_offset_words,
+    uint32_t n,
+    uint32_t r,
+    size_t total_matrix_elements,
+    uint32_t matrix_elements,
+    Element* output_batch)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total_matrix_elements) {
+        return;
+    }
+
+    const uint32_t batch_index = static_cast<uint32_t>(gid / matrix_elements);
+    const uint32_t local_index = static_cast<uint32_t>(gid % matrix_elements);
+    const uint32_t row = local_index / n;
+    const uint32_t col = local_index % n;
+    const Element* packed_inputs = ContiguousInputs
+        ? packed_input_base + static_cast<size_t>(batch_index) * packed_input_stride_words
+        : packed_input_ptrs[batch_index];
+    const Element* noise_left = packed_inputs + noise_left_offset_words;
+    const Element* noise_right = packed_inputs + noise_right_offset_words;
+
+    Element perturbation{0};
+    if (r == 8U) {
+        perturbation = LowRankDotR8(noise_left, noise_right, row, col, n);
+    } else {
+        uint64_t acc{0};
+        uint32_t pending{0};
+        for (uint32_t k = 0; k < r; ++k) {
+            acc += static_cast<uint64_t>(noise_left[row * r + k]) * noise_right[k * n + col];
+            if (++pending == REDUCE_INTERVAL) {
+                acc = Reduce64(acc);
+                pending = 0;
+            }
+        }
+        perturbation = Reduce64(acc);
+    }
+
+    const uint32_t* mb = midstates + static_cast<size_t>(batch_index) * SEED_MIDSTATE_WORDS;
+    const uint32_t candidate = CandidateFromMidstateScalars(mb, local_index);
+    const Element base = candidate < MODULUS
+        ? candidate
+        : FromOracle(seeds[batch_index], local_index);
+    output_batch[gid] = FieldAdd(base, perturbation);
+}
+
+__global__ void GeneratePerturbedMatrix512R8FromSeedMidstateContiguousKernel(
+    const DeviceSeedBytes* seeds,
+    const uint32_t* midstates,
+    const Element* packed_input_base,
+    uint32_t packed_input_stride_words,
+    uint32_t noise_left_offset_words,
+    uint32_t noise_right_offset_words,
+    size_t total_matrix_elements,
+    Element* output_batch)
+{
+    constexpr uint32_t N = 512U;
+    constexpr uint32_t MATRIX_ELEMENTS = N * N;
+    constexpr uint32_t THREADS_PER_BLOCK = 256U;
+    constexpr uint32_t BLOCKS_PER_MATRIX = MATRIX_ELEMENTS / THREADS_PER_BLOCK;
+    const size_t block_first_gid = static_cast<size_t>(blockIdx.x) * blockDim.x;
+    if (block_first_gid >= total_matrix_elements) {
+        return;
+    }
+
+    const uint32_t batch_index = static_cast<uint32_t>(blockIdx.x >> 10U);
+    const uint32_t local_index =
+        ((static_cast<uint32_t>(blockIdx.x) & (BLOCKS_PER_MATRIX - 1U)) << 8U) |
+        static_cast<uint32_t>(threadIdx.x);
+    const uint32_t row = local_index >> 9U;
+    const uint32_t col = local_index & (N - 1U);
+    const Element* packed_inputs = packed_input_base + static_cast<size_t>(batch_index) * packed_input_stride_words;
+    const Element* noise_left = packed_inputs + noise_left_offset_words;
+    const Element* noise_right = packed_inputs + noise_right_offset_words;
+    __shared__ uint32_t shared_midstate[SEED_MIDSTATE_WORDS];
+    __shared__ Element shared_noise_left[8];
+    if (threadIdx.x < SEED_MIDSTATE_WORDS) {
+        const uint32_t* mb = midstates + static_cast<size_t>(batch_index) * SEED_MIDSTATE_WORDS;
+        shared_midstate[threadIdx.x] = mb[threadIdx.x];
+    }
+    if (threadIdx.x < 8U) {
+        shared_noise_left[threadIdx.x] = noise_left[static_cast<size_t>(row) * 8U + threadIdx.x];
+    }
+    __syncthreads();
+
+    const Element perturbation = LowRankDotR8N512SharedLeft(shared_noise_left, noise_right, col);
+    const Element base = BaseFromMidstateOrOracleRare(seeds, shared_midstate, batch_index, local_index);
+    const size_t gid = block_first_gid + threadIdx.x;
+    output_batch[gid] = FieldAdd(base, perturbation);
 }
 
 __device__ __forceinline__ void ReducePartialsInPlace(Element* partials, uint32_t tid)
@@ -1413,6 +1861,32 @@ __global__ void BuildFactoredRhsKernel(const Element* __restrict__ matrix_b_batc
     rhs_batch[gid] = Reduce64(acc);
 }
 
+__device__ __forceinline__ Element CompressBRow16(const Element* w_row, const Element* b_row)
+{
+    const uint64_t acc0 =
+        static_cast<uint64_t>(w_row[0]) * b_row[0] +
+        static_cast<uint64_t>(w_row[1]) * b_row[1] +
+        static_cast<uint64_t>(w_row[2]) * b_row[2] +
+        static_cast<uint64_t>(w_row[3]) * b_row[3];
+    const uint64_t acc1 =
+        static_cast<uint64_t>(w_row[4]) * b_row[4] +
+        static_cast<uint64_t>(w_row[5]) * b_row[5] +
+        static_cast<uint64_t>(w_row[6]) * b_row[6] +
+        static_cast<uint64_t>(w_row[7]) * b_row[7];
+    const uint64_t acc2 =
+        static_cast<uint64_t>(w_row[8]) * b_row[8] +
+        static_cast<uint64_t>(w_row[9]) * b_row[9] +
+        static_cast<uint64_t>(w_row[10]) * b_row[10] +
+        static_cast<uint64_t>(w_row[11]) * b_row[11];
+    const uint64_t acc3 =
+        static_cast<uint64_t>(w_row[12]) * b_row[12] +
+        static_cast<uint64_t>(w_row[13]) * b_row[13] +
+        static_cast<uint64_t>(w_row[14]) * b_row[14] +
+        static_cast<uint64_t>(w_row[15]) * b_row[15];
+    return FieldAdd(FieldAdd(Reduce64(acc0), Reduce64(acc1)),
+                    FieldAdd(Reduce64(acc2), Reduce64(acc3)));
+}
+
 __global__ void BuildFactoredRhsPackedPointersKernel(const Element* __restrict__ matrix_b_batch,
                                                      const Element* const* __restrict__ packed_input_ptrs,
                                                      uint32_t compress_offset_words,
@@ -1436,6 +1910,10 @@ __global__ void BuildFactoredRhsPackedPointersKernel(const Element* __restrict__
     const Element* b_row = matrix_b_batch + static_cast<size_t>(batch_index) * matrix_elements +
         static_cast<size_t>(m) * n + j * block_size;
     const Element* w_row = packed_input_ptrs[batch_index] + compress_offset_words + x * block_size;
+    if (block_size == 16U) {
+        rhs_batch[gid] = CompressBRow16(w_row, b_row);
+        return;
+    }
     uint64_t acc{0};
     uint32_t pending{0};
     for (uint32_t y = 0; y < block_size; ++y) {
@@ -1446,6 +1924,322 @@ __global__ void BuildFactoredRhsPackedPointersKernel(const Element* __restrict__
         }
     }
     rhs_batch[gid] = Reduce64(acc);
+}
+
+template <bool ContiguousInputs, bool SharedCompressTile>
+__global__ void BuildFactoredRhsDirectVariableBasePackedPointersKernel(
+    const DeviceSeedBytes* seeds,
+    const uint32_t* midstates,
+    const Element* const* __restrict__ packed_input_ptrs,
+    const Element* __restrict__ packed_input_base,
+    uint32_t packed_input_stride_words,
+    uint32_t noise_left_offset_words,
+    uint32_t noise_right_offset_words,
+    uint32_t compress_offset_words,
+    uint32_t n,
+    uint32_t block_size,
+    uint32_t r,
+    size_t total_group_count,
+    uint32_t groups_per_request,
+    uint32_t rhs_elements,
+    Element* __restrict__ rhs_batch)
+{
+    const uint32_t lane = threadIdx.x & 31U;
+    const uint32_t half = lane >> 4U;
+    const uint32_t local_y = lane & 15U;
+    const uint32_t halfwarp_in_block = threadIdx.x >> 4U;
+    const uint32_t segment_index = blockIdx.x * (blockDim.x >> 4U) + halfwarp_in_block;
+    if (segment_index >= total_group_count) {
+        return;
+    }
+
+    const uint32_t batch_index = segment_index / groups_per_request;
+    const uint32_t local_group = segment_index % groups_per_request;
+    const uint32_t m = local_group % n;
+    const uint32_t j = local_group / n;
+    const Element* packed_inputs = ContiguousInputs
+        ? packed_input_base + static_cast<size_t>(batch_index) * packed_input_stride_words
+        : packed_input_ptrs[batch_index];
+    const Element* noise_left = packed_inputs + noise_left_offset_words;
+    const Element* noise_right = packed_inputs + noise_right_offset_words;
+    const Element* compress_vec = packed_inputs + compress_offset_words;
+    const unsigned active_mask = half == 0U ? 0x0000ffffU : 0xffff0000U;
+
+    const uint32_t col = j * block_size + local_y;
+    const uint32_t local_matrix_index = m * n + col;
+    const uint32_t* mb = midstates + static_cast<size_t>(batch_index) * SEED_MIDSTATE_WORDS;
+    const uint32_t candidate = CandidateFromMidstateScalars(mb, local_matrix_index);
+    const Element base = candidate < MODULUS
+        ? candidate
+        : FromOracle(seeds[batch_index], local_matrix_index);
+
+    (void)r;
+    const Element left_lane = local_y < 8U ? noise_left[m * 8U + local_y] : 0;
+    const uint64_t acc0 =
+        static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 0U, 16)) * noise_right[col] +
+        static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 1U, 16)) * noise_right[n + col] +
+        static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 2U, 16)) * noise_right[2U * n + col] +
+        static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 3U, 16)) * noise_right[3U * n + col];
+    const uint64_t acc1 =
+        static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 4U, 16)) * noise_right[4U * n + col] +
+        static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 5U, 16)) * noise_right[5U * n + col] +
+        static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 6U, 16)) * noise_right[6U * n + col] +
+        static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 7U, 16)) * noise_right[7U * n + col];
+    const Element perturbation = FieldAdd(Reduce64(acc0), Reduce64(acc1));
+    const Element b_value = FieldAdd(base, perturbation);
+
+    const uint32_t x = local_y;
+    Element* transposed_compress = nullptr;
+    if constexpr (SharedCompressTile) {
+        constexpr uint32_t TILE_DIM{16U};
+        constexpr uint32_t TILE_STRIDE{17U};
+        extern __shared__ Element shared_compress_tiles[];
+        transposed_compress = shared_compress_tiles + static_cast<size_t>(halfwarp_in_block) *
+            TILE_DIM * TILE_STRIDE;
+
+        #pragma unroll
+        for (uint32_t row = 0; row < TILE_DIM; ++row) {
+            transposed_compress[local_y * TILE_STRIDE + row] =
+                compress_vec[row * TILE_DIM + local_y];
+        }
+        __syncwarp(active_mask);
+    }
+    uint64_t rhs_acc{0};
+    uint32_t rhs_pending{0};
+    #pragma unroll
+    for (uint32_t y = 0; y < 16U; ++y) {
+        Element compress_coeff;
+        if constexpr (SharedCompressTile) {
+            compress_coeff = transposed_compress[y * 17U + x];
+        } else {
+            compress_coeff = compress_vec[x * 16U + y];
+        }
+        rhs_acc += static_cast<uint64_t>(compress_coeff) *
+            __shfl_sync(active_mask, b_value, y, 16);
+        if (++rhs_pending == REDUCE_INTERVAL) {
+            rhs_acc = Reduce64(rhs_acc);
+            rhs_pending = 0;
+        }
+    }
+    rhs_batch[static_cast<size_t>(batch_index) * rhs_elements +
+        static_cast<size_t>(j * 16U + x) * n + m] = Reduce64(rhs_acc);
+}
+
+template <bool ContiguousInputs>
+__launch_bounds__(WORKSPACE_THREADS, 4)
+__global__ void BuildFactoredRhsDirect512B16R8TileKernel(
+    const DeviceSeedBytes* seeds,
+    const uint32_t* midstates,
+    const Element* const* __restrict__ packed_input_ptrs,
+    const Element* __restrict__ packed_input_base,
+    uint32_t packed_input_stride_words,
+    uint32_t noise_left_offset_words,
+    uint32_t noise_right_offset_words,
+    uint32_t compress_offset_words,
+    uint32_t batch_size,
+    Element* __restrict__ rhs_batch)
+{
+    constexpr uint32_t N = 512U;
+    constexpr uint32_t B = 16U;
+    constexpr uint32_t R = 8U;
+    constexpr uint32_t BLOCKS_PER_AXIS = N / B;
+    constexpr uint32_t M_TILE = 32U;
+    constexpr uint32_t M_TILES_PER_J = N / M_TILE;
+    constexpr uint32_t BLOCKS_PER_REQUEST = BLOCKS_PER_AXIS * M_TILES_PER_J;
+    constexpr uint32_t RHS_ELEMENTS = B * N * BLOCKS_PER_AXIS;
+
+    const uint32_t tid = threadIdx.x;
+    const uint32_t batch_index = blockIdx.x / BLOCKS_PER_REQUEST;
+    if (batch_index >= batch_size) {
+        return;
+    }
+
+    const uint32_t local_tile = blockIdx.x - batch_index * BLOCKS_PER_REQUEST;
+    const uint32_t j = local_tile / M_TILES_PER_J;
+    const uint32_t m_tile = local_tile & (M_TILES_PER_J - 1U);
+    const uint32_t m_base = m_tile * M_TILE;
+
+    const Element* packed_inputs = ContiguousInputs
+        ? packed_input_base + static_cast<size_t>(batch_index) * packed_input_stride_words
+        : packed_input_ptrs[batch_index];
+    const Element* noise_left = packed_inputs + noise_left_offset_words;
+    const Element* noise_right = packed_inputs + noise_right_offset_words;
+    const Element* compress_vec = packed_inputs + compress_offset_words;
+
+    __shared__ uint32_t shared_midstate[SEED_MIDSTATE_WORDS];
+    __shared__ Element shared_compress[B * B];
+    __shared__ Element shared_noise_right[R * B];
+
+    if (tid < SEED_MIDSTATE_WORDS) {
+        const uint32_t* mb = midstates + static_cast<size_t>(batch_index) * SEED_MIDSTATE_WORDS;
+        shared_midstate[tid] = mb[tid];
+    }
+    if (tid < B * B) {
+        shared_compress[tid] = compress_vec[tid];
+    }
+    if (tid < R * B) {
+        const uint32_t k = tid / B;
+        const uint32_t y = tid - k * B;
+        shared_noise_right[tid] = noise_right[k * N + j * B + y];
+    }
+    __syncthreads();
+
+    const uint32_t lane = tid & 31U;
+    const uint32_t local_y = lane & (B - 1U);
+    const uint32_t halfwarp_in_block = tid >> 4U;
+    const unsigned active_mask = (lane < B) ? 0x0000ffffU : 0xffff0000U;
+    const uint32_t col = j * B + local_y;
+
+    #pragma unroll
+    for (uint32_t phase = 0; phase < 2U; ++phase) {
+        const uint32_t m_local = phase * B + halfwarp_in_block;
+        const uint32_t m = m_base + m_local;
+        const Element left_lane = local_y < R
+            ? noise_left[m * R + local_y]
+            : Element{0};
+        const uint64_t acc0 =
+            static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 0U, B)) * shared_noise_right[local_y] +
+            static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 1U, B)) * shared_noise_right[B + local_y] +
+            static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 2U, B)) * shared_noise_right[2U * B + local_y] +
+            static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 3U, B)) * shared_noise_right[3U * B + local_y];
+        const uint64_t acc1 =
+            static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 4U, B)) * shared_noise_right[4U * B + local_y] +
+            static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 5U, B)) * shared_noise_right[5U * B + local_y] +
+            static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 6U, B)) * shared_noise_right[6U * B + local_y] +
+            static_cast<uint64_t>(__shfl_sync(active_mask, left_lane, 7U, B)) * shared_noise_right[7U * B + local_y];
+        const Element perturbation = FieldAdd(Reduce64(acc0), Reduce64(acc1));
+
+        const uint32_t local_matrix_index = m * N + col;
+        const uint32_t candidate = CandidateFromMidstateScalars(shared_midstate, local_matrix_index);
+        const Element base = candidate < MODULUS
+            ? candidate
+            : FromOracle(seeds[batch_index], local_matrix_index);
+        const Element b_value = FieldAdd(base, perturbation);
+
+        const uint32_t x = local_y;
+        uint64_t rhs_acc{0};
+        uint32_t rhs_pending{0};
+        #pragma unroll
+        for (uint32_t y = 0; y < B; ++y) {
+            rhs_acc += static_cast<uint64_t>(shared_compress[x * B + y]) *
+                __shfl_sync(active_mask, b_value, y, B);
+            if (++rhs_pending == REDUCE_INTERVAL) {
+                rhs_acc = Reduce64(rhs_acc);
+                rhs_pending = 0;
+            }
+        }
+        rhs_batch[static_cast<size_t>(batch_index) * RHS_ELEMENTS +
+            static_cast<size_t>(j * B + x) * N + m] = Reduce64(rhs_acc);
+    }
+}
+
+template <bool ContiguousInputs>
+__global__ void ComputeLowRankAProjectionKernel(
+    const Element* const* __restrict__ packed_input_ptrs,
+    const Element* __restrict__ packed_input_base,
+    uint32_t packed_input_stride_words,
+    uint32_t noise_right_offset_words,
+    const Element* __restrict__ rhs_batch,
+    uint32_t n,
+    uint32_t block_size,
+    uint32_t r,
+    uint32_t blocks_per_axis,
+    uint32_t rhs_elements,
+    uint32_t projection_elements,
+    size_t total_projection_count,
+    Element* __restrict__ projection_batch)
+{
+    const uint32_t lane = threadIdx.x & 31U;
+    const uint32_t term_index = blockIdx.x * (blockDim.x >> 5U) + (threadIdx.x >> 5U);
+    if (term_index >= total_projection_count) {
+        return;
+    }
+
+    const uint32_t batch_index = term_index / projection_elements;
+    const uint32_t local = term_index % projection_elements;
+    const uint32_t k = local % r;
+    const uint32_t x = (local / r) % block_size;
+    const uint32_t j = local / (r * block_size);
+    const Element* packed_inputs = ContiguousInputs
+        ? packed_input_base + static_cast<size_t>(batch_index) * packed_input_stride_words
+        : packed_input_ptrs[batch_index];
+    const Element* noise_right = packed_inputs + noise_right_offset_words;
+    const Element* rhs = rhs_batch + static_cast<size_t>(batch_index) * rhs_elements +
+        static_cast<size_t>(j * block_size + x) * n;
+
+    uint64_t acc{0};
+    uint32_t pending{0};
+    for (uint32_t m = lane; m < n; m += 32U) {
+        acc += static_cast<uint64_t>(noise_right[k * n + m]) * rhs[m];
+        if (++pending == REDUCE_INTERVAL) {
+            acc = Reduce64(acc);
+            pending = 0;
+        }
+    }
+
+    Element value = Reduce64(acc);
+    for (uint32_t offset = 16U; offset > 0U; offset >>= 1U) {
+        value = FieldAdd(value, __shfl_down_sync(0xffffffffU, value, offset));
+    }
+    if (lane == 0) {
+        projection_batch[static_cast<size_t>(batch_index) * projection_elements + local] = value;
+    }
+}
+
+template <bool ContiguousInputs>
+__global__ void ApplyLowRankACorrectionKernel(
+    const Element* const* __restrict__ packed_input_ptrs,
+    const Element* __restrict__ packed_input_base,
+    uint32_t packed_input_stride_words,
+    uint32_t noise_left_offset_words,
+    const Element* __restrict__ projection_batch,
+    uint32_t block_size,
+    uint32_t r,
+    uint32_t blocks_per_axis,
+    uint32_t words_per_request,
+    uint32_t projection_elements,
+    size_t total_word_count,
+    Element* __restrict__ output)
+{
+    const uint32_t lane = threadIdx.x & 31U;
+    const uint32_t word_index = blockIdx.x * (blockDim.x >> 5U) + (threadIdx.x >> 5U);
+    if (word_index >= total_word_count) {
+        return;
+    }
+
+    const uint32_t batch_index = word_index / words_per_request;
+    const uint32_t local_word = word_index % words_per_request;
+    const uint32_t j = local_word % blocks_per_axis;
+    const uint32_t i = local_word / blocks_per_axis;
+    const Element* packed_inputs = ContiguousInputs
+        ? packed_input_base + static_cast<size_t>(batch_index) * packed_input_stride_words
+        : packed_input_ptrs[batch_index];
+    const Element* noise_left = packed_inputs + noise_left_offset_words;
+    const Element* projection = projection_batch + static_cast<size_t>(batch_index) * projection_elements;
+
+    uint64_t acc{0};
+    uint32_t pending{0};
+    const uint32_t term_count = block_size * r;
+    for (uint32_t term = lane; term < term_count; term += 32U) {
+        const uint32_t k = term % r;
+        const uint32_t x = term / r;
+        const uint32_t row = i * block_size + x;
+        acc += static_cast<uint64_t>(noise_left[row * r + k]) *
+            projection[(j * block_size + x) * r + k];
+        if (++pending == REDUCE_INTERVAL) {
+            acc = Reduce64(acc);
+            pending = 0;
+        }
+    }
+
+    Element value = Reduce64(acc);
+    for (uint32_t offset = 16U; offset > 0U; offset >>= 1U) {
+        value = FieldAdd(value, __shfl_down_sync(0xffffffffU, value, offset));
+    }
+    if (lane == 0) {
+        const size_t out_index = static_cast<size_t>(batch_index) * words_per_request + local_word;
+        output[out_index] = FieldAdd(output[out_index], value);
+    }
 }
 
 __global__ void ComputeFactoredWordsKernel(const Element* __restrict__ matrix_a_batch,
@@ -1524,6 +2318,295 @@ __global__ void ComputeFactoredWordsKernel(const Element* __restrict__ matrix_a_
         output[base + (i0 + 1U) * blocks_per_axis + j0] = value10;
         output[base + (i0 + 1U) * blocks_per_axis + j0 + 1U] = value11;
     }
+}
+
+__global__ void ComputeFactoredWords2x4Kernel(const Element* __restrict__ matrix_a_batch,
+                                              const Element* __restrict__ rhs_batch,
+                                              uint32_t n,
+                                              uint32_t block_size,
+                                              uint32_t blocks_per_axis,
+                                              uint32_t pair_count_per_request,
+                                              uint32_t words_per_request,
+                                              uint32_t matrix_elements,
+                                              uint32_t rhs_elements,
+                                              uint32_t total_tile_count,
+                                              Element* __restrict__ output)
+{
+    (void)pair_count_per_request;
+    const uint32_t lane = threadIdx.x & 31U;
+    const uint32_t tile_index = blockIdx.x * (blockDim.x >> 5U) + (threadIdx.x >> 5U);
+    if (tile_index >= total_tile_count) {
+        return;
+    }
+
+    const uint32_t i_tiles_per_axis = blocks_per_axis >> 1U;
+    const uint32_t j_tiles_per_axis = blocks_per_axis >> 2U;
+    const uint32_t tiles_per_request = i_tiles_per_axis * j_tiles_per_axis;
+    const uint32_t batch_index = tile_index / tiles_per_request;
+    const uint32_t local_tile_index = tile_index % tiles_per_request;
+    const uint32_t j0 = (local_tile_index % j_tiles_per_axis) * 4U;
+    const uint32_t i0 = (local_tile_index / j_tiles_per_axis) * 2U;
+    const Element* matrix_a = matrix_a_batch + static_cast<size_t>(batch_index) * matrix_elements;
+    const Element* rhs = rhs_batch + static_cast<size_t>(batch_index) * rhs_elements;
+
+    uint64_t acc00{0};
+    uint64_t acc01{0};
+    uint64_t acc02{0};
+    uint64_t acc03{0};
+    uint64_t acc10{0};
+    uint64_t acc11{0};
+    uint64_t acc12{0};
+    uint64_t acc13{0};
+    uint32_t pending{0};
+
+    for (uint32_t x = 0; x < block_size; ++x) {
+        const Element* a_row0 = matrix_a + static_cast<size_t>(i0 * block_size + x) * n;
+        const Element* a_row1 = a_row0 + static_cast<size_t>(block_size) * n;
+        const Element* d_row0 = rhs + static_cast<size_t>((j0 + 0U) * block_size + x) * n;
+        const Element* d_row1 = d_row0 + static_cast<size_t>(block_size) * n;
+        const Element* d_row2 = d_row1 + static_cast<size_t>(block_size) * n;
+        const Element* d_row3 = d_row2 + static_cast<size_t>(block_size) * n;
+        for (uint32_t m = lane; m < n; m += 32U) {
+            const uint64_t a0 = a_row0[m];
+            const uint64_t a1 = a_row1[m];
+            const uint64_t d0 = d_row0[m];
+            const uint64_t d1 = d_row1[m];
+            const uint64_t d2 = d_row2[m];
+            const uint64_t d3 = d_row3[m];
+            acc00 += a0 * d0;
+            acc01 += a0 * d1;
+            acc02 += a0 * d2;
+            acc03 += a0 * d3;
+            acc10 += a1 * d0;
+            acc11 += a1 * d1;
+            acc12 += a1 * d2;
+            acc13 += a1 * d3;
+            if (++pending == REDUCE_INTERVAL) {
+                acc00 = Reduce64(acc00);
+                acc01 = Reduce64(acc01);
+                acc02 = Reduce64(acc02);
+                acc03 = Reduce64(acc03);
+                acc10 = Reduce64(acc10);
+                acc11 = Reduce64(acc11);
+                acc12 = Reduce64(acc12);
+                acc13 = Reduce64(acc13);
+                pending = 0;
+            }
+        }
+    }
+
+    Element value00 = Reduce64(acc00);
+    Element value01 = Reduce64(acc01);
+    Element value02 = Reduce64(acc02);
+    Element value03 = Reduce64(acc03);
+    Element value10 = Reduce64(acc10);
+    Element value11 = Reduce64(acc11);
+    Element value12 = Reduce64(acc12);
+    Element value13 = Reduce64(acc13);
+    for (uint32_t offset = 16U; offset > 0U; offset >>= 1U) {
+        value00 = FieldAdd(value00, __shfl_down_sync(0xffffffffU, value00, offset));
+        value01 = FieldAdd(value01, __shfl_down_sync(0xffffffffU, value01, offset));
+        value02 = FieldAdd(value02, __shfl_down_sync(0xffffffffU, value02, offset));
+        value03 = FieldAdd(value03, __shfl_down_sync(0xffffffffU, value03, offset));
+        value10 = FieldAdd(value10, __shfl_down_sync(0xffffffffU, value10, offset));
+        value11 = FieldAdd(value11, __shfl_down_sync(0xffffffffU, value11, offset));
+        value12 = FieldAdd(value12, __shfl_down_sync(0xffffffffU, value12, offset));
+        value13 = FieldAdd(value13, __shfl_down_sync(0xffffffffU, value13, offset));
+    }
+    if (lane == 0) {
+        const uint32_t base = batch_index * words_per_request;
+        output[base + i0 * blocks_per_axis + j0 + 0U] = value00;
+        output[base + i0 * blocks_per_axis + j0 + 1U] = value01;
+        output[base + i0 * blocks_per_axis + j0 + 2U] = value02;
+        output[base + i0 * blocks_per_axis + j0 + 3U] = value03;
+        output[base + (i0 + 1U) * blocks_per_axis + j0 + 0U] = value10;
+        output[base + (i0 + 1U) * blocks_per_axis + j0 + 1U] = value11;
+        output[base + (i0 + 1U) * blocks_per_axis + j0 + 2U] = value12;
+        output[base + (i0 + 1U) * blocks_per_axis + j0 + 3U] = value13;
+    }
+}
+
+__global__ void ComputeFactoredWords4x4Kernel(const Element* __restrict__ matrix_a_batch,
+                                              const Element* __restrict__ rhs_batch,
+                                              uint32_t n,
+                                              uint32_t block_size,
+                                              uint32_t blocks_per_axis,
+                                              uint32_t pair_count_per_request,
+                                              uint32_t words_per_request,
+                                              uint32_t matrix_elements,
+                                              uint32_t rhs_elements,
+                                              uint32_t total_tile_count,
+                                              Element* __restrict__ output)
+{
+    (void)pair_count_per_request;
+    const uint32_t lane = threadIdx.x & 31U;
+    const uint32_t tile_index = blockIdx.x * (blockDim.x >> 5U) + (threadIdx.x >> 5U);
+    if (tile_index >= total_tile_count) {
+        return;
+    }
+
+    const uint32_t tiles_per_axis = blocks_per_axis >> 2U;
+    const uint32_t tiles_per_request = tiles_per_axis * tiles_per_axis;
+    const uint32_t batch_index = tile_index / tiles_per_request;
+    const uint32_t local_tile_index = tile_index % tiles_per_request;
+    const uint32_t j0 = (local_tile_index % tiles_per_axis) * 4U;
+    const uint32_t i0 = (local_tile_index / tiles_per_axis) * 4U;
+    const Element* matrix_a = matrix_a_batch + static_cast<size_t>(batch_index) * matrix_elements;
+    const Element* rhs = rhs_batch + static_cast<size_t>(batch_index) * rhs_elements;
+
+    uint64_t acc00{0}; uint64_t acc01{0}; uint64_t acc02{0}; uint64_t acc03{0};
+    uint64_t acc10{0}; uint64_t acc11{0}; uint64_t acc12{0}; uint64_t acc13{0};
+    uint64_t acc20{0}; uint64_t acc21{0}; uint64_t acc22{0}; uint64_t acc23{0};
+    uint64_t acc30{0}; uint64_t acc31{0}; uint64_t acc32{0}; uint64_t acc33{0};
+    uint32_t pending{0};
+
+    for (uint32_t x = 0; x < block_size; ++x) {
+        const Element* a_row0 = matrix_a + static_cast<size_t>((i0 + 0U) * block_size + x) * n;
+        const Element* a_row1 = a_row0 + static_cast<size_t>(block_size) * n;
+        const Element* a_row2 = a_row1 + static_cast<size_t>(block_size) * n;
+        const Element* a_row3 = a_row2 + static_cast<size_t>(block_size) * n;
+        const Element* d_row0 = rhs + static_cast<size_t>((j0 + 0U) * block_size + x) * n;
+        const Element* d_row1 = d_row0 + static_cast<size_t>(block_size) * n;
+        const Element* d_row2 = d_row1 + static_cast<size_t>(block_size) * n;
+        const Element* d_row3 = d_row2 + static_cast<size_t>(block_size) * n;
+        for (uint32_t m = lane; m < n; m += 32U) {
+            const uint64_t a0 = a_row0[m];
+            const uint64_t a1 = a_row1[m];
+            const uint64_t a2 = a_row2[m];
+            const uint64_t a3 = a_row3[m];
+            const uint64_t d0 = d_row0[m];
+            const uint64_t d1 = d_row1[m];
+            const uint64_t d2 = d_row2[m];
+            const uint64_t d3 = d_row3[m];
+            acc00 += a0 * d0; acc01 += a0 * d1; acc02 += a0 * d2; acc03 += a0 * d3;
+            acc10 += a1 * d0; acc11 += a1 * d1; acc12 += a1 * d2; acc13 += a1 * d3;
+            acc20 += a2 * d0; acc21 += a2 * d1; acc22 += a2 * d2; acc23 += a2 * d3;
+            acc30 += a3 * d0; acc31 += a3 * d1; acc32 += a3 * d2; acc33 += a3 * d3;
+            if (++pending == REDUCE_INTERVAL) {
+                acc00 = Reduce64(acc00); acc01 = Reduce64(acc01); acc02 = Reduce64(acc02); acc03 = Reduce64(acc03);
+                acc10 = Reduce64(acc10); acc11 = Reduce64(acc11); acc12 = Reduce64(acc12); acc13 = Reduce64(acc13);
+                acc20 = Reduce64(acc20); acc21 = Reduce64(acc21); acc22 = Reduce64(acc22); acc23 = Reduce64(acc23);
+                acc30 = Reduce64(acc30); acc31 = Reduce64(acc31); acc32 = Reduce64(acc32); acc33 = Reduce64(acc33);
+                pending = 0;
+            }
+        }
+    }
+
+    Element value00 = Reduce64(acc00); Element value01 = Reduce64(acc01);
+    Element value02 = Reduce64(acc02); Element value03 = Reduce64(acc03);
+    Element value10 = Reduce64(acc10); Element value11 = Reduce64(acc11);
+    Element value12 = Reduce64(acc12); Element value13 = Reduce64(acc13);
+    Element value20 = Reduce64(acc20); Element value21 = Reduce64(acc21);
+    Element value22 = Reduce64(acc22); Element value23 = Reduce64(acc23);
+    Element value30 = Reduce64(acc30); Element value31 = Reduce64(acc31);
+    Element value32 = Reduce64(acc32); Element value33 = Reduce64(acc33);
+    for (uint32_t offset = 16U; offset > 0U; offset >>= 1U) {
+        value00 = FieldAdd(value00, __shfl_down_sync(0xffffffffU, value00, offset));
+        value01 = FieldAdd(value01, __shfl_down_sync(0xffffffffU, value01, offset));
+        value02 = FieldAdd(value02, __shfl_down_sync(0xffffffffU, value02, offset));
+        value03 = FieldAdd(value03, __shfl_down_sync(0xffffffffU, value03, offset));
+        value10 = FieldAdd(value10, __shfl_down_sync(0xffffffffU, value10, offset));
+        value11 = FieldAdd(value11, __shfl_down_sync(0xffffffffU, value11, offset));
+        value12 = FieldAdd(value12, __shfl_down_sync(0xffffffffU, value12, offset));
+        value13 = FieldAdd(value13, __shfl_down_sync(0xffffffffU, value13, offset));
+        value20 = FieldAdd(value20, __shfl_down_sync(0xffffffffU, value20, offset));
+        value21 = FieldAdd(value21, __shfl_down_sync(0xffffffffU, value21, offset));
+        value22 = FieldAdd(value22, __shfl_down_sync(0xffffffffU, value22, offset));
+        value23 = FieldAdd(value23, __shfl_down_sync(0xffffffffU, value23, offset));
+        value30 = FieldAdd(value30, __shfl_down_sync(0xffffffffU, value30, offset));
+        value31 = FieldAdd(value31, __shfl_down_sync(0xffffffffU, value31, offset));
+        value32 = FieldAdd(value32, __shfl_down_sync(0xffffffffU, value32, offset));
+        value33 = FieldAdd(value33, __shfl_down_sync(0xffffffffU, value33, offset));
+    }
+    if (lane == 0) {
+        const uint32_t base = batch_index * words_per_request;
+        const uint32_t row0 = base + (i0 + 0U) * blocks_per_axis + j0;
+        const uint32_t row1 = base + (i0 + 1U) * blocks_per_axis + j0;
+        const uint32_t row2 = base + (i0 + 2U) * blocks_per_axis + j0;
+        const uint32_t row3 = base + (i0 + 3U) * blocks_per_axis + j0;
+        output[row0 + 0U] = value00; output[row0 + 1U] = value01;
+        output[row0 + 2U] = value02; output[row0 + 3U] = value03;
+        output[row1 + 0U] = value10; output[row1 + 1U] = value11;
+        output[row1 + 2U] = value12; output[row1 + 3U] = value13;
+        output[row2 + 0U] = value20; output[row2 + 1U] = value21;
+        output[row2 + 2U] = value22; output[row2 + 3U] = value23;
+        output[row3 + 0U] = value30; output[row3 + 1U] = value31;
+        output[row3 + 2U] = value32; output[row3 + 3U] = value33;
+    }
+}
+
+__global__ void FinalizeProductDigestsFromWordsKernel(const Element* __restrict__ words,
+                                                      const DeviceSeedBytes* __restrict__ sigmas,
+                                                      uint32_t batch_size,
+                                                      uint32_t words_per_request,
+                                                      uint32_t dim,
+                                                      uint32_t block_size,
+                                                      unsigned char* __restrict__ digests)
+{
+    const uint32_t batch = blockIdx.x * blockDim.x + threadIdx.x;
+    if (batch >= batch_size) {
+        return;
+    }
+
+    const Element* request_words = words + static_cast<size_t>(batch) * words_per_request;
+    uint32_t state[8];
+    Sha256Init(state);
+    const uint32_t data_blocks = words_per_request >> 4U;
+    for (uint32_t block = 0; block < data_blocks; ++block) {
+        uint32_t w[16];
+        #pragma unroll
+        for (uint32_t i = 0; i < 16U; ++i) {
+            w[i] = Bswap32(request_words[block * 16U + i]);
+        }
+        Sha256Compress(state, w);
+    }
+    uint32_t w[16] = {};
+    w[0] = 0x80000000U;
+    const uint64_t bit_len = static_cast<uint64_t>(words_per_request) * sizeof(Element) * 8U;
+    w[14] = static_cast<uint32_t>(bit_len >> 32U);
+    w[15] = static_cast<uint32_t>(bit_len);
+    Sha256Compress(state, w);
+
+    uint32_t c_hash_words[8];
+    Sha256Digest32(state, c_hash_words);
+
+    uint32_t outer[8];
+    Sha256Init(outer);
+    #pragma unroll
+    for (uint32_t i = 0; i < 16U; ++i) {
+        w[i] = 0U;
+    }
+    #pragma unroll
+    for (uint32_t i = 0; i < 24U; ++i) {
+        SetShaByte(w, i, PRODUCT_DIGEST_TAG_BYTES[i]);
+    }
+    #pragma unroll
+    for (uint32_t i = 0; i < 32U; ++i) {
+        SetShaByte(w, 24U + i, sigmas[batch].data[i]);
+    }
+    #pragma unroll
+    for (uint32_t i = 0; i < 8U; ++i) {
+        SetShaByte(w, 56U + i, ShaWordByte(c_hash_words, i));
+    }
+    Sha256Compress(outer, w);
+
+    #pragma unroll
+    for (uint32_t i = 0; i < 16U; ++i) {
+        w[i] = 0U;
+    }
+    #pragma unroll
+    for (uint32_t i = 8U; i < 32U; ++i) {
+        SetShaByte(w, i - 8U, ShaWordByte(c_hash_words, i));
+    }
+    SetShaLE32(w, 24U, dim);
+    SetShaLE32(w, 28U, block_size);
+    SetShaByte(w, 32U, 0x80U);
+    w[15] = 96U * 8U;
+    Sha256Compress(outer, w);
+
+    uint32_t final_words[8];
+    Sha256Digest32(outer, final_words);
+    StoreShaWords(final_words, digests + static_cast<size_t>(batch) * 32U);
 }
 
 std::string CudaErrorString(cudaError_t error)
@@ -2009,21 +3092,39 @@ bool FinalizeCompressedWordsPackedPointerBatch(const BufferPoolLease& lease,
             matrix_elements,
             workspace.device_factored_rhs);
         const uint32_t warps_per_block = WORKSPACE_THREADS / 32U;
-        const uint32_t tiles_per_request = (blocks_per_axis >> 1U) * (blocks_per_axis >> 1U);
-        const uint32_t total_tile_count = batch_size * tiles_per_request;
-        const uint32_t word_blocks = (total_tile_count + warps_per_block - 1U) / warps_per_block;
-        ComputeFactoredWordsKernel<<<word_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
-            workspace.device_matrix_a,
-            workspace.device_factored_rhs,
-            n,
-            b,
-            blocks_per_axis,
-            pair_count_per_request,
-            words_per_request,
-            matrix_elements,
-            rhs_elements,
-            total_tile_count,
-            workspace.device_output);
+        if ((blocks_per_axis & 3U) == 0U) {
+            const uint32_t tiles_per_request = (blocks_per_axis >> 2U) * (blocks_per_axis >> 2U);
+            const uint32_t total_tile_count = batch_size * tiles_per_request;
+            const uint32_t word_blocks = (total_tile_count + warps_per_block - 1U) / warps_per_block;
+            ComputeFactoredWords4x4Kernel<<<word_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_matrix_a,
+                workspace.device_factored_rhs,
+                n,
+                b,
+                blocks_per_axis,
+                pair_count_per_request,
+                words_per_request,
+                matrix_elements,
+                rhs_elements,
+                total_tile_count,
+                workspace.device_output);
+        } else {
+            const uint32_t tiles_per_request = (blocks_per_axis >> 1U) * (blocks_per_axis >> 1U);
+            const uint32_t total_tile_count = batch_size * tiles_per_request;
+            const uint32_t word_blocks = (total_tile_count + warps_per_block - 1U) / warps_per_block;
+            ComputeFactoredWordsKernel<<<word_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_matrix_a,
+                workspace.device_factored_rhs,
+                n,
+                b,
+                blocks_per_axis,
+                pair_count_per_request,
+                words_per_request,
+                matrix_elements,
+                rhs_elements,
+                total_tile_count,
+                workspace.device_output);
+        }
     } else {
         ComputeCompressedWordsFusedPackedPointersKernel<false><<<total_pair_count, thread_count, 0, workspace.stream>>>(
             workspace.device_matrix_a,
@@ -2069,6 +3170,434 @@ bool FinalizeCompressedWordsPackedPointerBatch(const BufferPoolLease& lease,
         result.words_per_request = 0;
         result.error = "CUDA stream completion failed:" + CudaErrorString(error);
         return false;
+    }
+
+    result.words.assign(workspace.host_output.data(), workspace.host_output.data() + total_output_count);
+    result.success = true;
+    return true;
+}
+
+bool FinalizeCompressedWordsVariableBaseDirectRhsBatch(const BufferPoolLease& lease,
+                                                       DigestWorkspace& workspace,
+                                                       uint32_t n,
+                                                       uint32_t b,
+                                                       uint32_t r,
+                                                       uint32_t batch_size,
+                                                       uint32_t noise_left_offset_words,
+                                                       uint32_t noise_right_offset_words,
+                                                       uint32_t compress_offset_words,
+                                                       const DeviceSeedBytes* device_sigma,
+                                                       const Element* packed_input_base,
+                                                       uint32_t packed_input_stride_words,
+                                                       bool use_contiguous_inputs,
+                                                       bool add_a_low_rank_correction,
+                                                       uint32_t a_noise_left_offset_words,
+                                                       uint32_t a_noise_right_offset_words,
+                                                       MatMulCompressedWordsMode mode,
+                                                       MatMulCompressedWordsBatchResult& result,
+                                                       DigestProfilingSample& sample,
+                                                       bool& allocated_buffers)
+{
+    const uint32_t blocks_per_axis = n / b;
+    const uint32_t matrix_elements = n * n;
+    const uint32_t pair_count_per_request = blocks_per_axis * blocks_per_axis;
+    const uint32_t words_per_request = mode == MatMulCompressedWordsMode::TRANSCRIPT_PREFIXES
+        ? pair_count_per_request * blocks_per_axis
+        : pair_count_per_request;
+    const size_t total_output_count = static_cast<size_t>(batch_size) * words_per_request;
+
+    if (mode != MatMulCompressedWordsMode::PRODUCT_FINAL_BLOCKS ||
+        n % 32U != 0U ||
+        (blocks_per_axis & 3U) != 0U ||
+        b != 16U ||
+        r != 8U) {
+        return FinalizeCompressedWordsPackedPointerBatch(
+            lease,
+            workspace,
+            n,
+            b,
+            r,
+            batch_size,
+            compress_offset_words,
+            mode,
+            result,
+            sample,
+            allocated_buffers);
+    }
+
+    if (!EnsureDeviceBuffer(workspace.device_output,
+                            workspace.output_capacity,
+                            total_output_count,
+                            result.error,
+                            allocated_buffers)) {
+        return false;
+    }
+
+    const uint32_t rhs_elements = b * n * blocks_per_axis;
+    const size_t total_rhs_elements = static_cast<size_t>(batch_size) * rhs_elements;
+    if (!EnsureDeviceBuffer(workspace.device_factored_rhs,
+                            workspace.factored_rhs_capacity,
+                            total_rhs_elements,
+                            result.error,
+                            allocated_buffers)) {
+        return false;
+    }
+    const uint32_t projection_elements = blocks_per_axis * b * r;
+    const size_t total_projection_elements = static_cast<size_t>(batch_size) * projection_elements;
+    if (add_a_low_rank_correction &&
+        !EnsureDeviceBuffer(workspace.device_a_rhs_projection,
+                            workspace.a_rhs_projection_capacity,
+                            total_projection_elements,
+                            result.error,
+                            allocated_buffers)) {
+        return false;
+    }
+
+    lease.RecordRequest(n, b, r, allocated_buffers);
+
+    const auto finalize_start = SteadyClock::now();
+    DirectRhsProfileEvents profile_events;
+    bool profile_cuda_events = ShouldProfileCudaEvents() && profile_events.Create();
+    const uint32_t groups_per_request = blocks_per_axis * n;
+    const size_t total_group_count = static_cast<size_t>(batch_size) * groups_per_request;
+    const uint32_t warps_per_block = WORKSPACE_THREADS / 32U;
+    const uint32_t halfwarps_per_block = WORKSPACE_THREADS / 16U;
+    const uint32_t rhs_blocks = static_cast<uint32_t>(
+        (total_group_count + halfwarps_per_block - 1U) / halfwarps_per_block);
+    const bool use_tiled_direct_rhs =
+        ShouldUseTiledDirectRhs() &&
+        n == 512U &&
+        b == 16U &&
+        r == 8U &&
+        !add_a_low_rank_correction;
+    const bool use_shared_compress_rhs = ShouldUseSharedCompressRhs();
+    const size_t shared_compress_rhs_bytes = use_shared_compress_rhs
+        ? static_cast<size_t>(halfwarps_per_block) * 16U * 17U * sizeof(Element)
+        : 0U;
+    if (profile_cuda_events &&
+        cudaEventRecord(profile_events.rhs_start, workspace.stream) != cudaSuccess) {
+        profile_cuda_events = false;
+    }
+    if (use_tiled_direct_rhs) {
+        const uint32_t tiled_rhs_blocks = batch_size * blocks_per_axis * (n / 32U);
+        if (use_contiguous_inputs) {
+            BuildFactoredRhsDirect512B16R8TileKernel<true><<<tiled_rhs_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_seed_b,
+                workspace.device_seed_midstates,
+                nullptr,
+                packed_input_base,
+                packed_input_stride_words,
+                noise_left_offset_words,
+                noise_right_offset_words,
+                compress_offset_words,
+                batch_size,
+                workspace.device_factored_rhs);
+        } else {
+            BuildFactoredRhsDirect512B16R8TileKernel<false><<<tiled_rhs_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_seed_b,
+                workspace.device_seed_midstates,
+                workspace.device_prepared_input_ptrs,
+                nullptr,
+                0,
+                noise_left_offset_words,
+                noise_right_offset_words,
+                compress_offset_words,
+                batch_size,
+                workspace.device_factored_rhs);
+        }
+    } else if (use_contiguous_inputs) {
+        if (use_shared_compress_rhs) {
+            BuildFactoredRhsDirectVariableBasePackedPointersKernel<true, true><<<rhs_blocks, WORKSPACE_THREADS, shared_compress_rhs_bytes, workspace.stream>>>(
+                workspace.device_seed_b,
+                workspace.device_seed_midstates,
+                nullptr,
+                packed_input_base,
+                packed_input_stride_words,
+                noise_left_offset_words,
+                noise_right_offset_words,
+                compress_offset_words,
+                n,
+                b,
+                r,
+                total_group_count,
+                groups_per_request,
+                rhs_elements,
+                workspace.device_factored_rhs);
+        } else {
+            BuildFactoredRhsDirectVariableBasePackedPointersKernel<true, false><<<rhs_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_seed_b,
+                workspace.device_seed_midstates,
+                nullptr,
+                packed_input_base,
+                packed_input_stride_words,
+                noise_left_offset_words,
+                noise_right_offset_words,
+                compress_offset_words,
+                n,
+                b,
+                r,
+                total_group_count,
+                groups_per_request,
+                rhs_elements,
+                workspace.device_factored_rhs);
+        }
+    } else {
+        if (use_shared_compress_rhs) {
+            BuildFactoredRhsDirectVariableBasePackedPointersKernel<false, true><<<rhs_blocks, WORKSPACE_THREADS, shared_compress_rhs_bytes, workspace.stream>>>(
+                workspace.device_seed_b,
+                workspace.device_seed_midstates,
+                workspace.device_prepared_input_ptrs,
+                nullptr,
+                0,
+                noise_left_offset_words,
+                noise_right_offset_words,
+                compress_offset_words,
+                n,
+                b,
+                r,
+                total_group_count,
+                groups_per_request,
+                rhs_elements,
+                workspace.device_factored_rhs);
+        } else {
+            BuildFactoredRhsDirectVariableBasePackedPointersKernel<false, false><<<rhs_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_seed_b,
+                workspace.device_seed_midstates,
+                workspace.device_prepared_input_ptrs,
+                nullptr,
+                0,
+                noise_left_offset_words,
+                noise_right_offset_words,
+                compress_offset_words,
+                n,
+                b,
+                r,
+                total_group_count,
+                groups_per_request,
+                rhs_elements,
+                workspace.device_factored_rhs);
+        }
+    }
+
+    cudaError_t error = cudaGetLastError();
+    if (profile_cuda_events && error == cudaSuccess &&
+        cudaEventRecord(profile_events.rhs_stop, workspace.stream) != cudaSuccess) {
+        profile_cuda_events = false;
+    }
+    if (error == cudaSuccess && add_a_low_rank_correction) {
+        const uint32_t projection_blocks = static_cast<uint32_t>(
+            (total_projection_elements + warps_per_block - 1U) / warps_per_block);
+        if (use_contiguous_inputs) {
+            ComputeLowRankAProjectionKernel<true><<<projection_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                nullptr,
+                packed_input_base,
+                packed_input_stride_words,
+                a_noise_right_offset_words,
+                workspace.device_factored_rhs,
+                n,
+                b,
+                r,
+                blocks_per_axis,
+                rhs_elements,
+                projection_elements,
+                total_projection_elements,
+                workspace.device_a_rhs_projection);
+        } else {
+            ComputeLowRankAProjectionKernel<false><<<projection_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_prepared_input_ptrs,
+                nullptr,
+                0,
+                a_noise_right_offset_words,
+                workspace.device_factored_rhs,
+                n,
+                b,
+                r,
+                blocks_per_axis,
+                rhs_elements,
+                projection_elements,
+                total_projection_elements,
+                workspace.device_a_rhs_projection);
+        }
+        error = cudaGetLastError();
+    }
+    if (error == cudaSuccess) {
+        if (ShouldUseFactoredWords2x4()) {
+            const uint32_t tiles_per_request = (blocks_per_axis >> 1U) * (blocks_per_axis >> 2U);
+            const uint32_t total_tile_count = batch_size * tiles_per_request;
+            const uint32_t word_blocks = (total_tile_count + warps_per_block - 1U) / warps_per_block;
+            ComputeFactoredWords2x4Kernel<<<word_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_matrix_a,
+                workspace.device_factored_rhs,
+                n,
+                b,
+                blocks_per_axis,
+                pair_count_per_request,
+                words_per_request,
+                matrix_elements,
+                rhs_elements,
+                total_tile_count,
+                workspace.device_output);
+        } else {
+            const uint32_t tiles_per_request = (blocks_per_axis >> 2U) * (blocks_per_axis >> 2U);
+            const uint32_t total_tile_count = batch_size * tiles_per_request;
+            const uint32_t word_blocks = (total_tile_count + warps_per_block - 1U) / warps_per_block;
+            ComputeFactoredWords4x4Kernel<<<word_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_matrix_a,
+                workspace.device_factored_rhs,
+                n,
+                b,
+                blocks_per_axis,
+                pair_count_per_request,
+                words_per_request,
+                matrix_elements,
+                rhs_elements,
+                total_tile_count,
+                workspace.device_output);
+        }
+        error = cudaGetLastError();
+        if (error == cudaSuccess && add_a_low_rank_correction) {
+            const uint32_t correction_blocks = static_cast<uint32_t>(
+                (total_output_count + warps_per_block - 1U) / warps_per_block);
+            if (use_contiguous_inputs) {
+                ApplyLowRankACorrectionKernel<true><<<correction_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                    nullptr,
+                    packed_input_base,
+                    packed_input_stride_words,
+                    a_noise_left_offset_words,
+                    workspace.device_a_rhs_projection,
+                    b,
+                    r,
+                    blocks_per_axis,
+                    words_per_request,
+                    projection_elements,
+                    total_output_count,
+                    workspace.device_output);
+            } else {
+                ApplyLowRankACorrectionKernel<false><<<correction_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                    workspace.device_prepared_input_ptrs,
+                    nullptr,
+                    0,
+                    a_noise_left_offset_words,
+                    workspace.device_a_rhs_projection,
+                    b,
+                    r,
+                    blocks_per_axis,
+                    words_per_request,
+                    projection_elements,
+                    total_output_count,
+                    workspace.device_output);
+            }
+            error = cudaGetLastError();
+        }
+        if (profile_cuda_events && error == cudaSuccess &&
+            cudaEventRecord(profile_events.words_stop, workspace.stream) != cudaSuccess) {
+            profile_cuda_events = false;
+        }
+    }
+    sample.launch_finalize_us = DurationMicros(finalize_start, SteadyClock::now());
+    if (error != cudaSuccess) {
+        result.error = "CUDA direct variable-base RHS kernel failed:" + CudaErrorString(error);
+        return false;
+    }
+
+    result.words_per_request = words_per_request;
+    if (device_sigma != nullptr && (words_per_request & 15U) == 0U) {
+        const size_t total_digest_bytes = static_cast<size_t>(batch_size) * 32U;
+        if (!EnsureDeviceBuffer(workspace.device_digest_output,
+                                workspace.digest_output_capacity,
+                                total_digest_bytes,
+                                result.error,
+                                allocated_buffers)) {
+            return false;
+        }
+        const uint32_t digest_blocks = (batch_size + WORKSPACE_THREADS - 1U) / WORKSPACE_THREADS;
+        const auto digest_start = SteadyClock::now();
+        FinalizeProductDigestsFromWordsKernel<<<digest_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_output,
+            device_sigma,
+            batch_size,
+            words_per_request,
+            n,
+            b,
+            workspace.device_digest_output);
+        error = cudaGetLastError();
+        sample.launch_finalize_us += DurationMicros(digest_start, SteadyClock::now());
+        if (profile_cuda_events && error == cudaSuccess &&
+            cudaEventRecord(profile_events.digest_stop, workspace.stream) != cudaSuccess) {
+            profile_cuda_events = false;
+        }
+        if (error != cudaSuccess) {
+            result.error = "CUDA product digest finalize kernel failed:" + CudaErrorString(error);
+            return false;
+        }
+
+        std::string digest_staging_warning;
+        if (!workspace.host_digest_output.Ensure(total_digest_bytes, digest_staging_warning)) {
+            result.error = digest_staging_warning;
+            return false;
+        }
+        sample.used_pinned_host_staging = sample.used_pinned_host_staging &&
+            workspace.host_digest_output.pinned != nullptr;
+
+        const auto d2h_start = SteadyClock::now();
+        error = cudaMemcpyAsync(workspace.host_digest_output.data(),
+                                workspace.device_digest_output,
+                                total_digest_bytes,
+                                cudaMemcpyDeviceToHost,
+                                workspace.stream);
+        sample.submit_d2h_us = DurationMicros(d2h_start, SteadyClock::now());
+        const auto sync_start = SteadyClock::now();
+        if (error == cudaSuccess) {
+            error = cudaStreamSynchronize(workspace.stream);
+        }
+        sample.stream_sync_us = DurationMicros(sync_start, SteadyClock::now());
+        if (error != cudaSuccess) {
+            result.words_per_request = 0;
+            result.digests.clear();
+            result.error = "CUDA digest stream completion failed:" + CudaErrorString(error);
+            return false;
+        }
+        result.digests.assign(
+            workspace.host_digest_output.data(),
+            workspace.host_digest_output.data() + total_digest_bytes);
+        if (profile_cuda_events) {
+            sample.event_rhs_device_us = EventElapsedMicros(profile_events.rhs_start, profile_events.rhs_stop);
+            sample.event_words_device_us = EventElapsedMicros(profile_events.rhs_stop, profile_events.words_stop);
+            sample.event_digest_device_us = EventElapsedMicros(profile_events.words_stop, profile_events.digest_stop);
+        }
+
+        result.success = true;
+        return true;
+    }
+
+    std::string staging_warning;
+    if (!workspace.host_output.Ensure(total_output_count, staging_warning)) {
+        result.error = staging_warning;
+        return false;
+    }
+    sample.used_pinned_host_staging = sample.used_pinned_host_staging && workspace.host_output.pinned != nullptr;
+
+    const auto d2h_start = SteadyClock::now();
+    error = cudaMemcpyAsync(workspace.host_output.data(),
+                            workspace.device_output,
+                            total_output_count * sizeof(Element),
+                            cudaMemcpyDeviceToHost,
+                            workspace.stream);
+    sample.submit_d2h_us = DurationMicros(d2h_start, SteadyClock::now());
+    const auto sync_start = SteadyClock::now();
+    if (error == cudaSuccess) {
+        error = cudaStreamSynchronize(workspace.stream);
+    }
+    sample.stream_sync_us = DurationMicros(sync_start, SteadyClock::now());
+    if (error != cudaSuccess) {
+        result.words_per_request = 0;
+        result.error = "CUDA stream completion failed:" + CudaErrorString(error);
+        return false;
+    }
+    if (profile_cuda_events) {
+        sample.event_rhs_device_us = EventElapsedMicros(profile_events.rhs_start, profile_events.rhs_stop);
+        sample.event_words_device_us = EventElapsedMicros(profile_events.rhs_stop, profile_events.words_stop);
+        sample.event_digest_device_us = 0.0;
     }
 
     result.words.assign(workspace.host_output.data(), workspace.host_output.data() + total_output_count);
@@ -2178,6 +3707,8 @@ MatMulKernelProfile ProbeMatMulKernelProfile()
     profile.device_prepared_inputs_enabled = device_prepared_env != nullptr &&
         device_prepared_env[0] != '\0' &&
         device_prepared_env[0] != '0';
+    profile.shared_compress_rhs_supported = true;
+    profile.shared_compress_rhs_enabled = ShouldUseSharedCompressRhs();
     profile.execution_model = "nonblocking_stream_per_device_pool_slot";
     profile.staging_strategy = "pinned_host_with_pageable_fallback";
     profile.device_prepared_inputs_policy = "auto_product_digest_shape_plus_env";
@@ -2212,6 +3743,11 @@ MatMulProfilingStats ProbeMatMulProfilingStats()
     stats.last_submit_d2h_us = context.last_submit_d2h_us;
     stats.last_stream_sync_us = context.last_stream_sync_us;
     stats.last_total_wall_ms = context.last_total_wall_ms;
+    stats.last_event_build_a_device_us = context.last_event_build_a_device_us;
+    stats.last_event_build_b_midstate_device_us = context.last_event_build_b_midstate_device_us;
+    stats.last_event_rhs_device_us = context.last_event_rhs_device_us;
+    stats.last_event_words_device_us = context.last_event_words_device_us;
+    stats.last_event_digest_device_us = context.last_event_digest_device_us;
     stats.last_used_low_rank_path = context.last_used_low_rank_path;
     stats.last_used_device_prepared_inputs = context.last_used_device_prepared_inputs;
     stats.last_used_pinned_host_staging = context.last_used_pinned_host_staging;
@@ -2783,6 +4319,7 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchOnDevic
             generated->noise_e_r == nullptr ||
             generated->noise_f_l == nullptr ||
             generated->noise_f_r == nullptr ||
+            generated->storage == nullptr ||
             generated->compress_vec == nullptr) {
             result.error = "CUDA digest batch request contains incompatible device-generated inputs";
             return result;
@@ -2919,6 +4456,15 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
     const uint32_t noise_f_l_offset_words = noise_e_r_offset_words + noise_right_elements;
     const uint32_t noise_f_r_offset_words = noise_f_l_offset_words + noise_left_elements;
     const uint32_t compress_offset_words = noise_f_r_offset_words + noise_right_elements;
+    const uint32_t blocks_per_axis = request.n / request.b;
+    const bool use_direct_rhs =
+        ShouldUseDirectRhs() &&
+        mode == MatMulCompressedWordsMode::PRODUCT_FINAL_BLOCKS &&
+        request.n % 32U == 0U &&
+        (blocks_per_axis & 3U) == 0U &&
+        request.b == 16U &&
+        request.r == 8U;
+    const bool use_base_a_correction = use_direct_rhs && ShouldUseBaseACorrection();
     bool allocated_buffers{false};
 
     if (!EnsureDeviceBuffer(workspace.device_seed_a,
@@ -2936,14 +4482,25 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
                             total_matrix_elements,
                             result.error,
                             allocated_buffers) ||
-        !EnsureDeviceBuffer(workspace.device_matrix_b,
-                            workspace.matrix_b_capacity,
-                            total_matrix_elements,
-                            result.error,
-                            allocated_buffers) ||
         !EnsureDeviceBuffer(workspace.device_prepared_input_ptrs,
                             workspace.prepared_input_ptr_capacity,
                             request.batch_size,
+                            result.error,
+                            allocated_buffers)) {
+        return result;
+    }
+    if (request.sigmas != nullptr &&
+        !EnsureDeviceBuffer(workspace.device_sigma,
+                            workspace.sigma_capacity,
+                            request.batch_size,
+                            result.error,
+                            allocated_buffers)) {
+        return result;
+    }
+    if (!use_direct_rhs &&
+        !EnsureDeviceBuffer(workspace.device_matrix_b,
+                            workspace.matrix_b_capacity,
+                            total_matrix_elements,
                             result.error,
                             allocated_buffers)) {
         return result;
@@ -2952,12 +4509,23 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
     const auto total_start = SteadyClock::now();
     std::vector<DeviceSeedBytes> seed_a_batch(request.batch_size);
     std::vector<DeviceSeedBytes> seed_b_batch(request.batch_size);
+    std::vector<DeviceSeedBytes> sigma_batch;
+    if (request.sigmas != nullptr) {
+        sigma_batch.resize(request.batch_size);
+    }
     std::vector<const Element*> prepared_input_ptrs;
     prepared_input_ptrs.reserve(request.batch_size);
+    const uint32_t packed_input_stride_words =
+        noise_left_elements + noise_right_elements + noise_left_elements + noise_right_elements + compress_elements;
+    const Element* packed_input_base{nullptr};
+    bool use_contiguous_inputs{true};
     const auto wait_start = SteadyClock::now();
     for (uint32_t i = 0; i < request.batch_size; ++i) {
         std::memcpy(seed_a_batch[i].data, request.matrix_a_seeds[i].data(), sizeof(seed_a_batch[i].data));
         std::memcpy(seed_b_batch[i].data, request.matrix_b_seeds[i].data(), sizeof(seed_b_batch[i].data));
+        if (request.sigmas != nullptr) {
+            std::memcpy(sigma_batch[i].data, request.sigmas[i].data(), sizeof(sigma_batch[i].data));
+        }
 
         const auto* generated = request.generated_inputs[i];
         if (generated->device_index != runtime.device_index ||
@@ -2975,6 +4543,11 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
             return result;
         }
 
+        if (i == 0) {
+            packed_input_base = generated->storage;
+        } else if (generated->storage != packed_input_base + static_cast<size_t>(i) * packed_input_stride_words) {
+            use_contiguous_inputs = false;
+        }
         if (generated->ready_event != nullptr) {
             error = cudaStreamWaitEvent(
                 workspace.stream,
@@ -3003,10 +4576,17 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
                                 cudaMemcpyHostToDevice,
                                 workspace.stream);
     }
-    if (error == cudaSuccess) {
+    if (error == cudaSuccess && !use_contiguous_inputs) {
         error = cudaMemcpyAsync(workspace.device_prepared_input_ptrs,
                                 prepared_input_ptrs.data(),
                                 request.batch_size * sizeof(const Element*),
+                                cudaMemcpyHostToDevice,
+                                workspace.stream);
+    }
+    if (error == cudaSuccess && request.sigmas != nullptr) {
+        error = cudaMemcpyAsync(workspace.device_sigma,
+                                sigma_batch.data(),
+                                request.batch_size * sizeof(DeviceSeedBytes),
                                 cudaMemcpyHostToDevice,
                                 workspace.stream);
     }
@@ -3017,8 +4597,8 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
     }
 
     const uint32_t build_blocks = static_cast<uint32_t>((total_matrix_elements + WORKSPACE_THREADS - 1) / WORKSPACE_THREADS);
-    // Per-seed SHA midstate buffer (16 words/seed), reused for the A then B pass.
-    const uint32_t seed_midstate_words = request.batch_size * 16U;
+    // Per-seed SHA midstate/schedule buffer, reused for the A then B pass.
+    const uint32_t seed_midstate_words = request.batch_size * SEED_MIDSTATE_WORDS;
     if (!EnsureDeviceBuffer(workspace.device_seed_midstates,
                             workspace.seed_midstates_capacity,
                             seed_midstate_words,
@@ -3028,20 +4608,76 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
     }
     const uint32_t midstate_blocks = (request.batch_size + WORKSPACE_THREADS - 1U) / WORKSPACE_THREADS;
     const auto build_start = SteadyClock::now();
+    BuildProfileEvents build_events;
+    bool profile_build_events = ShouldProfileCudaEvents() && build_events.Create();
+    const bool use_specialized_build_a =
+        ShouldUseSpecializedBuildA() &&
+        request.n == 512U &&
+        request.r == 8U &&
+        use_contiguous_inputs &&
+        !use_base_a_correction;
+    if (profile_build_events &&
+        cudaEventRecord(build_events.build_a_start, workspace.stream) != cudaSuccess) {
+        profile_build_events = false;
+    }
     PrecomputeSeedMidstatesKernel<<<midstate_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
         workspace.device_seed_a,
         request.batch_size,
         workspace.device_seed_midstates);
     error = cudaGetLastError();
     if (error == cudaSuccess) {
-        GenerateBaseMatrixFromSeedMidstateKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
-            workspace.device_seed_a,
-            workspace.device_seed_midstates,
-            request.n,
-            total_matrix_elements,
-            matrix_elements,
-            workspace.device_matrix_a);
+        if (use_base_a_correction) {
+            GenerateBaseMatrixFromSeedMidstateKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_seed_a,
+                workspace.device_seed_midstates,
+                request.n,
+                total_matrix_elements,
+                matrix_elements,
+                workspace.device_matrix_a);
+        } else if (use_specialized_build_a) {
+            GeneratePerturbedMatrix512R8FromSeedMidstateContiguousKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_seed_a,
+                workspace.device_seed_midstates,
+                packed_input_base,
+                packed_input_stride_words,
+                noise_e_l_offset_words,
+                noise_e_r_offset_words,
+                total_matrix_elements,
+                workspace.device_matrix_a);
+        } else if (use_contiguous_inputs) {
+            GeneratePerturbedMatrixFromSeedMidstatePackedPointersKernel<true><<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_seed_a,
+                workspace.device_seed_midstates,
+                nullptr,
+                packed_input_base,
+                packed_input_stride_words,
+                noise_e_l_offset_words,
+                noise_e_r_offset_words,
+                request.n,
+                request.r,
+                total_matrix_elements,
+                matrix_elements,
+                workspace.device_matrix_a);
+        } else {
+            GeneratePerturbedMatrixFromSeedMidstatePackedPointersKernel<false><<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_seed_a,
+                workspace.device_seed_midstates,
+                workspace.device_prepared_input_ptrs,
+                nullptr,
+                0,
+                noise_e_l_offset_words,
+                noise_e_r_offset_words,
+                request.n,
+                request.r,
+                total_matrix_elements,
+                matrix_elements,
+                workspace.device_matrix_a);
+        }
         error = cudaGetLastError();
+    }
+    if (profile_build_events && error == cudaSuccess &&
+        cudaEventRecord(build_events.build_a_stop, workspace.stream) != cudaSuccess) {
+        profile_build_events = false;
     }
     if (error == cudaSuccess) {
         PrecomputeSeedMidstatesKernel<<<midstate_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
@@ -3050,38 +4686,40 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
             workspace.device_seed_midstates);
         error = cudaGetLastError();
     }
-    if (error == cudaSuccess) {
-        GenerateBaseMatrixFromSeedMidstateKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
-            workspace.device_seed_b,
-            workspace.device_seed_midstates,
-            request.n,
-            total_matrix_elements,
-            matrix_elements,
-            workspace.device_matrix_b);
-        error = cudaGetLastError();
+    if (profile_build_events && error == cudaSuccess &&
+        cudaEventRecord(build_events.build_b_stop, workspace.stream) != cudaSuccess) {
+        profile_build_events = false;
     }
-    if (error == cudaSuccess) {
-        ApplyPerturbationPackedPointersVariableBaseKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
-            workspace.device_prepared_input_ptrs,
-            noise_e_l_offset_words,
-            noise_e_r_offset_words,
-            request.n,
-            request.r,
-            total_matrix_elements,
-            matrix_elements,
-            workspace.device_matrix_a);
-        error = cudaGetLastError();
-    }
-    if (error == cudaSuccess) {
-        ApplyPerturbationPackedPointersVariableBaseKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
-            workspace.device_prepared_input_ptrs,
-            noise_f_l_offset_words,
-            noise_f_r_offset_words,
-            request.n,
-            request.r,
-            total_matrix_elements,
-            matrix_elements,
-            workspace.device_matrix_b);
+    if (error == cudaSuccess && !use_direct_rhs) {
+        if (use_contiguous_inputs) {
+            GeneratePerturbedMatrixFromSeedMidstatePackedPointersKernel<true><<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_seed_b,
+                workspace.device_seed_midstates,
+                nullptr,
+                packed_input_base,
+                packed_input_stride_words,
+                noise_f_l_offset_words,
+                noise_f_r_offset_words,
+                request.n,
+                request.r,
+                total_matrix_elements,
+                matrix_elements,
+                workspace.device_matrix_b);
+        } else {
+            GeneratePerturbedMatrixFromSeedMidstatePackedPointersKernel<false><<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+                workspace.device_seed_b,
+                workspace.device_seed_midstates,
+                workspace.device_prepared_input_ptrs,
+                nullptr,
+                0,
+                noise_f_l_offset_words,
+                noise_f_r_offset_words,
+                request.n,
+                request.r,
+                total_matrix_elements,
+                matrix_elements,
+                workspace.device_matrix_b);
+        }
         error = cudaGetLastError();
     }
     sample.launch_build_perturbed_us = DurationMicros(build_start, SteadyClock::now());
@@ -3090,21 +4728,55 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
         return result;
     }
 
-    if (!FinalizeCompressedWordsPackedPointerBatch(
-            *lease,
-            workspace,
-            request.n,
-            request.b,
-            request.r,
-            request.batch_size,
-            compress_offset_words,
-            mode,
-            result,
-            sample,
-            allocated_buffers)) {
-        return result;
+    if (use_direct_rhs) {
+        if (!FinalizeCompressedWordsVariableBaseDirectRhsBatch(
+                *lease,
+                workspace,
+                request.n,
+                request.b,
+                request.r,
+                request.batch_size,
+                noise_f_l_offset_words,
+                noise_f_r_offset_words,
+                compress_offset_words,
+                request.sigmas != nullptr ? workspace.device_sigma : nullptr,
+                packed_input_base,
+                packed_input_stride_words,
+                use_contiguous_inputs,
+                use_base_a_correction,
+                noise_e_l_offset_words,
+                noise_e_r_offset_words,
+                mode,
+                result,
+                sample,
+                allocated_buffers)) {
+            return result;
+        }
+    } else {
+        if (!FinalizeCompressedWordsPackedPointerBatch(
+                *lease,
+                workspace,
+                request.n,
+                request.b,
+                request.r,
+                request.batch_size,
+                compress_offset_words,
+                mode,
+                result,
+                sample,
+                allocated_buffers)) {
+            return result;
+        }
     }
 
+    if (profile_build_events) {
+        sample.event_build_a_device_us = EventElapsedMicros(
+            build_events.build_a_start,
+            build_events.build_a_stop);
+        sample.event_build_b_midstate_device_us = EventElapsedMicros(
+            build_events.build_a_stop,
+            build_events.build_b_stop);
+    }
     sample.total_wall_ms = DurationMillis(total_start, SteadyClock::now());
     RecordProfilingSample(sample);
     return result;
@@ -3264,6 +4936,7 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
         std::vector<size_t> indices;
         std::vector<uint256> seed_a;
         std::vector<uint256> seed_b;
+        std::vector<uint256> sigmas;
         std::vector<const MatMulGeneratedInputsDevice*> inputs;
     };
 
@@ -3275,6 +4948,9 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
         shard.indices.push_back(i);
         shard.seed_a.push_back(request.matrix_a_seeds[i]);
         shard.seed_b.push_back(request.matrix_b_seeds[i]);
+        if (request.sigmas != nullptr) {
+            shard.sigmas.push_back(request.sigmas[i]);
+        }
         shard.inputs.push_back(generated);
     }
 
@@ -3302,6 +4978,7 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
                 .batch_size = static_cast<uint32_t>(shard.inputs.size()),
                 .matrix_a_seeds = shard.seed_a.data(),
                 .matrix_b_seeds = shard.seed_b.data(),
+                .sigmas = request.sigmas != nullptr ? shard.sigmas.data() : nullptr,
                 .generated_inputs = shard.inputs.data(),
             };
             return ShardResult{
@@ -3332,12 +5009,42 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
                 (shard_result.result.error.empty() ? "unknown_error" : shard_result.result.error);
             return result;
         }
+        if (!shard_result.result.digests.empty()) {
+            continue;
+        }
         if (result.words_per_request == 0) {
             result.words_per_request = shard_result.result.words_per_request;
         } else if (result.words_per_request != shard_result.result.words_per_request) {
             result.error = "cuda_multi_device_variable_base_batch_words_per_request_mismatch";
             return result;
         }
+    }
+
+    const bool digest_results = std::any_of(
+        shard_results.begin(),
+        shard_results.end(),
+        [](const ShardResult& shard_result) { return !shard_result.result.digests.empty(); });
+    if (digest_results) {
+        result.digests.assign(static_cast<size_t>(request.batch_size) * 32U, 0U);
+        for (const auto& shard_result : shard_results) {
+            const size_t expected_bytes = shard_result.shard.inputs.size() * 32U;
+            if (shard_result.result.digests.size() != expected_bytes ||
+                shard_result.shard.indices.size() != shard_result.shard.inputs.size()) {
+                result.success = false;
+                result.error = "cuda_multi_device_variable_base_batch_digest_size_mismatch";
+                result.digests.clear();
+                return result;
+            }
+            for (size_t i = 0; i < shard_result.shard.indices.size(); ++i) {
+                std::copy(
+                    shard_result.result.digests.begin() + i * 32U,
+                    shard_result.result.digests.begin() + (i + 1) * 32U,
+                    result.digests.begin() + shard_result.shard.indices[i] * 32U);
+            }
+        }
+        result.words_per_request = 0;
+        result.success = true;
+        return result;
     }
 
     if (result.words_per_request == 0) {

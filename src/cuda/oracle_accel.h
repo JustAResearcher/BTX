@@ -29,6 +29,8 @@ struct MatMulGeneratedInputsDevice {
     matmul::field::Element* noise_f_l{nullptr};
     matmul::field::Element* noise_f_r{nullptr};
     matmul::field::Element* compress_vec{nullptr};
+    bool owns_storage{true};
+    bool owns_ready_event{true};
 
     MatMulGeneratedInputsDevice() = default;
     MatMulGeneratedInputsDevice(const MatMulGeneratedInputsDevice&) = delete;
@@ -63,6 +65,21 @@ struct MatMulInputGenerationDeviceResult {
     std::string error;
 };
 
+struct MatMulInputGenerationDeviceBatchRequest {
+    uint32_t n{0};
+    uint32_t b{0};
+    uint32_t r{0};
+    uint32_t batch_size{0};
+    const uint256* sigmas{nullptr};
+};
+
+struct MatMulInputGenerationDeviceBatchResult {
+    bool available{false};
+    bool success{false};
+    std::vector<std::shared_ptr<const MatMulGeneratedInputsDevice>> inputs;
+    std::string error;
+};
+
 struct MatMulNonceSeedPreHashScanRequest {
     int32_t version{0};
     uint256 previous_block_hash;
@@ -73,6 +90,7 @@ struct MatMulNonceSeedPreHashScanRequest {
     uint16_t matmul_dim{0};
     uint32_t block_height{0};
     uint32_t scan_count{0};
+    uint32_t max_selected_offsets{0};
     uint256 pre_hash_target;
     uint32_t seed_version{2};
     int64_t parent_median_time_past{0};
@@ -82,7 +100,9 @@ struct MatMulNonceSeedPreHashScanResult {
     bool available{false};
     bool success{false};
     uint32_t scanned_count{0};
+    uint32_t pass_count{0};
     std::vector<uint8_t> pass_flags;
+    std::vector<uint32_t> selected_offsets;
     std::string error;
 };
 
@@ -103,6 +123,8 @@ struct MatMulInputGenerationProfile {
 MatMulInputGenerationProfile ProbeMatMulInputGenerationProfile();
 MatMulInputGenerationResult GenerateMatMulInputsGPU(const MatMulInputGenerationRequest& request);
 MatMulInputGenerationDeviceResult GenerateMatMulInputsGPUDevice(const MatMulInputGenerationRequest& request);
+MatMulInputGenerationDeviceBatchResult GenerateMatMulInputsGPUDeviceBatch(
+    const MatMulInputGenerationDeviceBatchRequest& request);
 MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
     const MatMulNonceSeedPreHashScanRequest& request);
 

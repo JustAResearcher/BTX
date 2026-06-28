@@ -75,6 +75,8 @@ struct MatMulKernelProfile {
     bool device_prepared_inputs_supported{false};
     bool device_prepared_inputs_default{false};
     bool device_prepared_inputs_enabled{false};
+    bool shared_compress_rhs_supported{false};
+    bool shared_compress_rhs_enabled{false};
     std::string execution_model;
     std::string staging_strategy;
     std::string device_prepared_inputs_policy;
@@ -97,6 +99,11 @@ struct MatMulProfilingStats {
     double last_submit_d2h_us{0.0};
     double last_stream_sync_us{0.0};
     double last_total_wall_ms{0.0};
+    double last_event_build_a_device_us{0.0};
+    double last_event_build_b_midstate_device_us{0.0};
+    double last_event_rhs_device_us{0.0};
+    double last_event_words_device_us{0.0};
+    double last_event_digest_device_us{0.0};
     bool last_used_low_rank_path{false};
     bool last_used_device_prepared_inputs{false};
     bool last_used_pinned_host_staging{false};
@@ -134,6 +141,7 @@ struct MatMulCompressedWordsBatchResult {
     bool success{false};
     uint32_t words_per_request{0};
     std::vector<matmul::field::Element> words;
+    std::vector<unsigned char> digests;
     std::string error;
 };
 
@@ -172,6 +180,7 @@ struct MatMulLowRankVariableBaseDeviceBatchRequest {
     uint32_t batch_size{0};
     const uint256* matrix_a_seeds{nullptr};
     const uint256* matrix_b_seeds{nullptr};
+    const uint256* sigmas{nullptr};
     const MatMulGeneratedInputsDevice* const* generated_inputs{nullptr};
 };
 

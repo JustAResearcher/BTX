@@ -65,6 +65,10 @@ struct BackendRuntimeStats {
     uint64_t gpu_input_generation_successes{0};
     uint64_t gpu_input_generation_failures{0};
     uint64_t gpu_input_auto_disabled_skips{0};
+    uint64_t cuda_variable_base_batches{0};
+    uint64_t cuda_variable_base_last_device_us{0};
+    uint64_t cuda_variable_base_last_host_digest_us{0};
+    uint64_t cuda_variable_base_total_host_digest_us{0};
     bool gpu_input_auto_disabled{false};
     std::string last_metal_fallback_error{};
     std::string last_cuda_fallback_error{};
@@ -129,6 +133,13 @@ PreparedDigestInputs PrepareMatMulDigestInputsForBackend(const CBlockHeader& blo
                                                          uint32_t noise_rank,
                                                          backend::Kind preferred_backend,
                                                          DigestScheme digest_scheme = DigestScheme::TRANSCRIPT);
+
+std::vector<PreparedDigestInputs> PrepareMatMulDigestInputsBatchForBackend(
+    const std::vector<CBlockHeader>& blocks,
+    uint32_t transcript_block_size,
+    uint32_t noise_rank,
+    backend::Kind preferred_backend,
+    DigestScheme digest_scheme = DigestScheme::TRANSCRIPT);
 
 DigestResult ComputeMatMulDigestPrepared(const CBlockHeader& block,
                                          const Matrix& A,
