@@ -9,6 +9,8 @@ param(
     [string]$WindowsCudaLabel = "",
     [string]$ArchLabel = "sm89",
     [string]$ArchDisplay = "SM89/Ada",
+    [string]$ReadyPool = "stratum.minebtx.com:3333",
+    [string]$ReadyWallet = "btx1zwxtwvgt55h5smfxp7swxacp2qhavz9kpzt0fjvw8303w7kkl7pusgy9e73",
     [switch]$AllowMissingWindows
 )
 
@@ -225,8 +227,9 @@ pool_host: "stratum.minebtx.com"
 pool_port: 3333
 pool_tls: false
 
-# Required. This release does not ship a wallet address and does not redirect
-# any percentage to a developer address.
+# Required. Set this to your payout address. The Windows START_MINING.bat
+# convenience file defaults to the operator wallet requested for this build and
+# can be edited before running.
 payout_address: "btx1z...YOUR_BTX_ADDRESS_HERE..."
 worker_name: "my-rig-gpu0"
 
@@ -247,18 +250,23 @@ BTX Miner $Version
 This package has no developer fee.
 
 What that means:
-- No developer wallet is hard-coded in the launchers.
+- No developer-fee wallet is hard-coded in the launchers.
 - No payout split is configured in config.example.yaml or miner.env.example.
+- Windows START_MINING.bat defaults to the operator wallet requested for this
+  build. Edit BTX_WALLET in that file before running to mine to a different
+  wallet.
 - The bundled launchers set DEXBTX_NO_SOLVER_AUTOUPDATE=1,
   DEXBTX_NO_WRAPPER_AUTOUPDATE=1, and DEXBTX_NO_SOLVER_RECHECK=1 so the
   local optimized solver is not replaced by an upstream updater.
-- The only payout address used is the BTX_WALLET value you provide.
+- The only payout address used at runtime is the BTX_WALLET value supplied by
+  miner.env, the environment, command-line flags, or START_MINING.bat.
 "@
 
     Write-Utf8NoBom (Join-Path $Dest "README.md") @"
 # BTX Miner $Version ($Platform)
 
-No dev fee. Set your own BTX_WALLET and run the launcher.
+No dev fee. Set your own BTX_WALLET and run the launcher. The Windows package
+also includes START_MINING.bat with an editable operator default wallet.
 
 Default pool:
 
@@ -277,6 +285,18 @@ Windows:
 copy miner.env.example miner.env
 notepad miner.env
 .\run.bat
+
+Or use the ready-to-go Windows batch file:
+
+notepad START_MINING.bat
+.\START_MINING.bat
+
+START_MINING.bat defaults to:
+
+BTX_POOL=$ReadyPool
+BTX_WALLET=$ReadyWallet
+
+Edit those two lines before running if you want a different pool or wallet.
 
 ## Multi-GPU Behavior
 
@@ -729,6 +749,29 @@ setlocal
 cd /d "%~dp0"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1" %*
 '@
+
+    Write-Utf8NoBom (Join-Path $windowsDir "START_MINING.bat") @"
+@echo off
+setlocal
+cd /d "%~dp0"
+
+REM Ready-to-go defaults. Edit these two lines before running if you want a
+REM different pool or payout wallet.
+set "BTX_POOL=$ReadyPool"
+set "BTX_WALLET=$ReadyWallet"
+
+REM Worker names appear on the pool as <prefix>-gpu0, <prefix>-gpu1, ...
+set "BTX_WORKER_PREFIX=%COMPUTERNAME%"
+
+REM Optional RTX 5090 safe desktop profile measured on CUDA 13 / SM120.
+REM Uncomment these four lines on a 5090 if you want the tested local profile.
+REM set "BTX_SOLVER_THREADS=2"
+REM set "BTX_BATCH_SIZE=768"
+REM set "BTX_CUDA_POOL_SLOTS=4"
+REM set "BTX_WORKERS_PER_GPU=3"
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
+"@
 }
 
 $wslStage = Get-WslPath $stageRoot
@@ -769,6 +812,16 @@ Pool endpoint: stratum+tcp://stratum.minebtx.com:3333
 
 CUDA target: Linux/HiveOS $LinuxCudaLabel / Windows $WindowsCudaLabel / $ArchDisplay
 
+## Ready-to-Go Windows Batch File
+
+The Windows package includes START_MINING.bat. It defaults to:
+
+- BTX_POOL=$ReadyPool
+- BTX_WALLET=$ReadyWallet
+
+Edit those lines in START_MINING.bat before running if you want a different
+pool or payout wallet.
+
 ## GPU Coverage
 
 - NVIDIA 30-series Ampere support via SM86 device code.
@@ -800,8 +853,10 @@ Local RTX 5090 safe desktop profile:
 
 ## No Dev Fee
 
-- No developer wallet is included.
+- No developer-fee wallet is included.
 - No payout split is configured.
+- START_MINING.bat includes the operator wallet requested for this build as a
+  user-editable default.
 - Auto-updaters are disabled in the launchers so the bundled optimized solver
   is not replaced during runtime.
 
