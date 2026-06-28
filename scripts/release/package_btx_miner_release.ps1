@@ -4,6 +4,11 @@ param(
     [string]$WrapperRoot = "C:\Source\_tmp\minebtx",
     [string]$LinuxSolver = "",
     [string]$WindowsSolver = "",
+    [string]$CudaLabel = "cuda12",
+    [string]$LinuxCudaLabel = "",
+    [string]$WindowsCudaLabel = "",
+    [string]$ArchLabel = "sm89",
+    [string]$ArchDisplay = "SM89/Ada",
     [switch]$AllowMissingWindows
 )
 
@@ -12,15 +17,35 @@ $ErrorActionPreference = "Stop"
 if (!$RepoRoot) {
     $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 }
+if (!$LinuxCudaLabel) {
+    $LinuxCudaLabel = $CudaLabel
+}
+if (!$WindowsCudaLabel) {
+    $WindowsCudaLabel = $CudaLabel
+}
 if (!$LinuxSolver) {
-    $LinuxSolver = Join-Path $RepoRoot "build-docker-cuda12-sm89-ubuntu22\bin\btx-gbt-solve"
+    $LinuxSolver = Join-Path $RepoRoot "build-docker-$LinuxCudaLabel-$ArchLabel-ubuntu22\bin\btx-gbt-solve"
+    if (!(Test-Path -LiteralPath $LinuxSolver -PathType Leaf) -and $LinuxCudaLabel -eq "cuda12" -and $ArchLabel -eq "sm89") {
+        $LinuxSolver = Join-Path $RepoRoot "build-docker-cuda12-sm89-ubuntu22\bin\btx-gbt-solve"
+    }
 }
 if (!$WindowsSolver) {
     $candidates = @(
-        (Join-Path $RepoRoot "build-win-cuda-sm89-miner\src\btx-gbt-solve.exe"),
-        (Join-Path $RepoRoot "build-win-cuda-sm89-miner\bin\btx-gbt-solve.exe"),
-        (Join-Path $RepoRoot "build-win-cuda-sm89-miner\btx-gbt-solve.exe")
+        (Join-Path $RepoRoot "build-win-$WindowsCudaLabel-$ArchLabel-miner-clangcl\bin\btx-gbt-solve.exe"),
+        (Join-Path $RepoRoot "build-win-$WindowsCudaLabel-$ArchLabel-miner\bin\btx-gbt-solve.exe"),
+        (Join-Path $RepoRoot "build-win-$WindowsCudaLabel-$ArchLabel-miner\src\btx-gbt-solve.exe"),
+        (Join-Path $RepoRoot "build-win-cuda-$ArchLabel-miner-clangcl\bin\btx-gbt-solve.exe"),
+        (Join-Path $RepoRoot "build-win-cuda-$ArchLabel-miner\bin\btx-gbt-solve.exe"),
+        (Join-Path $RepoRoot "build-win-cuda-$ArchLabel-miner\src\btx-gbt-solve.exe")
     )
+    if ($WindowsCudaLabel -eq "cuda12" -and $ArchLabel -eq "sm89") {
+        $candidates += @(
+            (Join-Path $RepoRoot "build-win-cuda-sm89-miner-clangcl\bin\btx-gbt-solve.exe"),
+            (Join-Path $RepoRoot "build-win-cuda-sm89-miner\src\btx-gbt-solve.exe"),
+            (Join-Path $RepoRoot "build-win-cuda-sm89-miner\bin\btx-gbt-solve.exe"),
+            (Join-Path $RepoRoot "build-win-cuda-sm89-miner\btx-gbt-solve.exe")
+        )
+    }
     $WindowsSolver = ($candidates | Where-Object { Test-Path $_ } | Select-Object -First 1)
 }
 
@@ -131,9 +156,9 @@ if (Test-Path -LiteralPath $distRoot) {
 }
 New-Item -ItemType Directory -Force -Path $stageRoot,$distRoot | Out-Null
 
-$linuxName = "$releaseName-linux-x86_64-cuda12-sm89"
-$hiveName = "$releaseName-hiveos-x86_64-cuda12-sm89"
-$windowsName = "$releaseName-windows-x86_64-cuda-sm89"
+$linuxName = "$releaseName-linux-x86_64-$LinuxCudaLabel-$ArchLabel"
+$hiveName = "$releaseName-hiveos-x86_64-$LinuxCudaLabel-$ArchLabel"
+$windowsName = "$releaseName-windows-x86_64-$WindowsCudaLabel-$ArchLabel"
 $linuxDir = Join-Path $stageRoot $linuxName
 $hiveDir = Join-Path $stageRoot $hiveName
 $windowsDir = Join-Path $stageRoot $windowsName
@@ -157,7 +182,7 @@ $sourceDirtyLines = & git -C $RepoRoot status --short -- . ":(exclude)release-ar
 $sourceDirty = ($sourceDirtyLines -join "`n").Trim()
 $dirtyNote = if ($sourceDirty) { "yes" } else { "no" }
 
-function Add-CommonFiles([string]$Dest, [string]$Platform) {
+function Add-CommonFiles([string]$Dest, [string]$Platform, [string]$PackageCudaLabel) {
     New-Item -ItemType Directory -Force -Path (Join-Path $Dest "bin"),(Join-Path $Dest "python") | Out-Null
     $pythonDest = Join-Path $Dest "python\dexbtx_miner"
     Copy-Tree $pythonSource $pythonDest
@@ -267,16 +292,19 @@ $windowsSha
 BTX source commit: $sourceCommit
 BTX source dirty at package time: $dirtyNote
 
-The SM89 build is tuned for Ada cards such as RTX 4070 Ti SUPER. It is the
-build benchmarked against the MineBTX reference solver during this release
-work. Use a different CUDA build if you need other GPU architectures.
+CUDA target: $PackageCudaLabel / $ArchDisplay.
+
+The original SM89 package was tuned on Ada cards such as RTX 4070 Ti SUPER.
+Mixed-family packages include additional NVIDIA device code for the GPU
+families named in the artifact. Validate tuning on each GPU generation before
+assuming one set of batch/prefetch values is optimal everywhere.
 "@
 }
 
-Add-CommonFiles $linuxDir "Linux x86_64 CUDA12 SM89"
-Add-CommonFiles $hiveDir "HiveOS x86_64 CUDA12 SM89"
+Add-CommonFiles $linuxDir "Linux x86_64 $LinuxCudaLabel $ArchLabel" $LinuxCudaLabel
+Add-CommonFiles $hiveDir "HiveOS x86_64 $LinuxCudaLabel $ArchLabel" $LinuxCudaLabel
 if ($WindowsSolver) {
-    Add-CommonFiles $windowsDir "Windows x86_64 CUDA SM89"
+    Add-CommonFiles $windowsDir "Windows x86_64 $WindowsCudaLabel $ArchLabel" $WindowsCudaLabel
 }
 
 Copy-Item -LiteralPath $LinuxSolver -Destination (Join-Path $linuxDir "bin\btx-gbt-solve") -Force
@@ -664,11 +692,13 @@ No dev fee.
 
 This release packages the optimized BTX btx-gbt-solve pool miner for:
 
-- Linux x86_64 CUDA12 SM89
-- HiveOS x86_64 CUDA12 SM89
-- Windows x86_64 CUDA SM89
+- Linux x86_64 $LinuxCudaLabel $ArchLabel
+- HiveOS x86_64 $LinuxCudaLabel $ArchLabel
+- Windows x86_64 $WindowsCudaLabel $ArchLabel
 
 Pool endpoint: stratum+tcp://stratum.minebtx.com:3333
+
+CUDA target: Linux/HiveOS $LinuxCudaLabel / Windows $WindowsCudaLabel / $ArchDisplay
 
 The launchers start one miner process per visible NVIDIA GPU and name workers
 as <BTX_WORKER_PREFIX>-gpuN.
