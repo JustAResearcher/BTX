@@ -854,12 +854,14 @@ if [ "${#hs_values[@]}" -eq 0 ]; then
   for file in "${log_files[@]}"; do
     parsed="$(awk '
       /solver: result/ {
-        work=0; elapsed=0;
+        tries=0; work=0; elapsed=0;
         for (i=1;i<=NF;i++) {
+          if ($i ~ /^tries_used=/) { sub("tries_used=","",$i); tries=$i+0 }
           if ($i ~ /^work=/) { sub("work=","",$i); work=$i+0 }
           if ($i ~ /^elapsed_s=/) { sub("elapsed_s=","",$i); elapsed=$i+0 }
         }
-        if (work > 0 && elapsed > 0) khs=work / elapsed / 1000.0;
+        if (tries <= 0) tries=work;
+        if (tries > 0 && elapsed > 0) khs=tries / elapsed / 1000.0;
       }
       /share OK/ { accepted++ }
       /share REJECTED/ { rejected++ }
