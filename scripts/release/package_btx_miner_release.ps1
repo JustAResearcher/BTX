@@ -139,6 +139,8 @@ function File-Sha256([string]$Path) {
 
 Assert-Dir $RepoRoot
 Assert-Dir (Join-Path $WrapperRoot "src\dexbtx_miner")
+$soloMinerSource = Join-Path $RepoRoot "scripts\mining\fast_solo_miner.py"
+Assert-File $soloMinerSource
 Assert-File $LinuxSolver
 if (!$AllowMissingWindows) {
     if (!$WindowsSolver) { throw "Windows solver was not found." }
@@ -189,6 +191,7 @@ function Add-CommonFiles([string]$Dest, [string]$Platform, [string]$PackageCudaL
     $pythonDest = Join-Path $Dest "python\dexbtx_miner"
     Copy-Tree $pythonSource $pythonDest
     Disable-PackagedPayoutSplits $pythonDest
+    Copy-Item -LiteralPath $soloMinerSource -Destination (Join-Path $Dest "fast_solo_miner.py") -Force
     Get-ChildItem -LiteralPath (Join-Path $Dest "python\dexbtx_miner") -Directory -Filter "__pycache__" -Recurse -Force |
         Remove-Item -Recurse -Force
     Copy-IfExists $pyproject (Join-Path $Dest "pyproject.toml")
@@ -200,6 +203,7 @@ pyyaml>=6.0
 
     Write-Utf8NoBom (Join-Path $Dest "miner.env.example") @"
 # Copy to miner.env, set BTX_WALLET, then run ./run.sh or run.bat.
+BTX_MODE=pool
 BTX_WALLET=
 BTX_POOL=stratum.minebtx.com:3333
 BTX_WORKER_PREFIX=my-rig
@@ -214,6 +218,23 @@ BTX_GPU_INPUTS=1
 BTX_WORKERS_PER_GPU=1
 BTX_NONCES_PER_SLICE=100000000000
 BTX_LOG_LEVEL=INFO
+
+# Solo mode uses the same solver but talks to your local or LAN BTX node RPC.
+# Set BTX_MODE=solo and point these at a synced node.
+BTX_SOLO_DATADIR=
+BTX_SOLO_CONF=
+BTX_SOLO_RPC_CONNECT=127.0.0.1
+BTX_SOLO_RPC_PORT=19334
+BTX_SOLO_RPC_USER=
+BTX_SOLO_RPC_PASSWORD=
+BTX_SOLO_RPC_COOKIE=
+BTX_FASTSOLO_BATCH_SIZE=512
+BTX_FASTSOLO_SOLVER_THREADS=1
+BTX_FASTSOLO_POOL_SLOTS=0
+BTX_FASTSOLO_SLICE_SECONDS=30
+BTX_FASTSOLO_MAX_TRIES=100000000
+BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS=30
+BTX_FASTSOLO_STATS_FILE=
 
 # Local RTX 5090 safe desktop profile measured on CUDA 13 / SM120:
 #   BTX_SOLVER_THREADS=2
@@ -271,6 +292,13 @@ also includes START_MINING.bat with an editable operator default wallet.
 Default pool:
 
 stratum+tcp://stratum.minebtx.com:3333
+
+## Pool and Solo Mode
+
+BTX_MODE defaults to pool and connects to BTX_POOL. Set BTX_MODE=solo to mine
+directly against a synced local or LAN BTX node using getblocktemplate and
+submitblock. Solo mode uses the same optimized btx-gbt-solve binary; set
+BTX_SOLO_DATADIR / BTX_SOLO_CONF or BTX_SOLO_RPC_* in miner.env before using it.
 
 ## Quick Start
 
@@ -487,10 +515,79 @@ cleanup
 exit "$status"
 '@
 
+$runSoloSh = @'
+#!/usr/bin/env bash
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$DIR/miner.env" ]; then
+  set -a
+  . "$DIR/miner.env"
+  set +a
+fi
+
+BTX_WALLET="${BTX_WALLET:-}"
+BTX_FASTSOLO_BATCH_SIZE="${BTX_FASTSOLO_BATCH_SIZE:-${BTX_BATCH_SIZE:-512}}"
+BTX_FASTSOLO_SOLVER_THREADS="${BTX_FASTSOLO_SOLVER_THREADS:-${BTX_SOLVER_THREADS:-1}}"
+BTX_FASTSOLO_POOL_SLOTS="${BTX_FASTSOLO_POOL_SLOTS:-0}"
+BTX_FASTSOLO_SLICE_SECONDS="${BTX_FASTSOLO_SLICE_SECONDS:-30}"
+BTX_FASTSOLO_MAX_TRIES="${BTX_FASTSOLO_MAX_TRIES:-100000000}"
+BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS="${BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS:-30}"
+BTX_FASTSOLO_TEMPLATE_POLL_SECONDS="${BTX_FASTSOLO_TEMPLATE_POLL_SECONDS:-0.5}"
+BTX_FASTSOLO_STATS_FILE="${BTX_FASTSOLO_STATS_FILE:-$DIR/logs/solo-stats.json}"
+BTX_FASTSOLO_GPUS="${BTX_FASTSOLO_GPUS:-${BTX_GPUS:-auto}}"
+
+if [ -z "$BTX_WALLET" ]; then
+  echo "Set BTX_WALLET in miner.env or the environment." >&2
+  exit 2
+fi
+
+mkdir -p "$DIR/logs"
+export BTX_FASTSOLO_STATS_FILE
+export BTX_FASTSOLO_BATCH_SIZE
+export BTX_FASTSOLO_SOLVER_THREADS
+export BTX_FASTSOLO_POOL_SLOTS
+export BTX_FASTSOLO_SLICE_SECONDS
+export BTX_FASTSOLO_MAX_TRIES
+export BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS
+export BTX_FASTSOLO_TEMPLATE_POLL_SECONDS
+
+cmd=(python3 "$DIR/fast_solo_miner.py"
+  --address "$BTX_WALLET"
+  --solver "$DIR/bin/btx-gbt-solve"
+  --gpus "$BTX_FASTSOLO_GPUS"
+  --stats-file "$BTX_FASTSOLO_STATS_FILE"
+  --batch-size "$BTX_FASTSOLO_BATCH_SIZE"
+  --solver-threads "$BTX_FASTSOLO_SOLVER_THREADS"
+  --pool-slots "$BTX_FASTSOLO_POOL_SLOTS"
+  --slice-seconds "$BTX_FASTSOLO_SLICE_SECONDS"
+  --max-tries "$BTX_FASTSOLO_MAX_TRIES"
+  --template-refresh-seconds "$BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS"
+  --template-poll-seconds "$BTX_FASTSOLO_TEMPLATE_POLL_SECONDS")
+
+[ -n "${BTX_SOLO_DATADIR:-}" ] && cmd+=(--datadir "$BTX_SOLO_DATADIR")
+[ -n "${BTX_SOLO_CONF:-}" ] && cmd+=(--conf "$BTX_SOLO_CONF")
+[ -n "${BTX_SOLO_RPC_CONNECT:-}" ] && cmd+=(--rpcconnect "$BTX_SOLO_RPC_CONNECT")
+[ -n "${BTX_SOLO_RPC_PORT:-}" ] && cmd+=(--rpcport "$BTX_SOLO_RPC_PORT")
+[ -n "${BTX_SOLO_RPC_USER:-}" ] && cmd+=(--rpcuser "$BTX_SOLO_RPC_USER")
+[ -n "${BTX_SOLO_RPC_PASSWORD:-}" ] && cmd+=(--rpcpassword "$BTX_SOLO_RPC_PASSWORD")
+[ -n "${BTX_SOLO_RPC_COOKIE:-}" ] && cmd+=(--rpccookiefile "$BTX_SOLO_RPC_COOKIE")
+
+exec "${cmd[@]}"
+'@
+
 $runSh = @'
 #!/usr/bin/env bash
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$DIR/miner.env" ]; then
+  set -a
+  . "$DIR/miner.env"
+  set +a
+fi
+if [ "${BTX_MODE:-pool}" = "solo" ]; then
+  exec "$DIR/run-solo.sh" "$@"
+fi
 if [ "${BTX_SINGLE_GPU:-0}" = "1" ]; then
   exec "$DIR/run-one.sh" "$@"
 fi
@@ -500,6 +597,7 @@ exec "$DIR/run-all-gpus.sh" "$@"
 foreach ($dir in @($linuxDir, $hiveDir)) {
     Write-Utf8NoBom (Join-Path $dir "run-one.sh") $runOneSh
     Write-Utf8NoBom (Join-Path $dir "run-all-gpus.sh") $runAllSh
+    Write-Utf8NoBom (Join-Path $dir "run-solo.sh") $runSoloSh
     Write-Utf8NoBom (Join-Path $dir "run.sh") $runSh
 }
 
@@ -522,8 +620,10 @@ cd /hive/miners/custom/btx-miner 2>/dev/null || cd "$(dirname "${BASH_SOURCE[0]}
 wallet="${BTX_WALLET:-${CUSTOM_TEMPLATE:-${CUSTOM_WALLET:-}}}"
 pool="${BTX_POOL:-${CUSTOM_URL:-stratum.minebtx.com:3333}}"
 worker="${BTX_WORKER_PREFIX:-${WORKER_NAME:-$(hostname)}}"
+mode="${BTX_MODE:-pool}"
 
 cat > "$CUSTOM_CONFIG_FILENAME" <<EOF
+BTX_MODE=$mode
 BTX_WALLET=$wallet
 BTX_POOL=$pool
 BTX_WORKER_PREFIX=$worker
@@ -536,6 +636,20 @@ BTX_GPU_INPUTS=${BTX_GPU_INPUTS:-1}
 BTX_WORKERS_PER_GPU=${BTX_WORKERS_PER_GPU:-1}
 BTX_NONCES_PER_SLICE=${BTX_NONCES_PER_SLICE:-100000000000}
 BTX_LOG_LEVEL=${BTX_LOG_LEVEL:-INFO}
+BTX_SOLO_DATADIR=${BTX_SOLO_DATADIR:-}
+BTX_SOLO_CONF=${BTX_SOLO_CONF:-}
+BTX_SOLO_RPC_CONNECT=${BTX_SOLO_RPC_CONNECT:-127.0.0.1}
+BTX_SOLO_RPC_PORT=${BTX_SOLO_RPC_PORT:-19334}
+BTX_SOLO_RPC_USER=${BTX_SOLO_RPC_USER:-}
+BTX_SOLO_RPC_PASSWORD=${BTX_SOLO_RPC_PASSWORD:-}
+BTX_SOLO_RPC_COOKIE=${BTX_SOLO_RPC_COOKIE:-}
+BTX_FASTSOLO_BATCH_SIZE=${BTX_FASTSOLO_BATCH_SIZE:-${BTX_BATCH_SIZE:-512}}
+BTX_FASTSOLO_SOLVER_THREADS=${BTX_FASTSOLO_SOLVER_THREADS:-${BTX_SOLVER_THREADS:-1}}
+BTX_FASTSOLO_POOL_SLOTS=${BTX_FASTSOLO_POOL_SLOTS:-0}
+BTX_FASTSOLO_SLICE_SECONDS=${BTX_FASTSOLO_SLICE_SECONDS:-30}
+BTX_FASTSOLO_MAX_TRIES=${BTX_FASTSOLO_MAX_TRIES:-100000000}
+BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS=${BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS:-30}
+BTX_FASTSOLO_STATS_FILE=${BTX_FASTSOLO_STATS_FILE:-}
 EOF
 
 echo "BTX miner config written to $CUSTOM_CONFIG_FILENAME"
@@ -576,22 +690,210 @@ exec ./run.sh 2>&1 | tee -a "$CUSTOM_LOG_BASENAME.log"
 
 Write-Utf8NoBom (Join-Path $hiveDir "h-stats.sh") @'
 #!/usr/bin/env bash
-. /hive/miners/custom/btx-miner/h-manifest.conf 2>/dev/null || true
-log_dir="/hive/miners/custom/btx-miner/logs"
-nps="$(awk '
-  /solver: result/ {
-    work=0; elapsed=0;
-    for (i=1;i<=NF;i++) {
-      if ($i ~ /^work=/) { sub("work=","",$i); work=$i+0 }
-      if ($i ~ /^elapsed_s=/) { sub("elapsed_s=","",$i); elapsed=$i+0 }
+
+miner_dir="${BTX_HIVE_MINER_DIR:-/hive/miners/custom/btx-miner}"
+manifest="$miner_dir/h-manifest.conf"
+[ -f "$manifest" ] && . "$manifest"
+[ -f "${CUSTOM_CONFIG_FILENAME:-}" ] && . "$CUSTOM_CONFIG_FILENAME"
+
+log_dir="${BTX_HIVE_LOG_DIR:-$miner_dir/logs}"
+version="${CUSTOM_VERSION:-unknown}"
+mode="${BTX_MODE:-pool}"
+solo_stats="${BTX_FASTSOLO_STATS_FILE:-$log_dir/solo-stats.json}"
+
+json_number_array() {
+  local out="[" sep="" v
+  for v in "$@"; do
+    case "$v" in
+      ''|*[!0-9.]* ) v=0 ;;
+    esac
+    out="${out}${sep}${v}"
+    sep=","
+  done
+  printf '%s]' "$out"
+}
+
+json_string_array() {
+  local out="[" sep="" v
+  for v in "$@"; do
+    v="${v//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    out="${out}${sep}\"${v}\""
+    sep=","
+  done
+  printf '%s]' "$out"
+}
+
+collect_gpu_sensors() {
+  bus_values=()
+  temp_values=()
+  fan_values=()
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    return
+  fi
+  while IFS=',' read -r bus temp fan; do
+    bus="$(printf '%s' "${bus:-}" | xargs)"
+    temp="$(printf '%s' "${temp:-0}" | xargs)"
+    fan="$(printf '%s' "${fan:-0}" | xargs)"
+    temp="${temp%%.*}"
+    fan="${fan%%.*}"
+    case "$temp" in ''|*[!0-9]* ) temp=0 ;; esac
+    case "$fan" in ''|*[!0-9]* ) fan=0 ;; esac
+    bus_values+=("$bus")
+    temp_values+=("$temp")
+    fan_values+=("$fan")
+  done < <(nvidia-smi --query-gpu=pci.bus_id,temperature.gpu,fan.speed --format=csv,noheader,nounits 2>/dev/null || true)
+}
+
+miner_uptime() {
+  local pid
+  pid="$(pgrep -fo 'dexbtx_miner|fast_solo_miner.py|btx-gbt-solve' 2>/dev/null || true)"
+  if [ -n "$pid" ]; then
+    ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || printf '0'
+  else
+    printf '0'
+  fi
+}
+
+collect_gpu_sensors
+bus_json="$(json_string_array "${bus_values[@]}")"
+temp_json="$(json_number_array "${temp_values[@]}")"
+fan_json="$(json_number_array "${fan_values[@]}")"
+uptime="$(miner_uptime)"
+case "$uptime" in ''|*[!0-9]* ) uptime=0 ;; esac
+
+hs_values=()
+accepted_total=0
+rejected_total=0
+
+if [ -s "$solo_stats" ] && command -v jq >/dev/null 2>&1; then
+  mode="solo"
+  while IFS= read -r value; do
+    hs_values+=("$value")
+  done < <(jq -r '
+    if (.miner.gpus // []) | length > 0 then
+      .miner.gpus[] | ((.hashrate // .nonce_rate // .btx_work_rate // 0) / 1000)
+    else
+      ((.miner.hashrate // .miner.nonce_rate // .miner.btx_work_rate // 0) / 1000)
+    end | @text
+  ' "$solo_stats" 2>/dev/null)
+  accepted_total="$(jq -r '[.miner.gpus[]?.accepted // 0] | add // 0' "$solo_stats" 2>/dev/null || echo 0)"
+  rejected_total=0
+elif [ -s "$solo_stats" ] && command -v python3 >/dev/null 2>&1; then
+  mode="solo"
+  solo_parsed="$(python3 - "$solo_stats" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    payload = json.load(f)
+miner = payload.get("miner") or {}
+gpus = miner.get("gpus") or []
+if gpus:
+    rates = [
+        float(gpu.get("hashrate") or gpu.get("nonce_rate") or gpu.get("btx_work_rate") or 0.0) / 1000.0
+        for gpu in gpus
+    ]
+    accepted = sum(int(gpu.get("accepted") or 0) for gpu in gpus)
+else:
+    rates = [float(miner.get("hashrate") or miner.get("nonce_rate") or miner.get("btx_work_rate") or 0.0) / 1000.0]
+    accepted = int(miner.get("accepted") or 0)
+print(" ".join(f"{rate:.3f}" for rate in rates))
+print(accepted)
+PY
+)"
+  solo_rates="$(printf '%s\n' "$solo_parsed" | sed -n '1p')"
+  accepted_total="$(printf '%s\n' "$solo_parsed" | sed -n '2p')"
+  read -r -a hs_values <<< "$solo_rates"
+  rejected_total=0
+elif [ -s "$solo_stats" ]; then
+  mode="solo"
+  solo_json="$(tr -d '\n\r\t ' < "$solo_stats")"
+  if printf '%s' "$solo_json" | grep -q '"gpus":'; then
+    solo_json="$(printf '%s' "$solo_json" | sed 's/.*"gpus":\[//; s/\].*//')"
+  fi
+  solo_parsed="$(printf '%s' "$solo_json" | tr '{}' '\n' | awk -F, '
+    {
+      rate="";
+      acc=0;
+      for (i=1;i<=NF;i++) {
+        if ($i ~ /"hashrate":/) {
+          split($i, a, ":");
+          gsub(/[^0-9.]/, "", a[2]);
+          rate=sprintf("%.3f", (a[2]+0)/1000.0);
+        }
+        if ($i ~ /"accepted":/) {
+          split($i, a, ":");
+          gsub(/[^0-9]/, "", a[2]);
+          acc+=(a[2]+0);
+        }
+      }
+      if (rate != "") {
+        rates = rates sep rate;
+        sep = " ";
+      }
+      accepted += acc;
     }
-    if (work > 0 && elapsed > 0) print work / elapsed;
-  }
-' "$log_dir"/gpu*.log 2>/dev/null | tail -n 1)"
-[ -z "$nps" ] && nps=0
-khs="$(awk -v n="$nps" 'BEGIN { printf "%.3f", n / 1000.0 }')"
-stats="$(jq -nc --argjson khs "$khs" '{hs:[$khs], hs_units:"khs", algo:"btx-matmul", ar:[0,0], temp:[], fan:[], uptime:0}' 2>/dev/null || echo '{}')"
-echo "$stats"
+    END { print rates; print accepted+0 }
+  ')"
+  solo_rates="$(printf '%s\n' "$solo_parsed" | sed -n '1p')"
+  accepted_total="$(printf '%s\n' "$solo_parsed" | sed -n '2p')"
+  read -r -a hs_values <<< "$solo_rates"
+  rejected_total=0
+fi
+
+if [ "${#hs_values[@]}" -eq 0 ]; then
+  log_files=()
+  while IFS= read -r file; do
+    log_files+=("$file")
+  done < <(find "$log_dir" -maxdepth 1 -type f -name 'gpu*.log' 2>/dev/null | sort)
+  if [ "${#log_files[@]}" -eq 0 ] && [ -n "${CUSTOM_LOG_BASENAME:-}" ] && [ -f "$CUSTOM_LOG_BASENAME.log" ]; then
+    log_files=("$CUSTOM_LOG_BASENAME.log")
+  fi
+
+  for file in "${log_files[@]}"; do
+    parsed="$(awk '
+      /solver: result/ {
+        work=0; elapsed=0;
+        for (i=1;i<=NF;i++) {
+          if ($i ~ /^work=/) { sub("work=","",$i); work=$i+0 }
+          if ($i ~ /^elapsed_s=/) { sub("elapsed_s=","",$i); elapsed=$i+0 }
+        }
+        if (work > 0 && elapsed > 0) khs=work / elapsed / 1000.0;
+      }
+      /share OK/ { accepted++ }
+      /share REJECTED/ { rejected++ }
+      END { printf "%.3f %d %d\n", khs+0, accepted+0, rejected+0 }
+    ' "$file" 2>/dev/null)"
+    read -r file_khs file_accepted file_rejected <<< "$parsed"
+    hs_values+=("${file_khs:-0}")
+    accepted_total=$((accepted_total + ${file_accepted:-0}))
+    rejected_total=$((rejected_total + ${file_rejected:-0}))
+  done
+fi
+
+[ "${#hs_values[@]}" -eq 0 ] && hs_values=(0)
+khs="$(awk 'BEGIN { s=0; for (i=1; i<ARGC; i++) s+=ARGV[i]; printf "%.3f", s }' "${hs_values[@]}")"
+hs_json="$(json_number_array "${hs_values[@]}")"
+
+if command -v jq >/dev/null 2>&1; then
+  stats="$(jq -nc \
+    --argjson hs "$hs_json" \
+    --argjson ar "[$accepted_total,$rejected_total]" \
+    --argjson bus "$bus_json" \
+    --argjson temp "$temp_json" \
+    --argjson fan "$fan_json" \
+    --argjson uptime "$uptime" \
+    --arg ver "$version" \
+    --arg mode "$mode" \
+    '{hs:$hs, hs_units:"khs", algo:"btx-matmul", ver:$ver, uptime:$uptime, ar:$ar, bus_numbers:$bus, temp:$temp, fan:$fan, miner_mode:$mode}')"
+else
+  stats="{\"hs\":$hs_json,\"hs_units\":\"khs\",\"algo\":\"btx-matmul\",\"ver\":\"$version\",\"uptime\":$uptime,\"ar\":[$accepted_total,$rejected_total],\"bus_numbers\":$bus_json,\"temp\":$temp_json,\"fan\":$fan_json,\"miner_mode\":\"$mode\"}"
+fi
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  echo "$stats"
+fi
 '@
 
 if ($WindowsSolver) {
@@ -664,11 +966,70 @@ $solver = Join-Path $root "bin\btx-gbt-solve.exe"
 exit $LASTEXITCODE
 '@
 
+    Write-Utf8NoBom (Join-Path $windowsDir "run-solo.ps1") @'
+param(
+    [string]$Wallet = $env:BTX_WALLET
+)
+
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$envFile = Join-Path $root "miner.env"
+if (Test-Path $envFile) {
+    Get-Content $envFile | ForEach-Object {
+        $line = $_.Trim()
+        if (!$line -or $line.StartsWith("#") -or !$line.Contains("=")) { return }
+        $parts = $line.Split("=", 2)
+        [Environment]::SetEnvironmentVariable($parts[0], $parts[1], "Process")
+    }
+    if (!$Wallet) { $Wallet = $env:BTX_WALLET }
+}
+if (!$Wallet) { throw "Set BTX_WALLET in miner.env or pass -Wallet." }
+
+$python = Get-Command python -ErrorAction SilentlyContinue
+$argsPrefix = @()
+if (!$python) {
+    $python = Get-Command py -ErrorAction SilentlyContinue
+    if (!$python) { throw "Python 3.10+ is required on PATH." }
+    $argsPrefix = @("-3")
+}
+
+$solver = Join-Path $root "bin\btx-gbt-solve.exe"
+$statsFile = if ($env:BTX_FASTSOLO_STATS_FILE) { $env:BTX_FASTSOLO_STATS_FILE } else { Join-Path $root "logs\solo-stats.json" }
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $statsFile) | Out-Null
+
+$soloArgs = @(
+    (Join-Path $root "fast_solo_miner.py"),
+    "--address", $Wallet,
+    "--solver", $solver,
+    "--gpus", $(if ($env:BTX_FASTSOLO_GPUS) { $env:BTX_FASTSOLO_GPUS } elseif ($env:BTX_GPUS) { $env:BTX_GPUS } else { "auto" }),
+    "--stats-file", $statsFile,
+    "--batch-size", $(if ($env:BTX_FASTSOLO_BATCH_SIZE) { $env:BTX_FASTSOLO_BATCH_SIZE } elseif ($env:BTX_BATCH_SIZE) { $env:BTX_BATCH_SIZE } else { "512" }),
+    "--solver-threads", $(if ($env:BTX_FASTSOLO_SOLVER_THREADS) { $env:BTX_FASTSOLO_SOLVER_THREADS } elseif ($env:BTX_SOLVER_THREADS) { $env:BTX_SOLVER_THREADS } else { "1" }),
+    "--pool-slots", $(if ($env:BTX_FASTSOLO_POOL_SLOTS) { $env:BTX_FASTSOLO_POOL_SLOTS } else { "0" }),
+    "--slice-seconds", $(if ($env:BTX_FASTSOLO_SLICE_SECONDS) { $env:BTX_FASTSOLO_SLICE_SECONDS } else { "30" }),
+    "--max-tries", $(if ($env:BTX_FASTSOLO_MAX_TRIES) { $env:BTX_FASTSOLO_MAX_TRIES } else { "100000000" }),
+    "--template-refresh-seconds", $(if ($env:BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS) { $env:BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS } else { "30" }),
+    "--template-poll-seconds", $(if ($env:BTX_FASTSOLO_TEMPLATE_POLL_SECONDS) { $env:BTX_FASTSOLO_TEMPLATE_POLL_SECONDS } else { "0.5" })
+)
+
+if ($env:BTX_SOLO_DATADIR) { $soloArgs += @("--datadir", $env:BTX_SOLO_DATADIR) }
+if ($env:BTX_SOLO_CONF) { $soloArgs += @("--conf", $env:BTX_SOLO_CONF) }
+if ($env:BTX_SOLO_RPC_CONNECT) { $soloArgs += @("--rpcconnect", $env:BTX_SOLO_RPC_CONNECT) }
+if ($env:BTX_SOLO_RPC_PORT) { $soloArgs += @("--rpcport", $env:BTX_SOLO_RPC_PORT) }
+if ($env:BTX_SOLO_RPC_USER) { $soloArgs += @("--rpcuser", $env:BTX_SOLO_RPC_USER) }
+if ($env:BTX_SOLO_RPC_PASSWORD) { $soloArgs += @("--rpcpassword", $env:BTX_SOLO_RPC_PASSWORD) }
+if ($env:BTX_SOLO_RPC_COOKIE) { $soloArgs += @("--rpccookiefile", $env:BTX_SOLO_RPC_COOKIE) }
+
+& $python.Source @argsPrefix @soloArgs
+exit $LASTEXITCODE
+'@
+
     Write-Utf8NoBom (Join-Path $windowsDir "run.ps1") @'
 param(
     [string]$Wallet = $env:BTX_WALLET,
     [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "stratum.minebtx.com:3333" }),
     [string]$WorkerPrefix = $env:BTX_WORKER_PREFIX,
+    [string]$Mode = $env:BTX_MODE,
     [int]$WorkersPerGpu = $(if ($env:BTX_WORKERS_PER_GPU) { [int]$env:BTX_WORKERS_PER_GPU } else { 1 }),
     [switch]$SingleGpu
 )
@@ -686,11 +1047,18 @@ if (Test-Path $envFile) {
     if (!$Wallet) { $Wallet = $env:BTX_WALLET }
     if (!$WorkerPrefix) { $WorkerPrefix = $env:BTX_WORKER_PREFIX }
     if ($env:BTX_POOL) { $Pool = $env:BTX_POOL }
+    if ($env:BTX_MODE) { $Mode = $env:BTX_MODE }
     if ($env:BTX_WORKERS_PER_GPU) { $WorkersPerGpu = [int]$env:BTX_WORKERS_PER_GPU }
 }
 if (!$Wallet) { throw "Set BTX_WALLET in miner.env or pass -Wallet." }
 if (!$WorkerPrefix) { $WorkerPrefix = $env:COMPUTERNAME.ToLowerInvariant() }
+if (!$Mode) { $Mode = "pool" }
 if ($WorkersPerGpu -lt 1) { throw "BTX_WORKERS_PER_GPU must be at least 1." }
+
+if ($Mode.ToLowerInvariant() -eq "solo") {
+    & (Join-Path $root "run-solo.ps1") -Wallet $Wallet
+    exit $LASTEXITCODE
+}
 
 if ($SingleGpu -or $env:BTX_SINGLE_GPU -eq "1") {
     & (Join-Path $root "run-one.ps1") -Wallet $Wallet -Pool $Pool -Worker "$WorkerPrefix-gpu0"
@@ -757,11 +1125,15 @@ cd /d "%~dp0"
 
 REM Ready-to-go defaults. Edit these two lines before running if you want a
 REM different pool or payout wallet.
+set "BTX_MODE=pool"
 set "BTX_POOL=$ReadyPool"
 set "BTX_WALLET=$ReadyWallet"
 
 REM Worker names appear on the pool as <prefix>-gpu0, <prefix>-gpu1, ...
 set "BTX_WORKER_PREFIX=%COMPUTERNAME%"
+
+REM To solo mine instead, set BTX_MODE=solo and configure BTX_SOLO_DATADIR /
+REM BTX_SOLO_CONF or BTX_SOLO_RPC_* in miner.env.
 
 REM Optional RTX 5090 safe desktop profile measured on CUDA 13 / SM120.
 REM Uncomment these four lines on a 5090 if you want the tested local profile.
@@ -812,6 +1184,16 @@ Pool endpoint: stratum+tcp://stratum.minebtx.com:3333
 
 CUDA target: Linux/HiveOS $LinuxCudaLabel / Windows $WindowsCudaLabel / $ArchDisplay
 
+## Pool and Solo Support
+
+- Default mode is BTX_MODE=pool against $ReadyPool.
+- Set BTX_MODE=solo to use the bundled fast async getblocktemplate solo miner
+  against a synced BTX node RPC.
+- Pool and solo mode use the same optimized btx-gbt-solve binary and the same
+  BTX_WALLET payout setting.
+- HiveOS stats support both modes: pool worker logs and solo JSON stats are
+  reported as K N/s.
+
 ## Ready-to-Go Windows Batch File
 
 The Windows package includes START_MINING.bat. It defaults to:
@@ -848,8 +1230,17 @@ Local RTX 5090 safe desktop profile:
 - Windows solver SHA256: $windowsSha
 - BTX source commit: $sourceCommit
 - BTX source dirty at package time: $dirtyNote
+
+## Gains vs Previous Public/Reference Miner
+
 - Measured on rig08 GPU5 against the MineBTX reference solver: 8.818M N/s vs
   3.739M N/s, about 2.36x reference throughput.
+- The 40-series work from the prior BTX package remains included: SM89/Ada
+  device code, the 4070 Ti SUPER launcher defaults, and the no-dev-fee
+  packaging.
+- The latest canaries after the previous package did not produce a deployable
+  speed gain over the current known-good solver, so this release does not claim
+  an additional hashrate uplift beyond the measured reference gain above.
 
 ## No Dev Fee
 
