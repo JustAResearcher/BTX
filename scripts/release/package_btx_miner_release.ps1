@@ -670,17 +670,37 @@ cd /hive/miners/custom/btx-miner 2>/dev/null || cd "$(dirname "${BASH_SOURCE[0]}
 . ./h-manifest.conf
 
 mkdir -p "$(dirname "$CUSTOM_LOG_BASENAME")"
-if [ ! -f "$CUSTOM_CONFIG_FILENAME" ]; then
-  ./h-config.sh
+live_btx_wallet="${BTX_WALLET:-}"
+live_btx_pool="${BTX_POOL:-}"
+live_btx_worker_prefix="${BTX_WORKER_PREFIX:-}"
+
+if [ -f "$CUSTOM_CONFIG_FILENAME" ]; then
+  set -a
+  . "$CUSTOM_CONFIG_FILENAME"
+  set +a
 fi
 
-if [ -n "${CUSTOM_TEMPLATE:-}" ]; then
-  export BTX_WALLET="${BTX_WALLET:-$CUSTOM_TEMPLATE}"
+if [ -n "$live_btx_wallet" ]; then
+  export BTX_WALLET="$live_btx_wallet"
+elif [ -n "${CUSTOM_TEMPLATE:-}" ]; then
+  export BTX_WALLET="$CUSTOM_TEMPLATE"
+elif [ -n "${CUSTOM_WALLET:-}" ]; then
+  export BTX_WALLET="$CUSTOM_WALLET"
 fi
-if [ -n "${CUSTOM_URL:-}" ]; then
-  export BTX_POOL="${BTX_POOL:-$CUSTOM_URL}"
+
+if [ -n "$live_btx_pool" ]; then
+  export BTX_POOL="$live_btx_pool"
+elif [ -n "${CUSTOM_URL:-}" ]; then
+  export BTX_POOL="$CUSTOM_URL"
 fi
-export BTX_WORKER_PREFIX="${BTX_WORKER_PREFIX:-${WORKER_NAME:-$(hostname)}}"
+
+if [ -n "$live_btx_worker_prefix" ]; then
+  export BTX_WORKER_PREFIX="$live_btx_worker_prefix"
+elif [ -n "${WORKER_NAME:-}" ]; then
+  export BTX_WORKER_PREFIX="$WORKER_NAME"
+fi
+
+./h-config.sh
 
 if [ -f "$CUSTOM_CONFIG_FILENAME" ]; then
   set -a
@@ -1215,6 +1235,8 @@ CUDA target: Linux/HiveOS $LinuxCudaLabel / Windows $WindowsCudaLabel / $ArchDis
   BTX_WALLET payout setting.
 - HiveOS stats support both modes: pool worker logs and solo JSON stats are
   reported as K N/s.
+- HiveOS flight-sheet wallet/pool/worker changes are applied on miner start,
+  even when a stale miner.env exists from a previous sheet.
 
 ## Ready-to-Go Windows Batch File
 
