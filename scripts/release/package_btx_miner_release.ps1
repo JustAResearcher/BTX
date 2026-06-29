@@ -9,7 +9,7 @@ param(
     [string]$WindowsCudaLabel = "",
     [string]$ArchLabel = "sm89",
     [string]$ArchDisplay = "SM89/Ada",
-    [string]$ReadyPool = "stratum.minebtx.com:3333",
+    [string]$ReadyPool = "stratum+tcp://ninjaraider.com:44920",
     [string]$ReadyWallet = "btx1zwxtwvgt55h5smfxp7swxacp2qhavz9kpzt0fjvw8303w7kkl7pusgy9e73",
     [switch]$AllowMissingWindows
 )
@@ -205,7 +205,7 @@ pyyaml>=6.0
 # Copy to miner.env, set BTX_WALLET, then run ./run.sh or run.bat.
 BTX_MODE=pool
 BTX_WALLET=
-BTX_POOL=stratum.minebtx.com:3333
+BTX_POOL=$ReadyPool
 BTX_WORKER_PREFIX=my-rig
 
 # Tuned defaults for the optimized SM89/Ada solver used on 4070 Ti SUPER.
@@ -244,8 +244,8 @@ BTX_FASTSOLO_STATS_FILE=
 "@
 
     Write-Utf8NoBom (Join-Path $Dest "config.example.yaml") @"
-pool_host: "stratum.minebtx.com"
-pool_port: 3333
+pool_host: "ninjaraider.com"
+pool_port: 44920
 pool_tls: false
 
 # Required. Set this to your payout address. The Windows START_MINING.bat
@@ -291,7 +291,7 @@ also includes START_MINING.bat with an editable operator default wallet.
 
 Default pool:
 
-stratum+tcp://stratum.minebtx.com:3333
+$ReadyPool
 
 ## Pool and Solo Mode
 
@@ -401,7 +401,7 @@ if [ -f "$DIR/miner.env" ]; then
   set +a
 fi
 
-BTX_POOL="${BTX_POOL:-stratum.minebtx.com:3333}"
+BTX_POOL="${BTX_POOL:-stratum+tcp://ninjaraider.com:44920}"
 BTX_WALLET="${BTX_WALLET:-}"
 BTX_WORKER="${BTX_WORKER:-${BTX_WORKER_PREFIX:-$(hostname)}-gpu${CUDA_VISIBLE_DEVICES:-0}}"
 BTX_SOLVER_THREADS="${BTX_SOLVER_THREADS:-1}"
@@ -618,7 +618,7 @@ cd /hive/miners/custom/btx-miner 2>/dev/null || cd "$(dirname "${BASH_SOURCE[0]}
 . ./h-manifest.conf
 
 wallet="${BTX_WALLET:-${CUSTOM_TEMPLATE:-${CUSTOM_WALLET:-}}}"
-pool="${BTX_POOL:-${CUSTOM_URL:-stratum.minebtx.com:3333}}"
+pool="${BTX_POOL:-${CUSTOM_URL:-stratum+tcp://ninjaraider.com:44920}}"
 worker="${BTX_WORKER_PREFIX:-${WORKER_NAME:-$(hostname)}}"
 mode="${BTX_MODE:-pool}"
 
@@ -653,6 +653,14 @@ BTX_FASTSOLO_STATS_FILE=${BTX_FASTSOLO_STATS_FILE:-}
 EOF
 
 echo "BTX miner config written to $CUSTOM_CONFIG_FILENAME"
+
+# HiveOS miner-run sources h-config.sh and expects these functions to exist.
+# Custom/local packages should not return a miner_ver, or Hive tries to install
+# a nonexistent hive-miners-custom-$version package.
+MINER_API_PORT=${MINER_API_PORT:-${WEB_PORT:-0}}
+MINER_LOG_BASENAME=${MINER_LOG_BASENAME:-${CUSTOM_LOG_BASENAME:-/var/log/miner/btx-miner/btx-miner}}
+miner_ver() { :; }
+miner_config_gen() { :; }
 '@
 
 Write-Utf8NoBom (Join-Path $hiveDir "h-run.sh") @'
@@ -756,7 +764,18 @@ miner_uptime() {
 }
 
 collect_gpu_sensors
-bus_json="$(json_string_array "${bus_values[@]}")"
+bus_numeric_values=()
+for bus in "${bus_values[@]}"; do
+  b="${bus#*:}"
+  b="${b%%:*}"
+  b="${b#0x}"
+  case "$b" in
+    ''|*[!0-9A-Fa-f]* ) b=0 ;;
+    * ) b=$((16#$b)) ;;
+  esac
+  bus_numeric_values+=("$b")
+done
+bus_json="$(json_number_array "${bus_numeric_values[@]}")"
 temp_json="$(json_number_array "${temp_values[@]}")"
 fan_json="$(json_number_array "${fan_values[@]}")"
 uptime="$(miner_uptime)"
@@ -881,6 +900,7 @@ hs_json="$(json_number_array "${hs_values[@]}")"
 if command -v jq >/dev/null 2>&1; then
   stats="$(jq -nc \
     --argjson hs "$hs_json" \
+    --argjson total_khs "$khs" \
     --argjson ar "[$accepted_total,$rejected_total]" \
     --argjson bus "$bus_json" \
     --argjson temp "$temp_json" \
@@ -888,9 +908,9 @@ if command -v jq >/dev/null 2>&1; then
     --argjson uptime "$uptime" \
     --arg ver "$version" \
     --arg mode "$mode" \
-    '{hs:$hs, hs_units:"khs", algo:"btx-matmul", ver:$ver, uptime:$uptime, ar:$ar, bus_numbers:$bus, temp:$temp, fan:$fan, miner_mode:$mode}')"
+    '{total_khs:$total_khs, hs:$hs, hs_units:"khs", algo:"btx", ver:$ver, uptime:$uptime, ar:$ar, bus_numbers:$bus, temp:$temp, fan:$fan, miner_mode:$mode}')"
 else
-  stats="{\"hs\":$hs_json,\"hs_units\":\"khs\",\"algo\":\"btx-matmul\",\"ver\":\"$version\",\"uptime\":$uptime,\"ar\":[$accepted_total,$rejected_total],\"bus_numbers\":$bus_json,\"temp\":$temp_json,\"fan\":$fan_json,\"miner_mode\":\"$mode\"}"
+  stats="{\"total_khs\":$khs,\"hs\":$hs_json,\"hs_units\":\"khs\",\"algo\":\"btx\",\"ver\":\"$version\",\"uptime\":$uptime,\"ar\":[$accepted_total,$rejected_total],\"bus_numbers\":$bus_json,\"temp\":$temp_json,\"fan\":$fan_json,\"miner_mode\":\"$mode\"}"
 fi
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -902,7 +922,7 @@ if ($WindowsSolver) {
     Write-Utf8NoBom (Join-Path $windowsDir "run-one.ps1") @'
 param(
     [string]$Wallet = $env:BTX_WALLET,
-    [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "stratum.minebtx.com:3333" }),
+    [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "stratum+tcp://ninjaraider.com:44920" }),
     [string]$Worker = $env:BTX_WORKER,
     [string]$Gpu = $env:CUDA_VISIBLE_DEVICES,
     [int]$Threads = $(if ($env:BTX_SOLVER_THREADS) { [int]$env:BTX_SOLVER_THREADS } else { 1 }),
@@ -1029,7 +1049,7 @@ exit $LASTEXITCODE
     Write-Utf8NoBom (Join-Path $windowsDir "run.ps1") @'
 param(
     [string]$Wallet = $env:BTX_WALLET,
-    [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "stratum.minebtx.com:3333" }),
+    [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "stratum+tcp://ninjaraider.com:44920" }),
     [string]$WorkerPrefix = $env:BTX_WORKER_PREFIX,
     [string]$Mode = $env:BTX_MODE,
     [int]$WorkersPerGpu = $(if ($env:BTX_WORKERS_PER_GPU) { [int]$env:BTX_WORKERS_PER_GPU } else { 1 }),
@@ -1182,7 +1202,7 @@ This release packages the optimized BTX btx-gbt-solve pool miner for:
 - HiveOS x86_64 $LinuxCudaLabel $ArchLabel
 - Windows x86_64 $WindowsCudaLabel $ArchLabel
 
-Pool endpoint: stratum+tcp://stratum.minebtx.com:3333
+Pool endpoint: $ReadyPool
 
 CUDA target: Linux/HiveOS $LinuxCudaLabel / Windows $WindowsCudaLabel / $ArchDisplay
 
