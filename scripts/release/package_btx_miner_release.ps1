@@ -8,9 +8,11 @@ param(
     [string]$LinuxCudaLabel = "",
     [string]$WindowsCudaLabel = "",
     [string]$ArchLabel = "sm89",
+    [string]$HiveArchLabel = "",
     [string]$ArchDisplay = "SM89/Ada",
     [string]$ReadyPool = "stratum+tcp://ninjaraider.com:44920",
     [string]$ReadyWallet = "btx1zwxtwvgt55h5smfxp7swxacp2qhavz9kpzt0fjvw8303w7kkl7pusgy9e73",
+    [string]$StratumMinShareDifficulty = "",
     [switch]$AllowMissingWindows
 )
 
@@ -25,6 +27,17 @@ if (!$LinuxCudaLabel) {
 if (!$WindowsCudaLabel) {
     $WindowsCudaLabel = $CudaLabel
 }
+if (!$HiveArchLabel) {
+    $HiveArchLabel = $ArchLabel
+}
+if (!$StratumMinShareDifficulty) {
+    if ($ReadyPool -match "bitminerpool\.xyz") {
+        $StratumMinShareDifficulty = "0.05"
+    } else {
+        $StratumMinShareDifficulty = ""
+    }
+}
+$DefaultStartStaggerSeconds = if ($ReadyPool -match "bitminerpool\.xyz") { "2" } else { "0" }
 if (!$LinuxSolver) {
     $LinuxSolver = Join-Path $RepoRoot "build-docker-$LinuxCudaLabel-$ArchLabel-ubuntu22\bin\btx-gbt-solve"
     if (!(Test-Path -LiteralPath $LinuxSolver -PathType Leaf) -and $LinuxCudaLabel -eq "cuda12" -and $ArchLabel -eq "sm89") {
@@ -152,6 +165,13 @@ $releaseRoot = Join-Path $RepoRoot "release-artifacts\$releaseName"
 $stageRoot = Join-Path $releaseRoot "stage"
 $distRoot = Join-Path $releaseRoot "dist"
 
+$readyPoolTls = if ($ReadyPool -match "^stratum\+(ssl|tls)://") { "true" } else { "false" }
+$readyPoolAuthority = [regex]::Replace($ReadyPool, "^[A-Za-z][A-Za-z0-9+.-]*://", "")
+$readyPoolAuthority = ($readyPoolAuthority -split "/", 2)[0]
+$readyPoolParts = $readyPoolAuthority -split ":", 2
+$readyPoolHost = $readyPoolParts[0]
+$readyPoolPort = if ($readyPoolParts.Count -gt 1 -and $readyPoolParts[1]) { [int]$readyPoolParts[1] } else { 3333 }
+
 if (Test-Path -LiteralPath $stageRoot) {
     Remove-Item -LiteralPath $stageRoot -Recurse -Force
 }
@@ -161,8 +181,11 @@ if (Test-Path -LiteralPath $distRoot) {
 New-Item -ItemType Directory -Force -Path $stageRoot,$distRoot | Out-Null
 
 $linuxName = "$releaseName-linux-x86_64-$LinuxCudaLabel-$ArchLabel"
-$hiveName = "$releaseName-hiveos-x86_64-$LinuxCudaLabel-$ArchLabel"
+$hiveName = "$releaseName-hiveos-x86_64-$LinuxCudaLabel-$HiveArchLabel"
 $windowsName = "$releaseName-windows-x86_64-$WindowsCudaLabel-$ArchLabel"
+$hiveMinerName = "btx-miner"
+$hiveVersionToken = $Version -replace "[^A-Za-z0-9._+~]", "_"
+$hiveArchiveName = "$hiveMinerName-$hiveVersionToken"
 $linuxDir = Join-Path $stageRoot $linuxName
 $hiveDir = Join-Path $stageRoot $hiveName
 $windowsDir = Join-Path $stageRoot $windowsName
@@ -207,6 +230,8 @@ BTX_MODE=pool
 BTX_WALLET=
 BTX_POOL=$ReadyPool
 BTX_WORKER_PREFIX=my-rig
+BTX_STRATUM_PASSWORD=
+BTX_STRATUM_MIN_SHARE_DIFFICULTY=$StratumMinShareDifficulty
 
 # Tuned defaults for the optimized SM89/Ada solver used on 4070 Ti SUPER.
 BTX_SOLVER_THREADS=1
@@ -216,8 +241,13 @@ BTX_CUDA_POOL_SLOTS=
 BTX_PREFETCH=8
 BTX_GPU_INPUTS=1
 BTX_WORKERS_PER_GPU=1
+BTX_START_STAGGER_SECONDS=$DefaultStartStaggerSeconds
 BTX_NONCES_PER_SLICE=100000000000
+BTX_SOLVER_MAX_SECONDS_PER_SLICE=30
 BTX_LOG_LEVEL=INFO
+BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS=1
+BTX_MATMUL_CUDA_TILED_DIRECT_RHS=1
+BTX_MATMUL_CUDA_WAIT_POLICY=blocking
 
 # Solo mode uses the same solver but talks to your local or LAN BTX node RPC.
 # Set BTX_MODE=solo and point these at a synced node.
@@ -244,15 +274,17 @@ BTX_FASTSOLO_STATS_FILE=
 "@
 
     Write-Utf8NoBom (Join-Path $Dest "config.example.yaml") @"
-pool_host: "ninjaraider.com"
-pool_port: 44920
-pool_tls: false
+pool_host: "$readyPoolHost"
+pool_port: $readyPoolPort
+pool_tls: $readyPoolTls
 
 # Required. Set this to your payout address. The Windows START_MINING.bat
 # convenience file defaults to the operator wallet requested for this build and
 # can be edited before running.
 payout_address: "btx1z...YOUR_BTX_ADDRESS_HERE..."
 worker_name: "my-rig-gpu0"
+stratum_password: ""
+stratum_min_share_difficulty: "$StratumMinShareDifficulty"
 
 gbt_solve_path: "./bin/btx-gbt-solve"
 solver_backend: "cuda"
@@ -375,7 +407,7 @@ assuming one set of batch/prefetch values is optimal everywhere.
 }
 
 Add-CommonFiles $linuxDir "Linux x86_64 $LinuxCudaLabel $ArchLabel" $LinuxCudaLabel
-Add-CommonFiles $hiveDir "HiveOS x86_64 $LinuxCudaLabel $ArchLabel" $LinuxCudaLabel
+Add-CommonFiles $hiveDir "HiveOS x86_64 $LinuxCudaLabel $HiveArchLabel" $LinuxCudaLabel
 if ($WindowsSolver) {
     Add-CommonFiles $windowsDir "Windows x86_64 $WindowsCudaLabel $ArchLabel" $WindowsCudaLabel
 }
@@ -401,7 +433,7 @@ if [ -f "$DIR/miner.env" ]; then
   set +a
 fi
 
-BTX_POOL="${BTX_POOL:-stratum+tcp://ninjaraider.com:44920}"
+BTX_POOL="${BTX_POOL:-__BTX_READY_POOL__}"
 BTX_WALLET="${BTX_WALLET:-}"
 BTX_WORKER="${BTX_WORKER:-${BTX_WORKER_PREFIX:-$(hostname)}-gpu${CUDA_VISIBLE_DEVICES:-0}}"
 BTX_SOLVER_THREADS="${BTX_SOLVER_THREADS:-1}"
@@ -411,6 +443,7 @@ BTX_CUDA_POOL_SLOTS="${BTX_CUDA_POOL_SLOTS:-}"
 BTX_PREFETCH="${BTX_PREFETCH:-8}"
 BTX_GPU_INPUTS="${BTX_GPU_INPUTS:-1}"
 BTX_NONCES_PER_SLICE="${BTX_NONCES_PER_SLICE:-100000000000}"
+BTX_SOLVER_MAX_SECONDS_PER_SLICE="${BTX_SOLVER_MAX_SECONDS_PER_SLICE:-30}"
 BTX_LOG_LEVEL="${BTX_LOG_LEVEL:-INFO}"
 
 if [ -z "$BTX_WALLET" ]; then
@@ -425,6 +458,9 @@ export PYTHONPATH="$DIR/python${PYTHONPATH:+:$PYTHONPATH}"
 if [ -n "$BTX_CUDA_POOL_SLOTS" ]; then
   export BTX_MATMUL_CUDA_POOL_SLOTS="$BTX_CUDA_POOL_SLOTS"
 fi
+export BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS="${BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS:-1}"
+export BTX_MATMUL_CUDA_TILED_DIRECT_RHS="${BTX_MATMUL_CUDA_TILED_DIRECT_RHS:-1}"
+export BTX_MATMUL_CUDA_WAIT_POLICY="${BTX_MATMUL_CUDA_WAIT_POLICY:-blocking}"
 
 exec python3 -m dexbtx_miner \
   --pool "$BTX_POOL" \
@@ -437,8 +473,10 @@ exec python3 -m dexbtx_miner \
   --prefetch "$BTX_PREFETCH" \
   --gpu-inputs "$BTX_GPU_INPUTS" \
   --nonces-per-slice "$BTX_NONCES_PER_SLICE" \
+  --max-seconds-per-slice "$BTX_SOLVER_MAX_SECONDS_PER_SLICE" \
   --log-level "$BTX_LOG_LEVEL"
 '@
+$runOneSh = $runOneSh.Replace("__BTX_READY_POOL__", $ReadyPool)
 
 $runAllSh = @'
 #!/usr/bin/env bash
@@ -464,6 +502,7 @@ if [ "$workers_per_gpu" -lt 1 ]; then
   echo "BTX_WORKERS_PER_GPU must be at least 1." >&2
   exit 2
 fi
+start_stagger_seconds="${BTX_START_STAGGER_SECONDS:-${BTX_START_STAGGER_S:-0}}"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
   gpu_count="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)"
@@ -503,6 +542,9 @@ while [ "$i" -lt "$gpu_count" ]; do
     ) >> "$DIR/logs/${log_name}.log" 2>&1 &
     pids="$pids $!"
     started=$((started + 1))
+    if [ "$start_stagger_seconds" != "0" ] && [ -n "$start_stagger_seconds" ]; then
+      sleep "$start_stagger_seconds"
+    fi
     w=$((w + 1))
   done
   i=$((i + 1))
@@ -611,14 +653,22 @@ CUSTOM_LOG_BASENAME=/var/log/miner/`$CUSTOM_NAME/btx-miner
 WEB_PORT=0
 "@
 
-Write-Utf8NoBom (Join-Path $hiveDir "h-config.sh") @'
+$hConfigSh = @'
 #!/usr/bin/env bash
 set -euo pipefail
-cd /hive/miners/custom/btx-miner 2>/dev/null || cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")"
+if [ ! -f ./h-manifest.conf ] && [ -d /hive/miners/custom/btx-miner ]; then
+  cd /hive/miners/custom/btx-miner
+fi
 . ./h-manifest.conf
+miner_dir="$(pwd)"
+if [ -z "${CUSTOM_CONFIG_FILENAME:-}" ] || [ ! -d "$(dirname "$CUSTOM_CONFIG_FILENAME")" ]; then
+  CUSTOM_CONFIG_FILENAME="$miner_dir/miner.env"
+fi
+export CUSTOM_CONFIG_FILENAME
 
 wallet="${BTX_WALLET:-${CUSTOM_TEMPLATE:-${CUSTOM_WALLET:-}}}"
-pool="${BTX_POOL:-${CUSTOM_URL:-stratum+tcp://ninjaraider.com:44920}}"
+pool="${BTX_POOL:-${CUSTOM_URL:-__BTX_READY_POOL__}}"
 worker="${BTX_WORKER_PREFIX:-${WORKER_NAME:-$(hostname)}}"
 mode="${BTX_MODE:-pool}"
 
@@ -627,6 +677,8 @@ BTX_MODE=$mode
 BTX_WALLET=$wallet
 BTX_POOL=$pool
 BTX_WORKER_PREFIX=$worker
+BTX_STRATUM_PASSWORD=${BTX_STRATUM_PASSWORD:-}
+BTX_STRATUM_MIN_SHARE_DIFFICULTY=${BTX_STRATUM_MIN_SHARE_DIFFICULTY:-__BTX_STRATUM_MIN_SHARE_DIFFICULTY__}
 BTX_SOLVER_THREADS=${BTX_SOLVER_THREADS:-1}
 BTX_PREPARE_WORKERS=${BTX_PREPARE_WORKERS:-2}
 BTX_BATCH_SIZE=${BTX_BATCH_SIZE:-512}
@@ -634,8 +686,13 @@ BTX_CUDA_POOL_SLOTS=${BTX_CUDA_POOL_SLOTS:-}
 BTX_PREFETCH=${BTX_PREFETCH:-8}
 BTX_GPU_INPUTS=${BTX_GPU_INPUTS:-1}
 BTX_WORKERS_PER_GPU=${BTX_WORKERS_PER_GPU:-1}
+BTX_START_STAGGER_SECONDS=${BTX_START_STAGGER_SECONDS:-__BTX_START_STAGGER_SECONDS__}
 BTX_NONCES_PER_SLICE=${BTX_NONCES_PER_SLICE:-100000000000}
+BTX_SOLVER_MAX_SECONDS_PER_SLICE=${BTX_SOLVER_MAX_SECONDS_PER_SLICE:-30}
 BTX_LOG_LEVEL=${BTX_LOG_LEVEL:-INFO}
+BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS=${BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS:-1}
+BTX_MATMUL_CUDA_TILED_DIRECT_RHS=${BTX_MATMUL_CUDA_TILED_DIRECT_RHS:-1}
+BTX_MATMUL_CUDA_WAIT_POLICY=${BTX_MATMUL_CUDA_WAIT_POLICY:-blocking}
 BTX_SOLO_DATADIR=${BTX_SOLO_DATADIR:-}
 BTX_SOLO_CONF=${BTX_SOLO_CONF:-}
 BTX_SOLO_RPC_CONNECT=${BTX_SOLO_RPC_CONNECT:-127.0.0.1}
@@ -662,17 +719,32 @@ MINER_LOG_BASENAME=${MINER_LOG_BASENAME:-${CUSTOM_LOG_BASENAME:-/var/log/miner/b
 miner_ver() { :; }
 miner_config_gen() { :; }
 '@
+$hConfigSh = $hConfigSh.Replace("__BTX_READY_POOL__", $ReadyPool)
+$hConfigSh = $hConfigSh.Replace("__BTX_STRATUM_MIN_SHARE_DIFFICULTY__", $StratumMinShareDifficulty)
+$hConfigSh = $hConfigSh.Replace("__BTX_START_STAGGER_SECONDS__", $DefaultStartStaggerSeconds)
+Write-Utf8NoBom (Join-Path $hiveDir "h-config.sh") $hConfigSh
 
 Write-Utf8NoBom (Join-Path $hiveDir "h-run.sh") @'
 #!/usr/bin/env bash
 set -euo pipefail
-cd /hive/miners/custom/btx-miner 2>/dev/null || cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")"
+if [ ! -f ./h-manifest.conf ] && [ -d /hive/miners/custom/btx-miner ]; then
+  cd /hive/miners/custom/btx-miner
+fi
 . ./h-manifest.conf
+miner_dir="$(pwd)"
+if [ -z "${CUSTOM_CONFIG_FILENAME:-}" ] || [ ! -d "$(dirname "$CUSTOM_CONFIG_FILENAME")" ]; then
+  CUSTOM_CONFIG_FILENAME="$miner_dir/miner.env"
+fi
+export CUSTOM_CONFIG_FILENAME
 
 mkdir -p "$(dirname "$CUSTOM_LOG_BASENAME")"
 live_btx_wallet="${BTX_WALLET:-}"
 live_btx_pool="${BTX_POOL:-}"
 live_btx_worker_prefix="${BTX_WORKER_PREFIX:-}"
+live_btx_stratum_password="${BTX_STRATUM_PASSWORD:-}"
+live_btx_stratum_min_share_difficulty="${BTX_STRATUM_MIN_SHARE_DIFFICULTY:-}"
+live_btx_start_stagger_seconds="${BTX_START_STAGGER_SECONDS:-}"
 
 if [ -f "$CUSTOM_CONFIG_FILENAME" ]; then
   set -a
@@ -700,6 +772,16 @@ elif [ -n "${WORKER_NAME:-}" ]; then
   export BTX_WORKER_PREFIX="$WORKER_NAME"
 fi
 
+if [ -n "$live_btx_stratum_password" ]; then
+  export BTX_STRATUM_PASSWORD="$live_btx_stratum_password"
+fi
+if [ -n "$live_btx_stratum_min_share_difficulty" ]; then
+  export BTX_STRATUM_MIN_SHARE_DIFFICULTY="$live_btx_stratum_min_share_difficulty"
+fi
+if [ -n "$live_btx_start_stagger_seconds" ]; then
+  export BTX_START_STAGGER_SECONDS="$live_btx_start_stagger_seconds"
+fi
+
 ./h-config.sh
 
 if [ -f "$CUSTOM_CONFIG_FILENAME" ]; then
@@ -719,9 +801,13 @@ exec ./run.sh 2>&1 | tee -a "$CUSTOM_LOG_BASENAME.log"
 Write-Utf8NoBom (Join-Path $hiveDir "h-stats.sh") @'
 #!/usr/bin/env bash
 
-miner_dir="${BTX_HIVE_MINER_DIR:-/hive/miners/custom/btx-miner}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+miner_dir="${BTX_HIVE_MINER_DIR:-$script_dir}"
 manifest="$miner_dir/h-manifest.conf"
 [ -f "$manifest" ] && . "$manifest"
+if [ -z "${CUSTOM_CONFIG_FILENAME:-}" ] || [ ! -d "$(dirname "$CUSTOM_CONFIG_FILENAME")" ]; then
+  CUSTOM_CONFIG_FILENAME="$miner_dir/miner.env"
+fi
 [ -f "${CUSTOM_CONFIG_FILENAME:-}" ] && . "$CUSTOM_CONFIG_FILENAME"
 
 log_dir="${BTX_HIVE_LOG_DIR:-$miner_dir/logs}"
@@ -939,10 +1025,10 @@ fi
 '@
 
 if ($WindowsSolver) {
-    Write-Utf8NoBom (Join-Path $windowsDir "run-one.ps1") @'
+    $runOnePs1 = @'
 param(
     [string]$Wallet = $env:BTX_WALLET,
-    [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "stratum+tcp://ninjaraider.com:44920" }),
+    [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "__BTX_READY_POOL__" }),
     [string]$Worker = $env:BTX_WORKER,
     [string]$Gpu = $env:CUDA_VISIBLE_DEVICES,
     [int]$Threads = $(if ($env:BTX_SOLVER_THREADS) { [int]$env:BTX_SOLVER_THREADS } else { 1 }),
@@ -952,6 +1038,7 @@ param(
     [int]$Prefetch = $(if ($env:BTX_PREFETCH) { [int]$env:BTX_PREFETCH } else { 8 }),
     [int]$GpuInputs = $(if ($env:BTX_GPU_INPUTS) { [int]$env:BTX_GPU_INPUTS } else { 1 }),
     [string]$NoncesPerSlice = $(if ($env:BTX_NONCES_PER_SLICE) { $env:BTX_NONCES_PER_SLICE } else { "100000000000" }),
+    [double]$MaxSecondsPerSlice = $(if ($env:BTX_SOLVER_MAX_SECONDS_PER_SLICE) { [double]$env:BTX_SOLVER_MAX_SECONDS_PER_SLICE } else { 30.0 }),
     [string]$LogLevel = $(if ($env:BTX_LOG_LEVEL) { $env:BTX_LOG_LEVEL } else { "INFO" })
 )
 
@@ -978,6 +1065,9 @@ if (!$Worker) {
 }
 if ($Gpu) { $env:CUDA_VISIBLE_DEVICES = $Gpu }
 if ($CudaPoolSlots) { $env:BTX_MATMUL_CUDA_POOL_SLOTS = $CudaPoolSlots }
+if (!$env:BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS) { $env:BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS = "1" }
+if (!$env:BTX_MATMUL_CUDA_TILED_DIRECT_RHS) { $env:BTX_MATMUL_CUDA_TILED_DIRECT_RHS = "1" }
+if (!$env:BTX_MATMUL_CUDA_WAIT_POLICY) { $env:BTX_MATMUL_CUDA_WAIT_POLICY = "blocking" }
 
 $env:DEXBTX_NO_SOLVER_AUTOUPDATE = "1"
 $env:DEXBTX_NO_WRAPPER_AUTOUPDATE = "1"
@@ -1004,9 +1094,12 @@ $solver = Join-Path $root "bin\btx-gbt-solve.exe"
     --prefetch $Prefetch `
     --gpu-inputs $GpuInputs `
     --nonces-per-slice $NoncesPerSlice `
+    --max-seconds-per-slice $MaxSecondsPerSlice `
     --log-level $LogLevel
 exit $LASTEXITCODE
 '@
+    $runOnePs1 = $runOnePs1.Replace("__BTX_READY_POOL__", $ReadyPool)
+    Write-Utf8NoBom (Join-Path $windowsDir "run-one.ps1") $runOnePs1
 
     Write-Utf8NoBom (Join-Path $windowsDir "run-solo.ps1") @'
 param(
@@ -1066,13 +1159,14 @@ if ($env:BTX_SOLO_RPC_COOKIE) { $soloArgs += @("--rpccookiefile", $env:BTX_SOLO_
 exit $LASTEXITCODE
 '@
 
-    Write-Utf8NoBom (Join-Path $windowsDir "run.ps1") @'
+    $runPs1 = @'
 param(
     [string]$Wallet = $env:BTX_WALLET,
-    [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "stratum+tcp://ninjaraider.com:44920" }),
+    [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "__BTX_READY_POOL__" }),
     [string]$WorkerPrefix = $env:BTX_WORKER_PREFIX,
     [string]$Mode = $env:BTX_MODE,
     [int]$WorkersPerGpu = $(if ($env:BTX_WORKERS_PER_GPU) { [int]$env:BTX_WORKERS_PER_GPU } else { 1 }),
+    [double]$StartStaggerSeconds = $(if ($env:BTX_START_STAGGER_SECONDS) { [double]$env:BTX_START_STAGGER_SECONDS } else { 0 }),
     [switch]$SingleGpu
 )
 
@@ -1091,6 +1185,7 @@ if (Test-Path $envFile) {
     if ($env:BTX_POOL) { $Pool = $env:BTX_POOL }
     if ($env:BTX_MODE) { $Mode = $env:BTX_MODE }
     if ($env:BTX_WORKERS_PER_GPU) { $WorkersPerGpu = [int]$env:BTX_WORKERS_PER_GPU }
+    if ($env:BTX_START_STAGGER_SECONDS) { $StartStaggerSeconds = [double]$env:BTX_START_STAGGER_SECONDS }
 }
 if (!$Wallet) { throw "Set BTX_WALLET in miner.env or pass -Wallet." }
 if (!$WorkerPrefix) { $WorkerPrefix = $env:COMPUTERNAME.ToLowerInvariant() }
@@ -1141,6 +1236,7 @@ for ($i = 0; $i -lt $gpuLines.Count; $i++) {
             "-Gpu", "`"$i`""
         )
         $procs += Start-Process -FilePath "powershell.exe" -ArgumentList $args -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -WindowStyle Hidden
+        if ($StartStaggerSeconds -gt 0) { Start-Sleep -Milliseconds ([int]($StartStaggerSeconds * 1000)) }
     }
 }
 Write-Host "Started $($procs.Count) BTX miner process(es) across $($gpuLines.Count) GPU(s). Logs are in $logs."
@@ -1152,6 +1248,8 @@ try {
     }
 }
 '@
+    $runPs1 = $runPs1.Replace("__BTX_READY_POOL__", $ReadyPool)
+    Write-Utf8NoBom (Join-Path $windowsDir "run.ps1") $runPs1
 
     Write-Utf8NoBom (Join-Path $windowsDir "run.bat") @'
 @echo off
@@ -1170,6 +1268,9 @@ REM different pool or payout wallet.
 set "BTX_MODE=pool"
 set "BTX_POOL=$ReadyPool"
 set "BTX_WALLET=$ReadyWallet"
+set "BTX_STRATUM_MIN_SHARE_DIFFICULTY=$StratumMinShareDifficulty"
+set "BTX_START_STAGGER_SECONDS=$DefaultStartStaggerSeconds"
+set "BTX_SOLVER_MAX_SECONDS_PER_SLICE=30"
 
 REM Worker names appear on the pool as <prefix>-gpu0, <prefix>-gpu1, ...
 set "BTX_WORKER_PREFIX=%COMPUTERNAME%"
@@ -1186,18 +1287,67 @@ REM set "BTX_WORKERS_PER_GPU=3"
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
 "@
+
+    Write-Utf8NoBom (Join-Path $windowsDir "START_MINEBTX_5090_FOREGROUND.bat") @"
+@echo off
+setlocal
+cd /d "%~dp0"
+
+REM Ready-to-go local RTX 5090 desktop profile. This window stays in the
+REM foreground so you can watch the miner output.
+set "BTX_MODE=pool"
+set "BTX_POOL=stratum+tcp://stratum.minebtx.com:3333"
+set "BTX_WALLET=$ReadyWallet"
+set "BTX_WORKER_PREFIX=local-5090"
+
+set "BTX_SOLVER_THREADS=2"
+set "BTX_PREPARE_WORKERS=2"
+set "BTX_BATCH_SIZE=768"
+set "BTX_CUDA_POOL_SLOTS=4"
+set "BTX_PREFETCH=8"
+set "BTX_GPU_INPUTS=1"
+set "BTX_WORKERS_PER_GPU=3"
+set "BTX_START_STAGGER_SECONDS=1"
+set "BTX_NONCES_PER_SLICE=100000000000"
+set "BTX_SOLVER_MAX_SECONDS_PER_SLICE=30"
+set "BTX_LOG_LEVEL=INFO"
+
+title BTX MineBTX RTX 5090
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
+"@
 }
+
+$hiveArchiveLayout = "_hive_archive"
+$hiveArchiveRoot = Join-Path $stageRoot $hiveArchiveLayout
+if (Test-Path -LiteralPath $hiveArchiveRoot) {
+    Remove-Item -LiteralPath $hiveArchiveRoot -Recurse -Force
+}
+function Copy-HiveArchiveTree([string]$Source, [string]$Destination) {
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    foreach ($child in Get-ChildItem -LiteralPath $Source -Force) {
+        $target = Join-Path $Destination $child.Name
+        if ($child.PSIsContainer) {
+            Copy-HiveArchiveTree $child.FullName $target
+        } else {
+            Copy-Item -LiteralPath $child.FullName -Destination $target -Force
+        }
+    }
+}
+New-Item -ItemType Directory -Force -Path $hiveArchiveRoot | Out-Null
+$hiveArchiveMinerRoot = Join-Path $hiveArchiveRoot $hiveMinerName
+New-Item -ItemType Directory -Force -Path $hiveArchiveMinerRoot | Out-Null
+Copy-HiveArchiveTree $hiveDir $hiveArchiveMinerRoot
 
 $wslStage = Get-WslPath $stageRoot
 $wslDist = Get-WslPath $distRoot
-Invoke-WslBash "cd '$wslStage' && find '$linuxName' '$hiveName' -type f \( -name '*.sh' -o -name 'btx-gbt-solve' -o -name 'btx-matmul-*' \) -exec chmod +x {} +"
+Invoke-WslBash "cd '$wslStage' && find '$linuxName' '$hiveName' '$hiveArchiveLayout' -type f \( -name '*.sh' -o -name 'btx-gbt-solve' -o -name 'btx-matmul-*' \) -exec chmod +x {} +"
 
 $linuxArchive = Join-Path $distRoot "$linuxName.tar.gz"
-$hiveArchive = Join-Path $distRoot "$hiveName.tar.gz"
+$hiveArchive = Join-Path $distRoot "$hiveArchiveName.tar.gz"
 $windowsArchive = Join-Path $distRoot "$windowsName.zip"
 
 Invoke-WslBash "cd '$wslStage' && tar -czf '$wslDist/$linuxName.tar.gz' '$linuxName'"
-Invoke-WslBash "cd '$wslStage' && tar -czf '$wslDist/$hiveName.tar.gz' '$hiveName'"
+Invoke-WslBash "cd '$wslStage/$hiveArchiveLayout' && tar -czf '$wslDist/$hiveArchiveName.tar.gz' '$hiveMinerName'"
 if ($WindowsSolver) {
     Get-ChildItem -LiteralPath $windowsDir -Recurse -Force | ForEach-Object {
         if ($_.LastWriteTime.Year -lt 1980) { $_.LastWriteTime = Get-Date }
@@ -1219,20 +1369,36 @@ No dev fee.
 This release packages the optimized BTX btx-gbt-solve pool miner for:
 
 - Linux x86_64 $LinuxCudaLabel $ArchLabel
-- HiveOS x86_64 $LinuxCudaLabel $ArchLabel
+- HiveOS x86_64 $LinuxCudaLabel $HiveArchLabel
 - Windows x86_64 $WindowsCudaLabel $ArchLabel
 
 Pool endpoint: $ReadyPool
 
 CUDA target: Linux/HiveOS $LinuxCudaLabel / Windows $WindowsCudaLabel / $ArchDisplay
 
+HiveOS custom miner name: $hiveMinerName
+
+HiveOS package root: $hiveMinerName
+
+HiveOS asset: $hiveArchiveName.tar.gz
+
 ## Pool and Solo Support
 
 - Default mode is BTX_MODE=pool against $ReadyPool.
+- Classic Stratum pools that start at very low vardiff can use
+  BTX_STRATUM_MIN_SHARE_DIFFICULTY. This build defaults it to
+  "$StratumMinShareDifficulty" for the selected ready pool.
+- BitMinerPool builds default BTX_START_STAGGER_SECONDS to
+  "$DefaultStartStaggerSeconds" and wrapper reconnects use wider jitter so
+  multi-rig restarts do not hammer the pool at once.
 - Set BTX_MODE=solo to use the bundled fast async getblocktemplate solo miner
   against a synced BTX node RPC.
 - Pool and solo mode use the same optimized btx-gbt-solve binary and the same
   BTX_WALLET payout setting.
+- Pool launchers now default BTX_MATMUL_CUDA_WAIT_POLICY=blocking plus the
+  device-prepared/tiled-direct CUDA fast paths. On the live 6x 4070 Ti SUPER
+  MineBTX fleet this removed host CPU saturation and restored rig08 from about
+  1.37 GN/s to about 1.91 GN/s.
 - HiveOS stats support both modes: pool worker logs and solo JSON stats are
   reported as K N/s.
 - HiveOS flight-sheet wallet/pool/worker changes are applied on miner start,
