@@ -622,6 +622,9 @@ $runSh = @'
 #!/usr/bin/env bash
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$DIR/h-config.sh" ] && { [ -n "${CUSTOM_TEMPLATE:-}" ] || [ -n "${CUSTOM_WALLET:-}" ] || [ -n "${CUSTOM_URL:-}" ] || [ -n "${CUSTOM_USER_CONFIG:-}" ] || [ -n "${WORKER_NAME:-}" ]; }; then
+  "$DIR/h-config.sh" >/dev/null
+fi
 if [ -f "$DIR/miner.env" ]; then
   set -a
   . "$DIR/miner.env"
@@ -667,9 +670,18 @@ if [ -z "${CUSTOM_CONFIG_FILENAME:-}" ] || [ ! -d "$(dirname "$CUSTOM_CONFIG_FIL
 fi
 export CUSTOM_CONFIG_FILENAME
 
-wallet="${BTX_WALLET:-${CUSTOM_TEMPLATE:-${CUSTOM_WALLET:-}}}"
+template="${BTX_WALLET:-${CUSTOM_TEMPLATE:-${CUSTOM_WALLET:-}}}"
+wallet="$template"
+template_worker=""
+if [[ "$template" == btx1*.* ]]; then
+  wallet="${template%%.*}"
+  template_worker="${template#*.}"
+fi
+if [[ "$wallet" != btx1* ]] && [ -n "${CUSTOM_WALLET:-}" ]; then
+  wallet="$CUSTOM_WALLET"
+fi
 pool="${BTX_POOL:-${CUSTOM_URL:-__BTX_READY_POOL__}}"
-worker="${BTX_WORKER_PREFIX:-${WORKER_NAME:-$(hostname)}}"
+worker="${BTX_WORKER_PREFIX:-${template_worker:-${WORKER_NAME:-$(hostname)}}}"
 mode="${BTX_MODE:-pool}"
 
 cat > "$CUSTOM_CONFIG_FILENAME" <<EOF
@@ -708,6 +720,14 @@ BTX_FASTSOLO_MAX_TRIES=${BTX_FASTSOLO_MAX_TRIES:-100000000}
 BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS=${BTX_FASTSOLO_TEMPLATE_REFRESH_SECONDS:-30}
 BTX_FASTSOLO_STATS_FILE=${BTX_FASTSOLO_STATS_FILE:-}
 EOF
+
+if [ -n "${CUSTOM_USER_CONFIG:-}" ]; then
+  for token in $CUSTOM_USER_CONFIG; do
+    if printf '%s' "$token" | grep -Eq '^(BTX|DEXBTX)_[A-Za-z0-9_]*=[A-Za-z0-9_./:+,=-]*$'; then
+      printf '%s\n' "$token" >> "$CUSTOM_CONFIG_FILENAME"
+    fi
+  done
+fi
 
 echo "BTX miner config written to $CUSTOM_CONFIG_FILENAME"
 
@@ -1403,6 +1423,12 @@ HiveOS asset: $hiveArchiveName.tar.gz
   reported as K N/s.
 - HiveOS flight-sheet wallet/pool/worker changes are applied on miner start,
   even when a stale miner.env exists from a previous sheet.
+- HiveOS packages use a Hive-compatible asset name and top-level btx-miner
+  directory so custom-get installs h-manifest.conf, h-config.sh, h-run.sh, and
+  h-stats.sh where Hive expects them.
+- If HiveOS invokes run.sh directly, the launcher regenerates miner.env from
+  the active flight sheet before starting.
+- HiveOS extra config accepts BTX_...=... and DEXBTX_...=... assignments.
 
 ## Ready-to-Go Windows Batch File
 
