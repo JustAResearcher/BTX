@@ -212,6 +212,19 @@ def run_bash_checks(
             ),
             temp_dir,
         )
+        run_bash(
+            bash,
+            (
+                f"cd '{bash_miner_dir}' && "
+                f"CUSTOM_TEMPLATE='{template}' CUSTOM_URL='{pool}' WORKER_NAME='{worker}' "
+                "./h-config.sh >/tmp/btx-hiveos-verify-h-config-defaults.out && "
+                "grep -q '^BTX_SOLVER_THREADS=8$' miner.env && "
+                "grep -q '^BTX_BATCH_SIZE=128$' miner.env && "
+                "grep -q '^BTX_FASTSOLO_SOLVER_THREADS=8$' miner.env && "
+                "grep -q '^BTX_FASTSOLO_BATCH_SIZE=128$' miner.env"
+            ),
+            temp_dir,
+        )
 
         # Simulate HiveOS' built-in custom h-stats.sh delegating to this package.
         root_stats = temp_dir / "h-stats-root.sh"

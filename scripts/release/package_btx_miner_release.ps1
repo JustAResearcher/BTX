@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.32.12-opt1",
+    [string]$Version = "0.32.12-opt22-5070defaults",
     [string]$RepoRoot = "",
     [string]$WrapperRoot = "C:\Source\_tmp\minebtx",
     [string]$LinuxSolver = "",
@@ -10,7 +10,7 @@ param(
     [string]$ArchLabel = "sm89",
     [string]$HiveArchLabel = "",
     [string]$ArchDisplay = "SM89/Ada",
-    [string]$ReadyPool = "stratum+tcp://ninjaraider.com:44920",
+    [string]$ReadyPool = "stratum+tcp://stratum.minebtx.com:3333",
     [string]$ReadyWallet = "btx1zwxtwvgt55h5smfxp7swxacp2qhavz9kpzt0fjvw8303w7kkl7pusgy9e73",
     [string]$StratumMinShareDifficulty = "",
     [switch]$AllowMissingWindows
@@ -233,10 +233,10 @@ BTX_WORKER_PREFIX=my-rig
 BTX_STRATUM_PASSWORD=
 BTX_STRATUM_MIN_SHARE_DIFFICULTY=$StratumMinShareDifficulty
 
-# Tuned defaults for the optimized SM89/Ada solver used on 4070 Ti SUPER.
-BTX_SOLVER_THREADS=1
+# Tuned defaults for the optimized CUDA solver on RTX 5070-class cards.
+BTX_SOLVER_THREADS=8
 BTX_PREPARE_WORKERS=2
-BTX_BATCH_SIZE=512
+BTX_BATCH_SIZE=128
 BTX_CUDA_POOL_SLOTS=
 BTX_PREFETCH=8
 BTX_GPU_INPUTS=1
@@ -258,8 +258,8 @@ BTX_SOLO_RPC_PORT=19334
 BTX_SOLO_RPC_USER=
 BTX_SOLO_RPC_PASSWORD=
 BTX_SOLO_RPC_COOKIE=
-BTX_FASTSOLO_BATCH_SIZE=512
-BTX_FASTSOLO_SOLVER_THREADS=1
+BTX_FASTSOLO_BATCH_SIZE=128
+BTX_FASTSOLO_SOLVER_THREADS=8
 BTX_FASTSOLO_POOL_SLOTS=0
 BTX_FASTSOLO_SLICE_SECONDS=30
 BTX_FASTSOLO_MAX_TRIES=100000000
@@ -288,9 +288,9 @@ stratum_min_share_difficulty: "$StratumMinShareDifficulty"
 
 gbt_solve_path: "./bin/btx-gbt-solve"
 solver_backend: "cuda"
-solver_threads: 1
+solver_threads: 8
 solver_prepare_workers: 2
-solver_batch_size: 512
+solver_batch_size: 128
 solver_prefetch_depth: 8
 gpu_inputs: 1
 nonces_per_slice: 100000000000
@@ -374,6 +374,11 @@ Set BTX_SINGLE_GPU=1 to run only the current process/GPU.
 
 ## RTX 5090 Tuning
 
+This build defaults 5070-class rigs to:
+
+BTX_SOLVER_THREADS=8
+BTX_BATCH_SIZE=128
+
 A local RTX 5090 desktop test reached about 341K N/s with:
 
 BTX_SOLVER_THREADS=2
@@ -436,9 +441,9 @@ fi
 BTX_POOL="${BTX_POOL:-__BTX_READY_POOL__}"
 BTX_WALLET="${BTX_WALLET:-}"
 BTX_WORKER="${BTX_WORKER:-${BTX_WORKER_PREFIX:-$(hostname)}-gpu${CUDA_VISIBLE_DEVICES:-0}}"
-BTX_SOLVER_THREADS="${BTX_SOLVER_THREADS:-1}"
+BTX_SOLVER_THREADS="${BTX_SOLVER_THREADS:-8}"
 BTX_PREPARE_WORKERS="${BTX_PREPARE_WORKERS:-2}"
-BTX_BATCH_SIZE="${BTX_BATCH_SIZE:-512}"
+BTX_BATCH_SIZE="${BTX_BATCH_SIZE:-128}"
 BTX_CUDA_POOL_SLOTS="${BTX_CUDA_POOL_SLOTS:-}"
 BTX_PREFETCH="${BTX_PREFETCH:-8}"
 BTX_GPU_INPUTS="${BTX_GPU_INPUTS:-1}"
@@ -569,8 +574,8 @@ if [ -f "$DIR/miner.env" ]; then
 fi
 
 BTX_WALLET="${BTX_WALLET:-}"
-BTX_FASTSOLO_BATCH_SIZE="${BTX_FASTSOLO_BATCH_SIZE:-${BTX_BATCH_SIZE:-512}}"
-BTX_FASTSOLO_SOLVER_THREADS="${BTX_FASTSOLO_SOLVER_THREADS:-${BTX_SOLVER_THREADS:-1}}"
+BTX_FASTSOLO_BATCH_SIZE="${BTX_FASTSOLO_BATCH_SIZE:-${BTX_BATCH_SIZE:-128}}"
+BTX_FASTSOLO_SOLVER_THREADS="${BTX_FASTSOLO_SOLVER_THREADS:-${BTX_SOLVER_THREADS:-8}}"
 BTX_FASTSOLO_POOL_SLOTS="${BTX_FASTSOLO_POOL_SLOTS:-0}"
 BTX_FASTSOLO_SLICE_SECONDS="${BTX_FASTSOLO_SLICE_SECONDS:-30}"
 BTX_FASTSOLO_MAX_TRIES="${BTX_FASTSOLO_MAX_TRIES:-100000000}"
@@ -691,9 +696,9 @@ BTX_POOL=$pool
 BTX_WORKER_PREFIX=$worker
 BTX_STRATUM_PASSWORD=${BTX_STRATUM_PASSWORD:-}
 BTX_STRATUM_MIN_SHARE_DIFFICULTY=${BTX_STRATUM_MIN_SHARE_DIFFICULTY:-__BTX_STRATUM_MIN_SHARE_DIFFICULTY__}
-BTX_SOLVER_THREADS=${BTX_SOLVER_THREADS:-1}
+BTX_SOLVER_THREADS=${BTX_SOLVER_THREADS:-8}
 BTX_PREPARE_WORKERS=${BTX_PREPARE_WORKERS:-2}
-BTX_BATCH_SIZE=${BTX_BATCH_SIZE:-512}
+BTX_BATCH_SIZE=${BTX_BATCH_SIZE:-128}
 BTX_CUDA_POOL_SLOTS=${BTX_CUDA_POOL_SLOTS:-}
 BTX_PREFETCH=${BTX_PREFETCH:-8}
 BTX_GPU_INPUTS=${BTX_GPU_INPUTS:-1}
@@ -712,8 +717,8 @@ BTX_SOLO_RPC_PORT=${BTX_SOLO_RPC_PORT:-19334}
 BTX_SOLO_RPC_USER=${BTX_SOLO_RPC_USER:-}
 BTX_SOLO_RPC_PASSWORD=${BTX_SOLO_RPC_PASSWORD:-}
 BTX_SOLO_RPC_COOKIE=${BTX_SOLO_RPC_COOKIE:-}
-BTX_FASTSOLO_BATCH_SIZE=${BTX_FASTSOLO_BATCH_SIZE:-${BTX_BATCH_SIZE:-512}}
-BTX_FASTSOLO_SOLVER_THREADS=${BTX_FASTSOLO_SOLVER_THREADS:-${BTX_SOLVER_THREADS:-1}}
+BTX_FASTSOLO_BATCH_SIZE=${BTX_FASTSOLO_BATCH_SIZE:-${BTX_BATCH_SIZE:-128}}
+BTX_FASTSOLO_SOLVER_THREADS=${BTX_FASTSOLO_SOLVER_THREADS:-${BTX_SOLVER_THREADS:-8}}
 BTX_FASTSOLO_POOL_SLOTS=${BTX_FASTSOLO_POOL_SLOTS:-0}
 BTX_FASTSOLO_SLICE_SECONDS=${BTX_FASTSOLO_SLICE_SECONDS:-30}
 BTX_FASTSOLO_MAX_TRIES=${BTX_FASTSOLO_MAX_TRIES:-100000000}
@@ -1051,9 +1056,9 @@ param(
     [string]$Pool = $(if ($env:BTX_POOL) { $env:BTX_POOL } else { "__BTX_READY_POOL__" }),
     [string]$Worker = $env:BTX_WORKER,
     [string]$Gpu = $env:CUDA_VISIBLE_DEVICES,
-    [int]$Threads = $(if ($env:BTX_SOLVER_THREADS) { [int]$env:BTX_SOLVER_THREADS } else { 1 }),
+    [int]$Threads = $(if ($env:BTX_SOLVER_THREADS) { [int]$env:BTX_SOLVER_THREADS } else { 8 }),
     [int]$PrepareWorkers = $(if ($env:BTX_PREPARE_WORKERS) { [int]$env:BTX_PREPARE_WORKERS } else { 2 }),
-    [int]$BatchSize = $(if ($env:BTX_BATCH_SIZE) { [int]$env:BTX_BATCH_SIZE } else { 512 }),
+    [int]$BatchSize = $(if ($env:BTX_BATCH_SIZE) { [int]$env:BTX_BATCH_SIZE } else { 128 }),
     [string]$CudaPoolSlots = $env:BTX_CUDA_POOL_SLOTS,
     [int]$Prefetch = $(if ($env:BTX_PREFETCH) { [int]$env:BTX_PREFETCH } else { 8 }),
     [int]$GpuInputs = $(if ($env:BTX_GPU_INPUTS) { [int]$env:BTX_GPU_INPUTS } else { 1 }),
@@ -1158,8 +1163,8 @@ $soloArgs = @(
     "--solver", $solver,
     "--gpus", $(if ($env:BTX_FASTSOLO_GPUS) { $env:BTX_FASTSOLO_GPUS } elseif ($env:BTX_GPUS) { $env:BTX_GPUS } else { "auto" }),
     "--stats-file", $statsFile,
-    "--batch-size", $(if ($env:BTX_FASTSOLO_BATCH_SIZE) { $env:BTX_FASTSOLO_BATCH_SIZE } elseif ($env:BTX_BATCH_SIZE) { $env:BTX_BATCH_SIZE } else { "512" }),
-    "--solver-threads", $(if ($env:BTX_FASTSOLO_SOLVER_THREADS) { $env:BTX_FASTSOLO_SOLVER_THREADS } elseif ($env:BTX_SOLVER_THREADS) { $env:BTX_SOLVER_THREADS } else { "1" }),
+    "--batch-size", $(if ($env:BTX_FASTSOLO_BATCH_SIZE) { $env:BTX_FASTSOLO_BATCH_SIZE } elseif ($env:BTX_BATCH_SIZE) { $env:BTX_BATCH_SIZE } else { "128" }),
+    "--solver-threads", $(if ($env:BTX_FASTSOLO_SOLVER_THREADS) { $env:BTX_FASTSOLO_SOLVER_THREADS } elseif ($env:BTX_SOLVER_THREADS) { $env:BTX_SOLVER_THREADS } else { "8" }),
     "--pool-slots", $(if ($env:BTX_FASTSOLO_POOL_SLOTS) { $env:BTX_FASTSOLO_POOL_SLOTS } else { "0" }),
     "--slice-seconds", $(if ($env:BTX_FASTSOLO_SLICE_SECONDS) { $env:BTX_FASTSOLO_SLICE_SECONDS } else { "30" }),
     "--max-tries", $(if ($env:BTX_FASTSOLO_MAX_TRIES) { $env:BTX_FASTSOLO_MAX_TRIES } else { "100000000" }),
@@ -1290,6 +1295,8 @@ set "BTX_POOL=$ReadyPool"
 set "BTX_WALLET=$ReadyWallet"
 set "BTX_STRATUM_MIN_SHARE_DIFFICULTY=$StratumMinShareDifficulty"
 set "BTX_START_STAGGER_SECONDS=$DefaultStartStaggerSeconds"
+set "BTX_SOLVER_THREADS=8"
+set "BTX_BATCH_SIZE=128"
 set "BTX_SOLVER_MAX_SECONDS_PER_SLICE=30"
 
 REM Worker names appear on the pool as <prefix>-gpu0, <prefix>-gpu1, ...
@@ -1472,8 +1479,9 @@ Local RTX 5090 safe desktop profile:
 - Measured on rig08 GPU5 against the MineBTX reference solver: 8.818M N/s vs
   3.739M N/s, about 2.36x reference throughput.
 - The 40-series work from the prior BTX package remains included: SM89/Ada
-  device code, the 4070 Ti SUPER launcher defaults, and the no-dev-fee
-  packaging.
+  device code, the 4070 Ti SUPER work, and the no-dev-fee packaging.
+- RTX 5070-class launchers now default to the low-overhead profile validated on
+  JohnDillinger: BTX_SOLVER_THREADS=8 and BTX_BATCH_SIZE=128.
 - The latest canaries after the previous package did not produce a deployable
   speed gain over the current known-good solver, so this release does not claim
   an additional hashrate uplift beyond the measured reference gain above.
