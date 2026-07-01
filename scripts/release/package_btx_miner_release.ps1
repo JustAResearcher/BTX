@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.32.12-opt22-5070defaults",
+    [string]$Version = "0.32.12-opt23-winpy",
     [string]$RepoRoot = "",
     [string]$WrapperRoot = "C:\Source\_tmp\minebtx",
     [string]$LinuxSolver = "",
@@ -13,6 +13,7 @@ param(
     [string]$ReadyPool = "stratum+tcp://stratum.minebtx.com:3333",
     [string]$ReadyWallet = "btx1zwxtwvgt55h5smfxp7swxacp2qhavz9kpzt0fjvw8303w7kkl7pusgy9e73",
     [string]$StratumMinShareDifficulty = "",
+    [string]$WindowsPythonEmbedUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
     [switch]$AllowMissingWindows
 )
 
@@ -95,6 +96,47 @@ function Copy-IfExists([string]$Source, [string]$Destination) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
         Copy-Item -LiteralPath $Source -Destination $Destination -Force
     }
+}
+
+function Install-WindowsEmbeddedPython([string]$Dest) {
+    if (!$WindowsPythonEmbedUrl) {
+        throw "WindowsPythonEmbedUrl is empty; Windows packages require a bundled Python runtime."
+    }
+    $runtimeDir = Join-Path $Dest "runtime\python"
+    $cacheDir = Join-Path $RepoRoot "release-artifacts\_cache"
+    New-Item -ItemType Directory -Force -Path $runtimeDir,$cacheDir | Out-Null
+
+    $embedName = Split-Path -Leaf ([Uri]$WindowsPythonEmbedUrl).AbsolutePath
+    $embedZip = Join-Path $cacheDir $embedName
+    if (!(Test-Path -LiteralPath $embedZip -PathType Leaf)) {
+        Write-Host "Downloading Windows embedded Python: $WindowsPythonEmbedUrl"
+        Invoke-WebRequest -Uri $WindowsPythonEmbedUrl -OutFile $embedZip -UseBasicParsing
+    }
+
+    Expand-Archive -LiteralPath $embedZip -DestinationPath $runtimeDir -Force
+
+    $pth = Get-ChildItem -LiteralPath $runtimeDir -Filter "python*._pth" -File | Select-Object -First 1
+    $stdlibZip = Get-ChildItem -LiteralPath $runtimeDir -Filter "python*.zip" -File | Select-Object -First 1
+    if (!$pth -or !$stdlibZip) {
+        throw "Embedded Python archive did not contain python*._pth and python*.zip."
+    }
+
+    Write-Utf8NoBom $pth.FullName @"
+$($stdlibZip.Name)
+.
+..\..
+..\..\python
+import site
+"@
+
+    Write-Utf8NoBom (Join-Path $runtimeDir "README-BTX.txt") @"
+Bundled Python runtime for the BTX Windows miner launchers.
+
+The Windows .bat/.ps1 files use this python.exe directly, so users do not need
+Python installed and Windows Store Python aliases do not affect the miner.
+"@
+
+    Assert-File (Join-Path $runtimeDir "python.exe")
 }
 
 function Disable-PackagedPayoutSplits([string]$PythonDest) {
@@ -358,6 +400,10 @@ BTX_WALLET=$ReadyWallet
 
 Edit those two lines before running if you want a different pool or wallet.
 
+The Windows package includes a bundled Python runtime under runtime\python.
+You do not need to install Python, and the launchers do not use the Microsoft
+Store python alias or anything from PATH.
+
 ## Multi-GPU Behavior
 
 The main launcher starts one miner process per visible NVIDIA GPU and sets
@@ -425,6 +471,7 @@ Copy-IfExists $linuxBench (Join-Path $linuxDir "bin\btx-matmul-solve-bench")
 Copy-IfExists $linuxBench (Join-Path $hiveDir "bin\btx-matmul-solve-bench")
 if ($WindowsSolver) {
     Copy-Item -LiteralPath $WindowsSolver -Destination (Join-Path $windowsDir "bin\btx-gbt-solve.exe") -Force
+    Install-WindowsEmbeddedPython $windowsDir
 }
 
 $runOneSh = @'
@@ -1097,18 +1144,16 @@ if (!$env:BTX_MATMUL_CUDA_WAIT_POLICY) { $env:BTX_MATMUL_CUDA_WAIT_POLICY = "blo
 $env:DEXBTX_NO_SOLVER_AUTOUPDATE = "1"
 $env:DEXBTX_NO_WRAPPER_AUTOUPDATE = "1"
 $env:DEXBTX_NO_SOLVER_RECHECK = "1"
-$env:PYTHONPATH = "$root\python;$env:PYTHONPATH"
+$env:PYTHONNOUSERSITE = "1"
+$env:PYTHONPATH = "$root\python;$root;$env:PYTHONPATH"
 
-$python = Get-Command python -ErrorAction SilentlyContinue
-$argsPrefix = @()
-if (!$python) {
-    $python = Get-Command py -ErrorAction SilentlyContinue
-    if (!$python) { throw "Python 3.10+ is required on PATH." }
-    $argsPrefix = @("-3")
+$pythonExe = Join-Path $root "runtime\python\python.exe"
+if (!(Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
+    throw "Bundled Python runtime is missing: $pythonExe. Re-extract the full Windows zip and run START_MINING.bat from inside the extracted folder."
 }
 
 $solver = Join-Path $root "bin\btx-gbt-solve.exe"
-& $python.Source @argsPrefix -m dexbtx_miner `
+& $pythonExe -m dexbtx_miner `
     --pool $Pool `
     --address $Wallet `
     --worker $Worker `
@@ -1145,12 +1190,12 @@ if (Test-Path $envFile) {
 }
 if (!$Wallet) { throw "Set BTX_WALLET in miner.env or pass -Wallet." }
 
-$python = Get-Command python -ErrorAction SilentlyContinue
-$argsPrefix = @()
-if (!$python) {
-    $python = Get-Command py -ErrorAction SilentlyContinue
-    if (!$python) { throw "Python 3.10+ is required on PATH." }
-    $argsPrefix = @("-3")
+$env:PYTHONNOUSERSITE = "1"
+$env:PYTHONPATH = "$root\python;$root;$env:PYTHONPATH"
+
+$pythonExe = Join-Path $root "runtime\python\python.exe"
+if (!(Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
+    throw "Bundled Python runtime is missing: $pythonExe. Re-extract the full Windows zip and run START_MINING.bat from inside the extracted folder."
 }
 
 $solver = Join-Path $root "bin\btx-gbt-solve.exe"
@@ -1180,7 +1225,7 @@ if ($env:BTX_SOLO_RPC_USER) { $soloArgs += @("--rpcuser", $env:BTX_SOLO_RPC_USER
 if ($env:BTX_SOLO_RPC_PASSWORD) { $soloArgs += @("--rpcpassword", $env:BTX_SOLO_RPC_PASSWORD) }
 if ($env:BTX_SOLO_RPC_COOKIE) { $soloArgs += @("--rpccookiefile", $env:BTX_SOLO_RPC_COOKIE) }
 
-& $python.Source @argsPrefix @soloArgs
+& $pythonExe @soloArgs
 exit $LASTEXITCODE
 '@
 
@@ -1281,6 +1326,13 @@ try {
 setlocal
 cd /d "%~dp0"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1" %*
+set "BTX_EXIT=%ERRORLEVEL%"
+if not "%BTX_EXIT%"=="0" (
+  echo.
+  echo Miner exited with code %BTX_EXIT%.
+  pause
+)
+exit /b %BTX_EXIT%
 '@
 
     Write-Utf8NoBom (Join-Path $windowsDir "START_MINING.bat") @"
@@ -1313,6 +1365,13 @@ REM set "BTX_CUDA_POOL_SLOTS=4"
 REM set "BTX_WORKERS_PER_GPU=3"
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
+set "BTX_EXIT=%ERRORLEVEL%"
+if not "%BTX_EXIT%"=="0" (
+  echo.
+  echo Miner exited with code %BTX_EXIT%.
+  pause
+)
+exit /b %BTX_EXIT%
 "@
 
     Write-Utf8NoBom (Join-Path $windowsDir "START_MINEBTX_5090_FOREGROUND.bat") @"
@@ -1341,6 +1400,13 @@ set "BTX_LOG_LEVEL=INFO"
 
 title BTX MineBTX RTX 5090
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
+set "BTX_EXIT=%ERRORLEVEL%"
+if not "%BTX_EXIT%"=="0" (
+  echo.
+  echo Miner exited with code %BTX_EXIT%.
+  pause
+)
+exit /b %BTX_EXIT%
 "@
 }
 
@@ -1446,6 +1512,12 @@ The Windows package includes START_MINING.bat. It defaults to:
 
 Edit those lines in START_MINING.bat before running if you want a different
 pool or payout wallet.
+
+Windows packages now include a bundled Python runtime under runtime\python.
+START_MINING.bat, run.bat, run-one.ps1, and run-solo.ps1 use that bundled
+runtime directly, so Windows miners do not need Python installed and are not
+affected by Microsoft Store Python aliases or a broken PATH. Batch files pause
+on startup failure so the actual error stays visible.
 
 ## GPU Coverage
 
